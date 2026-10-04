@@ -2,6 +2,7 @@ import os
 import time
 import logging
 import jwt
+import requests
 from typing import Dict, Any, Tuple, Optional
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -10,9 +11,10 @@ logger = logging.getLogger(__name__)
 
 
 class GoogleWalletService:
-    """Service to create Google Wallet Loyalty Classes, Objects, and signed JWT save URLs."""
+    """Service to create and update Google Wallet Loyalty Classes, Objects, signed JWT save URLs, and REST API patches."""
 
     SAVE_URL_PREFIX = "https://pay.google.com/gp/v/save/"
+    API_BASE_URL = "https://walletobjects.googleapis.com/walletobjects/v1"
 
     def __init__(
         self,
@@ -71,7 +73,7 @@ class GoogleWalletService:
         return f"{self.issuer_id}.customer_{customer.id}_{token_suffix}"
 
     def create_or_update_class(self, business) -> Dict[str, Any]:
-        """Defines the Google Wallet LoyaltyClass dictionary structure."""
+        """Defines the Google Wallet LoyaltyClass dictionary structure with geofencing support."""
         class_id = self.get_class_id(business)
 
         loyalty_class = {
@@ -95,6 +97,16 @@ class GoogleWalletService:
                     }
                 },
             }
+
+        # Geofencing / Location support for Google Wallet notifications
+        if business.latitude is not None and business.longitude is not None:
+            loyalty_class["locations"] = [
+                {
+                    "kind": "walletobjects#latLongPoint",
+                    "latitude": float(business.latitude),
+                    "longitude": float(business.longitude),
+                }
+            ]
 
         return loyalty_class
 
@@ -144,6 +156,16 @@ class GoogleWalletService:
             ],
         }
 
+        # Geofencing on object level
+        if business.latitude is not None and business.longitude is not None:
+            loyalty_object["locations"] = [
+                {
+                    "kind": "walletobjects#latLongPoint",
+                    "latitude": float(business.latitude),
+                    "longitude": float(business.longitude),
+                }
+            ]
+
         if customer.email:
             loyalty_object["textModulesData"].append({
                 "header": "Email",
@@ -190,3 +212,102 @@ class GoogleWalletService:
         save_url = f"{self.SAVE_URL_PREFIX}{token}"
 
         return token, save_url
+
+    def _get_oauth2_access_token(self) -> Optional[str]:
+        """
+        Generates an OAuth2 access token for Google Wallet REST API calls using Google Service Account assertion.
+        """
+        if self.is_mock_key:
+            return None
+
+        now = int(time.time())
+        claims = {
+            "iss": self.sa_email,
+            "scope": "https://www.googleapis.com/auth/wallet_object.issuer",
+            "aud": "https://oauth2.googleapis.com/token",
+            "exp": now + 3600,
+            "iat": now,
+        }
+
+        assertion = jwt.encode(claims, self.sa_private_key, algorithm="RS256")
+        token_response = requests.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+                "assertion": assertion,
+            },
+            timeout=10,
+        )
+
+        if token_response.status_code == 200:
+            return token_response.json().get("access_token")
+        
+        logger.error("Failed to acquire Google OAuth2 access token: %s", token_response.text)
+        return None
+
+    def update_loyalty_object(self, customer) -> Dict[str, Any]:
+        """
+        Updates the customer's LoyaltyObject in Google Wallet via REST API PATCH.
+        In development / mock mode, logs the patch and returns simulated success.
+        """
+        object_id = self.get_object_id(customer)
+        business = customer.business
+
+        if business.loyalty_type == "stamps":
+            loyalty_points = {
+                "label": "Sellos",
+                "balance": {
+                    "string": f"{customer.current_stamps} / {business.stamps_reward_limit}"
+                },
+            }
+        else:
+            loyalty_points = {
+                "label": "Puntos",
+                "balance": {
+                    "string": f"{customer.current_points:.0f} pts"
+                },
+            }
+
+        patch_body = {
+            "loyaltyPoints": loyalty_points,
+        }
+
+        # In dev/mock mode
+        if self.is_mock_key:
+            logger.info("Dev Mode: Simulated Google Wallet REST PATCH for object %s: %s", object_id, patch_body)
+            return {
+                "status": "mock_success",
+                "object_id": object_id,
+                "patch_body": patch_body,
+                "message": "Actualización de Google Wallet simulada en desarrollo.",
+            }
+
+        access_token = self._get_oauth2_access_token()
+        if not access_token:
+            return {
+                "status": "error",
+                "message": "No se pudo obtener el token OAuth2 de Google.",
+            }
+
+        url = f"{self.API_BASE_URL}/loyaltyObject/{object_id}"
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            resp = requests.patch(url, headers=headers, json=patch_body, timeout=10)
+            if resp.status_code in (200, 204):
+                return {
+                    "status": "success",
+                    "object_id": object_id,
+                    "data": resp.json() if resp.content else {},
+                }
+            return {
+                "status": "api_error",
+                "status_code": resp.status_code,
+                "error": resp.text,
+            }
+        except Exception as e:
+            logger.exception("Error calling Google Wallet PATCH API: %s", e)
+            return {"status": "exception", "error": str(e)}

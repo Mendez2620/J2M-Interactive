@@ -4,6 +4,7 @@ from app.routes.business import business_bp
 from app.routes.customer import customer_bp
 from app.routes.scanner import scanner_bp
 from app.routes.admin import admin_bp
+from app.routes.apple_webservice import apple_ws_bp
 
 # Health Check Blueprint or root API routes
 main_bp = Blueprint("main", __name__)
@@ -26,3 +27,4 @@ def register_routes(app):
     app.register_blueprint(customer_bp)
     app.register_blueprint(scanner_bp)
     app.register_blueprint(admin_bp)
+    app.register_blueprint(apple_ws_bp)

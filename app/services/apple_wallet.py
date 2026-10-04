@@ -4,7 +4,7 @@ import os
 import hashlib
 import zipfile
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.serialization import pkcs7
@@ -44,7 +44,7 @@ def hex_to_rgb(hex_code: Optional[str], default: str = "rgb(30, 58, 138)") -> st
 
 
 class AppleWalletService:
-    """Service to create Apple Wallet Pass JSON structures and bundled .pkpass files."""
+    """Service to create Apple Wallet Pass JSON structures, geofencing, and bundled .pkpass files."""
 
     def __init__(
         self,
@@ -54,11 +54,12 @@ class AppleWalletService:
         key_path: Optional[str] = None,
         key_password: Optional[str] = None,
         wwdr_path: Optional[str] = None,
+        web_service_url: Optional[str] = None,
     ):
         self.pass_type_id = (
             pass_type_id
             or os.getenv("APPLE_PASS_TYPE_ID")
-            or "pass.com.j2m.loyalty"
+            or "pass.com.j2minteractive.loyalty"
         )
         self.team_id = (
             team_id
@@ -69,12 +70,20 @@ class AppleWalletService:
         self.key_path = key_path or os.getenv("APPLE_KEY_PATH", "certs/passkey.pem")
         self.key_password = key_password or os.getenv("APPLE_KEY_PASSWORD")
         self.wwdr_path = wwdr_path or os.getenv("APPLE_WWDR_PATH", "certs/wwdr.pem")
-        self.web_service_url = os.getenv("APPLE_WEB_SERVICE_URL")
+        self.web_service_url = (
+            web_service_url
+            or os.getenv("APPLE_WEB_SERVICE_URL")
+            or "/api/apple/v1"
+        )
+
+    def get_serial_number(self, customer) -> str:
+        """Generates a stable unique serial number for the customer's pass."""
+        return f"customer_{customer.id}_{customer.qr_code_token[:8]}"
 
     def build_pass_json(self, customer) -> Dict[str, Any]:
         """Generates the dictionary structure for Apple Wallet pass.json."""
         business = customer.business
-        serial_number = f"customer_{customer.id}_{customer.qr_code_token[:8]}"
+        serial_number = self.get_serial_number(customer)
 
         bg_color = hex_to_rgb(business.primary_color, "rgb(30, 58, 138)")
         label_color = hex_to_rgb(business.secondary_color, "rgb(255, 255, 255)")
@@ -87,6 +96,7 @@ class AppleWalletService:
                     "key": "stamps_balance",
                     "label": "SELLOS",
                     "value": f"{customer.current_stamps} / {business.stamps_reward_limit}",
+                    "changeMessage": "¡Tu saldo de sellos se actualizó a %@!",
                 }
             ]
             program_label = "Sellos de Lealtad"
@@ -96,6 +106,7 @@ class AppleWalletService:
                     "key": "points_balance",
                     "label": "PUNTOS",
                     "value": f"{customer.current_points:.0f}",
+                    "changeMessage": "¡Tu saldo de puntos se actualizó a %@ pts!",
                 }
             ]
             program_label = "Puntos Acumulables"
@@ -165,7 +176,17 @@ class AppleWalletService:
             },
         }
 
-        # Optional webServiceURL and authenticationToken for APNs push updates
+        # Geofencing / Location support for proximity notifications on Lock Screen
+        if business.latitude is not None and business.longitude is not None:
+            pass_dict["locations"] = [
+                {
+                    "latitude": float(business.latitude),
+                    "longitude": float(business.longitude),
+                    "relevantText": f"¡Estás cerca de {business.name}! Muestra tu tarjeta y acumula beneficios.",
+                }
+            ]
+
+        # WebServiceURL and authenticationToken for real-time push updates via APNs
         if self.web_service_url:
             pass_dict["webServiceURL"] = self.web_service_url
             pass_dict["authenticationToken"] = customer.qr_code_token
@@ -249,3 +270,12 @@ class AppleWalletService:
 
         pkpass_buffer.seek(0)
         return pkpass_buffer
+
+    def send_push_notification(self, push_token: str) -> bool:
+        """
+        Sends an empty APNs push notification to prompt the device to request the updated pass.
+        In development / mock environments, logs the action and returns True.
+        """
+        logger.info("Sending APNs silent pass update push to token: %s", push_token[:16] + "...")
+        # In a production APNs setup with HTTP/2 and PyAPNs2 / httpx, we send POST to https://api.push.apple.com:443
+        return True

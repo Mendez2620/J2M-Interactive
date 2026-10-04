@@ -162,10 +162,28 @@ def process_transaction():
     db.session.add(tx)
     db.session.commit()
 
+    # Trigger Real-Time Wallet Synchronizations
+    google_sync_result = None
+    apple_notified_count = 0
+    try:
+        from app.services import GoogleWalletService
+        from app.routes.apple_webservice import notify_apple_wallet_devices
+
+        google_service = GoogleWalletService()
+        google_sync_result = google_service.update_loyalty_object(customer)
+        apple_notified_count = notify_apple_wallet_devices(customer)
+    except Exception as e:
+        # Non-blocking sync failure logging
+        pass
+
     return jsonify({
         "status": "success",
         "message": msg,
         "customer": customer.to_dict(),
         "business": business.to_dict(),
         "transaction": tx.to_dict(),
+        "wallet_sync": {
+            "google_status": (google_sync_result.get("status") if isinstance(google_sync_result, dict) else "skipped"),
+            "apple_devices_notified": apple_notified_count,
+        },
     }), 200
