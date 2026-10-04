@@ -17,6 +17,13 @@ def init_db():
         print("Database tables created successfully!")
 
 
+@app.cli.command("seed-db")
+def seed_db():
+    """CLI Command to drop, recreate, and seed the database."""
+    from seed import reset_and_seed_database
+    reset_and_seed_database()
+
+
 if __name__ == "__main__":
     host = os.getenv("HOST", "127.0.0.1")
     port = int(os.getenv("PORT", 5000))
