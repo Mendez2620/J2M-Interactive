@@ -1,0 +1,359 @@
+{% extends "base.html" %}
+
+{% block title %}Escáner de Lealtad | J2M Interactive{% endblock %}
+
+{% block head %}
+<!-- html5-qrcode library CDN for fast in-browser QR scanning -->
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+{% endblock %}
+
+{% block content %}
+<div class="min-h-screen bg-slate-950 text-slate-100 flex flex-col max-w-lg mx-auto w-full shadow-2xl border-x border-slate-800">
+  
+  <!-- App Bar -->
+  <header class="p-4 bg-slate-900 border-b border-slate-800 flex items-center justify-between sticky top-0 z-20">
+    <div class="flex items-center space-x-2.5">
+      <div class="w-8 h-8 rounded-lg bg-emerald-500 flex items-center justify-center text-slate-950 font-black text-sm">
+        <i class="fa-solid fa-qrcode"></i>
+      </div>
+      <div>
+        <h1 class="text-sm font-bold text-white leading-none">Terminal de Escaneo</h1>
+        <p class="text-[11px] text-emerald-400 font-medium mt-0.5" id="business-badge">Seleccionar Sucursal</p>
+      </div>
+    </div>
+    
+    <!-- Business selector dropdown -->
+    <select id="active-business-select" class="bg-slate-800 border border-slate-700 text-xs text-white rounded-lg px-2.5 py-1.5 focus:ring-emerald-500">
+      {% for b in businesses %}
+        <option value="{{ b.id }}" data-slug="{{ b.slug }}" data-type="{{ b.loyalty_type }}" data-limit="{{ b.stamps_reward_limit }}" data-ratio="{{ b.points_per_currency }}" data-name="{{ b.name }}">
+          {{ b.name }} ({{ b.loyalty_type|upper }})
+        </option>
+      {% endfor %}
+    </select>
+  </header>
+
+  <!-- Main Scanner & Actions -->
+  <main class="flex-1 p-4 space-y-4 flex flex-col justify-between">
+    
+    <!-- Camera Viewport / Manual Input Area -->
+    <div class="space-y-3">
+      <div class="relative bg-slate-900 rounded-3xl overflow-hidden border border-slate-800 aspect-square flex items-center justify-center shadow-inner">
+        <!-- QR Scanner element -->
+        <div id="reader" class="w-full h-full"></div>
+        
+        <!-- Camera scan guide overlay -->
+        <div id="scan-overlay" class="absolute inset-0 pointer-events-none flex flex-col items-center justify-center p-6">
+          <div class="w-56 h-56 border-2 border-emerald-400/80 rounded-2xl border-dashed animate-pulse flex items-center justify-center">
+            <span class="text-xs text-emerald-300/80 bg-slate-950/80 px-2.5 py-1 rounded-md">Apunta al código QR</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Scanner Controls -->
+      <div class="flex space-x-2">
+        <button id="toggle-camera-btn" onclick="toggleCamera()"
+                class="flex-1 py-2.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-xl text-xs font-bold text-white flex items-center justify-center space-x-1.5 transition">
+          <i class="fa-solid fa-camera"></i>
+          <span id="camera-btn-text">Pausar Cámara</span>
+        </button>
+        <button onclick="toggleManualInput()"
+                class="flex-1 py-2.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-xl text-xs font-bold text-slate-300 flex items-center justify-center space-x-1.5 transition">
+          <i class="fa-solid fa-keyboard"></i>
+          <span>Ingreso Manual / NFC</span>
+        </button>
+      </div>
+
+      <!-- Manual Input Box (Collapsible) -->
+      <div id="manual-input-box" class="hidden bg-slate-900 p-3.5 rounded-2xl border border-slate-800 space-y-2">
+        <label class="block text-[11px] font-bold uppercase tracking-wider text-slate-400">Token del Cliente / ID</label>
+        <div class="flex space-x-2">
+          <input type="text" id="manual-token-input" placeholder="Ej. oWnQ3b_k9..."
+                 class="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:ring-1 focus:ring-emerald-500">
+          <button onclick="searchManualToken()"
+                  class="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold">
+            Buscar
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Scanned Customer Card & Adaptive Actions -->
+    <div id="customer-action-card" class="bg-slate-900 border border-slate-800 rounded-3xl p-5 space-y-4 shadow-xl hidden animate-slide-up">
+      <!-- Header Customer Info -->
+      <div class="flex justify-between items-start border-b border-slate-800 pb-3">
+        <div>
+          <span class="text-[10px] uppercase tracking-wider font-extrabold text-emerald-400 bg-emerald-950/60 px-2 py-0.5 rounded-md border border-emerald-800">
+            Cliente Identificado
+          </span>
+          <h3 class="text-base font-extrabold text-white mt-1.5" id="customer-name-display">-</h3>
+          <p class="text-xs text-slate-400 font-mono" id="customer-contact-display">-</p>
+        </div>
+        <div class="text-right">
+          <p class="text-[10px] text-slate-400 uppercase font-semibold">Saldo Actual</p>
+          <div class="text-xl font-black text-emerald-400" id="customer-balance-display">0</div>
+        </div>
+      </div>
+
+      <!-- Dynamic Section: Stamps Mode -->
+      <div id="stamps-mode-section" class="space-y-3 hidden">
+        <div class="grid grid-cols-2 gap-3">
+          <button onclick="processTransaction('earn_stamp', 1)"
+                  class="py-3 px-4 rounded-2xl bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white font-bold text-sm flex flex-col items-center justify-center shadow-lg shadow-emerald-600/20 transition transform active:scale-95">
+            <i class="fa-solid fa-stamp text-xl mb-1"></i>
+            <span>+1 Sello</span>
+          </button>
+          <button onclick="processTransaction('redeem_stamp', 1)"
+                  class="py-3 px-4 rounded-2xl bg-rose-600 hover:bg-rose-500 active:bg-rose-700 text-white font-bold text-sm flex flex-col items-center justify-center shadow-lg shadow-rose-600/20 transition transform active:scale-95">
+            <i class="fa-solid fa-gift text-xl mb-1"></i>
+            <span>Canjear Premio</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Dynamic Section: Points Mode -->
+      <div id="points-mode-section" class="space-y-3 hidden">
+        <div>
+          <label class="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">
+            Monto de Compra ($)
+          </label>
+          <div class="relative">
+            <span class="absolute inset-y-0 left-0 pl-3.5 flex items-center text-slate-400 font-bold">$</span>
+            <input type="number" step="0.50" id="purchase-amount-input" placeholder="0.00" oninput="calculatePointsPreview()"
+                   class="w-full bg-slate-950 border border-slate-700 rounded-xl pl-8 pr-3 py-2.5 text-sm text-white font-bold focus:ring-2 focus:ring-emerald-500">
+          </div>
+          <p class="text-[11px] text-indigo-400 font-semibold mt-1" id="points-preview">
+            Puntos a otorgar: 0 pts
+          </p>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <button onclick="processPointsEarning()"
+                  class="py-3 px-3 rounded-2xl bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 text-white font-bold text-xs flex items-center justify-center space-x-1.5 shadow-lg shadow-indigo-600/20 transition">
+            <i class="fa-solid fa-plus-circle"></i>
+            <span>Abonar Puntos</span>
+          </button>
+          <button onclick="processPointsRedeem()"
+                  class="py-3 px-3 rounded-2xl bg-amber-600 hover:bg-amber-500 active:bg-amber-700 text-white font-bold text-xs flex items-center justify-center space-x-1.5 shadow-lg shadow-amber-600/20 transition">
+            <i class="fa-solid fa-hand-holding-dollar"></i>
+            <span>Canjear Puntos</span>
+          </button>
+        </div>
+      </div>
+
+      <button onclick="resetCustomerSession()"
+              class="w-full py-2 bg-slate-800 hover:bg-slate-700 rounded-xl text-xs text-slate-400 font-semibold transition">
+        Cerrar / Escanear Siguiente
+      </button>
+    </div>
+
+    <!-- Status Message Alert -->
+    <div id="status-alert" class="hidden p-3 rounded-2xl text-xs font-semibold text-center animate-fade-in"></div>
+
+  </main>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  let html5QrCode = null;
+  let isScanning = false;
+  let currentCustomer = null;
+
+  // Initialize camera scanner
+  function initScanner() {
+    html5QrCode = new Html5Qrcode("reader");
+    startCamera();
+  }
+
+  function startCamera() {
+    const config = { fps: 10, qrbox: { width: 220, height: 220 } };
+    html5QrCode.start(
+      { facingMode: "environment" },
+      config,
+      onScanSuccess,
+      onScanFailure
+    ).then(() => {
+      isScanning = true;
+      document.getElementById('camera-btn-text').textContent = 'Pausar Cámara';
+    }).catch(err => {
+      console.warn("No camera permission or device:", err);
+      document.getElementById('camera-btn-text').textContent = 'Iniciar Cámara';
+    });
+  }
+
+  function toggleCamera() {
+    if (isScanning) {
+      html5QrCode.stop().then(() => {
+        isScanning = false;
+        document.getElementById('camera-btn-text').textContent = 'Iniciar Cámara';
+      });
+    } else {
+      startCamera();
+    }
+  }
+
+  function onScanSuccess(decodedText) {
+    console.log("QR Scanned:", decodedText);
+    lookupCustomer(decodedText);
+  }
+
+  function onScanFailure(error) {
+    // Normal continuous frame search
+  }
+
+  function toggleManualInput() {
+    const box = document.getElementById('manual-input-box');
+    box.classList.toggle('hidden');
+  }
+
+  function searchManualToken() {
+    const token = document.getElementById('manual-token-input').value.trim();
+    if (token) {
+      lookupCustomer(token);
+    }
+  }
+
+  async function lookupCustomer(token) {
+    const select = document.getElementById('active-business-select');
+    const businessId = select.value;
+
+    showStatus("Buscando cliente...", "info");
+
+    try {
+      const res = await fetch('/api/scanner/lookup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: token, business_id: businessId })
+      });
+      const data = await res.json();
+      if (res.ok && data.status === 'success') {
+        currentCustomer = data.customer;
+        renderCustomerCard(data.customer, data.business);
+        showStatus("Cliente encontrado", "success");
+      } else {
+        showStatus(data.message || "Cliente no encontrado.", "error");
+      }
+    } catch (err) {
+      showStatus("Error al consultar el servidor.", "error");
+    }
+  }
+
+  function renderCustomerCard(customer, business) {
+    document.getElementById('customer-name-display').textContent = customer.full_name;
+    document.getElementById('customer-contact-display').textContent = customer.email || customer.phone || `ID: #${customer.id}`;
+
+    const stampsSec = document.getElementById('stamps-mode-section');
+    const pointsSec = document.getElementById('points-mode-section');
+    const balanceDisplay = document.getElementById('customer-balance-display');
+
+    if (business.loyalty_type === 'stamps') {
+      stampsSec.classList.remove('hidden');
+      pointsSec.classList.add('hidden');
+      balanceDisplay.textContent = `${customer.current_stamps} / ${business.stamps_reward_limit} 🏷️`;
+    } else {
+      pointsSec.classList.remove('hidden');
+      stampsSec.classList.add('hidden');
+      balanceDisplay.textContent = `${Math.round(customer.current_points)} pts`;
+    }
+
+    document.getElementById('customer-action-card').classList.remove('hidden');
+  }
+
+  function calculatePointsPreview() {
+    const select = document.getElementById('active-business-select');
+    const ratio = parseFloat(select.selectedOptions[0].dataset.ratio || 1.0);
+    const amount = parseFloat(document.getElementById('purchase-amount-input').value || 0);
+    const pts = Math.round(amount * ratio);
+    document.getElementById('points-preview').textContent = `Puntos a otorgar: ${pts} pts ($${amount} × ${ratio})`;
+  }
+
+  async function processTransaction(action, amount, purchaseAmount = 0.0) {
+    if (!currentCustomer) return;
+
+    const select = document.getElementById('active-business-select');
+    const businessId = select.value;
+
+    showStatus("Procesando transacción...", "info");
+
+    try {
+      const res = await fetch('/api/scanner/process', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          customer_id: currentCustomer.id,
+          business_id: businessId,
+          action: action,
+          amount: amount,
+          purchase_amount: purchaseAmount
+        })
+      });
+      const data = await res.json();
+      if (res.ok && data.status === 'success') {
+        currentCustomer = data.customer;
+        renderCustomerCard(data.customer, data.business);
+        showStatus(data.message, "success");
+      } else {
+        showStatus(data.message || "Error al procesar la transacción.", "error");
+      }
+    } catch (err) {
+      showStatus("Error al conectar con el servidor.", "error");
+    }
+  }
+
+  function processPointsEarning() {
+    const purchaseAmount = parseFloat(document.getElementById('purchase-amount-input').value || 0);
+    if (purchaseAmount <= 0) {
+      alert("Ingresa un monto de compra válido.");
+      return;
+    }
+    const select = document.getElementById('active-business-select');
+    const ratio = parseFloat(select.selectedOptions[0].dataset.ratio || 1.0);
+    const pts = purchaseAmount * ratio;
+    processTransaction('earn_points', pts, purchaseAmount);
+  }
+
+  function processPointsRedeem() {
+    const pts = prompt("¿Cuántos puntos deseas canjear del cliente?", "100");
+    if (pts && !isNaN(pts) && Number(pts) > 0) {
+      processTransaction('redeem_points', Number(pts), 0.0);
+    }
+  }
+
+  function resetCustomerSession() {
+    currentCustomer = null;
+    document.getElementById('customer-action-card').classList.add('hidden');
+    document.getElementById('manual-token-input').value = '';
+    document.getElementById('purchase-amount-input').value = '';
+  }
+
+  function showStatus(msg, type) {
+    const el = document.getElementById('status-alert');
+    el.textContent = msg;
+    el.className = 'p-3 rounded-2xl text-xs font-semibold text-center animate-fade-in ';
+    if (type === 'success') el.className += 'bg-emerald-950/80 text-emerald-300 border border-emerald-800';
+    else if (type === 'error') el.className += 'bg-rose-950/80 text-rose-300 border border-rose-800';
+    else el.className += 'bg-indigo-950/80 text-indigo-300 border border-indigo-800';
+    el.classList.remove('hidden');
+
+    setTimeout(() => {
+      if (el.textContent === msg) el.classList.add('hidden');
+    }, 4000);
+  }
+
+  // Update badge on selector change
+  document.getElementById('active-business-select').addEventListener('change', function() {
+    document.getElementById('business-badge').textContent = this.selectedOptions[0].dataset.name;
+    if (currentCustomer) {
+      lookupCustomer(currentCustomer.qr_code_token);
+    }
+  });
+
+  window.addEventListener('DOMContentLoaded', () => {
+    initScanner();
+    const select = document.getElementById('active-business-select');
+    if (select.selectedOptions.length > 0) {
+      document.getElementById('business-badge').textContent = select.selectedOptions[0].dataset.name;
+    }
+  });
+</script>
+{% endblock %}

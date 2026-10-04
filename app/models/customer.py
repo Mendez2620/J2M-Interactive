@@ -14,6 +14,7 @@ class Customer(db.Model):
     full_name = db.Column(db.String(120), nullable=False)
     email = db.Column(db.String(120), nullable=True, index=True)
     phone = db.Column(db.String(30), nullable=True, index=True)
+    birthdate = db.Column(db.Date, nullable=True)
     current_points = db.Column(db.Float, default=0.0, nullable=False)
     current_stamps = db.Column(db.Integer, default=0, nullable=False)
     qr_code_token = db.Column(
@@ -42,6 +43,7 @@ class Customer(db.Model):
             "full_name": self.full_name,
             "email": self.email,
             "phone": self.phone,
+            "birthdate": self.birthdate.isoformat() if self.birthdate else None,
             "current_points": self.current_points,
             "current_stamps": self.current_stamps,
             "qr_code_token": self.qr_code_token,

@@ -15,6 +15,8 @@ class Business(db.Model):
     loyalty_type = db.Column(db.String(20), default="stamps", nullable=False)  # 'stamps' or 'points'
     points_per_currency = db.Column(db.Float, default=1.0, nullable=False)
     stamps_reward_limit = db.Column(db.Integer, default=10, nullable=False)
+    latitude = db.Column(db.Float, nullable=True)
+    longitude = db.Column(db.Float, nullable=True)
     created_at = db.Column(
         db.DateTime,
         default=lambda: datetime.now(timezone.utc),
@@ -43,6 +45,8 @@ class Business(db.Model):
             "loyalty_type": self.loyalty_type,
             "points_per_currency": self.points_per_currency,
             "stamps_reward_limit": self.stamps_reward_limit,
+            "latitude": self.latitude,
+            "longitude": self.longitude,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 
