@@ -1,8 +1,8 @@
 import logging
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, send_file
 from app.extensions import db
 from app.models import Customer
-from app.services import GoogleWalletService
+from app.services import GoogleWalletService, AppleWalletService
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +72,58 @@ def get_google_wallet_pass(customer_id: int):
             jsonify({
                 "status": "error",
                 "message": f"Error al generar el pase de Google Wallet: {str(e)}"
+            }),
+            500,
+        )
+
+
+@customer_bp.route("/<int:customer_id>/wallet/apple", methods=["GET"])
+def get_apple_wallet_pass(customer_id: int):
+    """
+    Generates and returns an Apple Wallet .pkpass file for a customer.
+    
+    Path params:
+        customer_id (int): ID of the customer
+    Returns:
+        Binary stream (.pkpass) with mimetype 'application/vnd.apple.pkpass'.
+    """
+    customer = db.session.get(Customer, customer_id)
+    if not customer:
+        return (
+            jsonify({
+                "status": "error",
+                "message": f"Cliente con ID {customer_id} no encontrado."
+            }),
+            404,
+        )
+
+    if not customer.business:
+        return (
+            jsonify({
+                "status": "error",
+                "message": f"El cliente {customer_id} no tiene un negocio asociado."
+            }),
+            400,
+        )
+
+    try:
+        apple_service = AppleWalletService()
+        pkpass_stream = apple_service.generate_pkpass(customer)
+        filename = f"{customer.business.slug}-pass.pkpass"
+
+        return send_file(
+            pkpass_stream,
+            mimetype="application/vnd.apple.pkpass",
+            as_attachment=True,
+            download_name=filename,
+        )
+
+    except Exception as e:
+        logger.exception("Error generating Apple Wallet pass for customer %s", customer_id)
+        return (
+            jsonify({
+                "status": "error",
+                "message": f"Error al generar el pase de Apple Wallet: {str(e)}"
             }),
             500,
         )
