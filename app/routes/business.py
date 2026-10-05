@@ -1,5 +1,5 @@
 from datetime import datetime
-from flask import Blueprint, jsonify, render_template, request, url_for
+from flask import Blueprint, jsonify, render_template, request
 from app.extensions import db
 from app.models import Business, Customer
 from app.services import GoogleWalletService
@@ -10,6 +10,18 @@ business_bp = Blueprint("business", __name__)
 @business_bp.route("/api/business/ping", methods=["GET"])
 def ping():
     return jsonify({"message": "Business module ready"}), 200
+
+
+@business_bp.route("/privacy", methods=["GET"])
+def privacy_policy():
+    """Renders the Privacy Policy page."""
+    return render_template("privacy.html")
+
+
+@business_bp.route("/terms", methods=["GET"])
+def terms_and_conditions():
+    """Renders the Terms and Conditions page."""
+    return render_template("terms.html")
 
 
 @business_bp.route("/join/<slug>", methods=["GET", "POST"])
@@ -28,6 +40,15 @@ def join_business(slug: str):
             "base.html",
             content="<div class='p-8 text-center text-rose-600 font-bold'>Negocio no encontrado</div>"
         ), 404
+
+    # Check if business subscription is active
+    if not business.is_active:
+        if request.method == "POST":
+            return jsonify({
+                "status": "error",
+                "message": "El servicio para este negocio se encuentra temporalmente suspendido por suscripción.",
+            }), 403
+        return render_template("join.html", business=business)
 
     if request.method == "GET":
         return render_template("join.html", business=business)

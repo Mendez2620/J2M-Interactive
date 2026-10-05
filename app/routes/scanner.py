@@ -47,6 +47,12 @@ def lookup_customer():
     if not customer:
         return jsonify({"status": "error", "message": "Cliente no encontrado para esta sucursal."}), 404
 
+    if not customer.business.is_active:
+        return jsonify({
+            "status": "error",
+            "message": "La cuenta de este negocio se encuentra temporalmente suspendida o inactiva.",
+        }), 403
+
     return jsonify({
         "status": "success",
         "customer": customer.to_dict(),
@@ -81,6 +87,12 @@ def process_transaction():
     business = customer.business
     if not business:
         return jsonify({"status": "error", "message": "El cliente no tiene un negocio asociado."}), 400
+
+    if not business.is_active:
+        return jsonify({
+            "status": "error",
+            "message": "Operación cancelada: La cuenta de este negocio se encuentra temporalmente inactiva o suspendida.",
+        }), 403
 
     # Execute Transaction based on action
     if action == "earn_stamp":

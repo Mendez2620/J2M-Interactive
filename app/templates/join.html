@@ -23,7 +23,9 @@
         {{ business.name }}
       </h2>
       <p class="mt-1 text-sm font-medium text-slate-500">
-        {% if business.loyalty_type == 'stamps' %}
+        {% if not business.is_active %}
+          <span class="text-rose-500 font-semibold">Servicio temporalmente suspendido</span>
+        {% elif business.loyalty_type == 'stamps' %}
           Colecciona sellos digitales y gana recompensas exclusivas
         {% else %}
           Acumula puntos en cada compra y canjéalos por premios
@@ -31,6 +33,18 @@
       </p>
     </div>
 
+    {% if not business.is_active %}
+    <!-- Inactive Account Notice -->
+    <div class="bg-rose-50 border border-rose-200 rounded-2xl p-5 text-center space-y-2">
+      <div class="w-10 h-10 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center mx-auto text-lg">
+        <i class="fa-solid fa-triangle-exclamation"></i>
+      </div>
+      <h3 class="text-sm font-bold text-rose-900">Programa No Disponible</h3>
+      <p class="text-xs text-rose-700 leading-relaxed">
+        El registro y emisión de nuevas tarjetas para este comercio se encuentra temporalmente inactivo por mantenimiento de cuenta. Por favor, consulta directamente en el establecimiento.
+      </p>
+    </div>
+    {% else %}
     <!-- Registration Card & Form -->
     <div id="registration-section">
       <form id="join-form" method="POST" action="/join/{{ business.slug }}" class="space-y-4">
@@ -87,6 +101,20 @@
           <p class="mt-1 text-xs text-slate-400">¡Recibe promociones y regalos en tu mes de cumpleaños!</p>
         </div>
 
+        <!-- Mandatory Terms & Privacy Checkbox -->
+        <div class="flex items-start pt-1">
+          <div class="flex items-center h-5">
+            <input id="terms_accepted" name="terms_accepted" type="checkbox" required
+                   class="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500">
+          </div>
+          <div class="ml-2.5 text-xs text-slate-500">
+            <label for="terms_accepted">
+              He leído y acepto los <a href="/terms" target="_blank" class="text-indigo-600 font-semibold underline hover:text-indigo-500">Términos y Condiciones</a> 
+              y el <a href="/privacy" target="_blank" class="text-indigo-600 font-semibold underline hover:text-indigo-500">Aviso de Privacidad</a>.
+            </label>
+          </div>
+        </div>
+
         <button type="submit" id="submit-btn"
                 class="w-full flex justify-center items-center py-3.5 px-4 border border-transparent rounded-xl shadow-md text-sm font-bold text-white transition duration-150 transform hover:-translate-y-0.5 active:translate-y-0"
                 style="background-color: {{ business.primary_color }};">
@@ -96,7 +124,7 @@
       </form>
     </div>
 
-    <!-- Success & Wallet Download View (Hidden by default or shown after submit) -->
+    <!-- Success & Wallet Download View -->
     <div id="wallet-success-section" class="hidden space-y-6 text-center animate-fade-in">
       <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-emerald-100 text-emerald-600 text-2xl mb-2">
         <i class="fa-solid fa-circle-check"></i>
@@ -131,15 +159,23 @@
         </p>
       </div>
     </div>
+    {% endif %}
 
   </div>
 </div>
 {% endblock %}
 
 {% block scripts %}
+{% if business.is_active %}
 <script>
   document.getElementById('join-form').addEventListener('submit', async function(e) {
     e.preventDefault();
+    const checkbox = document.getElementById('terms_accepted');
+    if (!checkbox.checked) {
+      alert('Debes aceptar los Términos y Condiciones y el Aviso de Privacidad para continuar.');
+      return;
+    }
+
     const submitBtn = document.getElementById('submit-btn');
     submitBtn.disabled = true;
     submitBtn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin mr-2"></i> Generando tarjeta...';
@@ -178,4 +214,5 @@
     }
   });
 </script>
+{% endif %}
 {% endblock %}

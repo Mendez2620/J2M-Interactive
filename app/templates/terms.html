@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+
+{% block title %}Términos y Condiciones | J2M Interactive{% endblock %}
+
+{% block content %}
+<div class="min-h-screen bg-slate-900 text-slate-100 py-12 px-4 sm:px-6 lg:px-8">
+  <div class="max-w-3xl mx-auto bg-slate-800 border border-slate-700 rounded-3xl p-6 sm:p-10 shadow-2xl space-y-6">
+    
+    <div class="border-b border-slate-700 pb-4 flex justify-between items-center">
+      <div>
+        <h1 class="text-2xl font-extrabold text-white">Términos y Condiciones del Programa</h1>
+        <p class="text-xs text-indigo-400 mt-1">Vigente a partir de Octubre de 2026</p>
+      </div>
+      <a href="/" class="text-xs text-slate-400 hover:text-white transition flex items-center space-x-1">
+        <i class="fa-solid fa-arrow-left"></i>
+        <span>Volver</span>
+      </a>
+    </div>
+
+    <div class="space-y-4 text-sm text-slate-300 leading-relaxed">
+      <h2 class="text-base font-bold text-white">1. Aceptación de los Términos</h2>
+      <p>
+        Al registrarse en el programa de lealtad y guardar la tarjeta digital en su dispositivo móvil (Apple Wallet o Google Wallet), 
+        el usuario acepta plenamente estos Términos y Condiciones.
+      </p>
+
+      <h2 class="text-base font-bold text-white">2. Acumulación y Canje de Beneficios</h2>
+      <p>
+        - <strong>Programa de Sellos:</strong> Se otorga un sello por visita válida o consumo mínimo establecido por el comercio. Al completar la cartilla de sellos, el usuario podrá canjear la recompensa correspondiente en su siguiente consumo.
+      </p>
+      <p>
+        - <strong>Programa de Puntos:</strong> Los puntos se generan según el porcentaje o factor por moneda establecido por el negocio. Los puntos no son transferibles ni canjeables por dinero en efectivo.
+      </p>
+
+      <h2 class="text-base font-bold text-white">3. Notificaciones y Geocercas</h2>
+      <p>
+        Las tarjetas digitales pueden enviar avisos de saldos y notificaciones de proximidad basadas en geolocalización cuando el usuario se encuentre en las inmediaciones del establecimiento físico. El usuario puede deshabilitar estas alertas en la configuración de su billetera en cualquier momento.
+      </p>
+
+      <h2 class="text-base font-bold text-white">4. Vigencia y Modificaciones</h2>
+      <p>
+        El comercio emisor se reserva el derecho de modificar o dar por terminado el programa de recompensas con previo aviso a los miembros.
+      </p>
+    </div>
+
+  </div>
+</div>
+{% endblock %}

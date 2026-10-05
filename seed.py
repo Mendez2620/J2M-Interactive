@@ -2,7 +2,7 @@ import os
 from datetime import date, datetime, timezone
 from app import create_app
 from app.extensions import db
-from app.models import Business, Customer, Staff, Transaction, AppleDevice
+from app.models import Business, BusinessCategory, Customer, Staff, Transaction, AppleDevice
 
 app = create_app(os.getenv("FLASK_ENV", "development"))
 
@@ -16,12 +16,23 @@ def reset_and_seed_database():
         print("Creando nuevas tablas con el esquema actualizado...")
         db.create_all()
 
+        print("Creando categorías de negocio...")
+        cat_rest = BusinessCategory(name="Restaurante", slug="restaurante")
+        cat_bar = BusinessCategory(name="Bar", slug="bar")
+        cat_cafe = BusinessCategory(name="Cafetería", slug="cafeteria")
+        cat_restbar = BusinessCategory(name="Restaurant-Bar", slug="restaurant-bar")
+        cat_boutique = BusinessCategory(name="Boutique / Moda", slug="boutique-moda")
+
+        db.session.add_all([cat_rest, cat_bar, cat_cafe, cat_restbar, cat_boutique])
+        db.session.commit()
+
         print("Insertando datos de prueba...")
 
         # 1. Negocio 1: Programa de Sellos
         cafe = Business(
             name="Café Central",
             slug="cafe-central",
+            category_id=cat_cafe.id,
             logo_url="https://images.unsplash.com/photo-1501339847302-ac426a4a7cbb?w=200&auto=format&fit=crop&q=80",
             primary_color="#78350F",
             secondary_color="#FEF3C7",
@@ -29,12 +40,14 @@ def reset_and_seed_database():
             stamps_reward_limit=8,
             latitude=19.4326,
             longitude=-99.1332,
+            is_active=True,
         )
 
         # 2. Negocio 2: Programa de Puntos
         boutique = Business(
             name="Moda Elegance",
             slug="moda-elegance",
+            category_id=cat_boutique.id,
             logo_url="https://images.unsplash.com/photo-1441986300917-64674bd600d8?w=200&auto=format&fit=crop&q=80",
             primary_color="#4F46E5",
             secondary_color="#EEF2FF",
@@ -42,6 +55,7 @@ def reset_and_seed_database():
             points_per_currency=2.0,
             latitude=19.4200,
             longitude=-99.1600,
+            is_active=True,
         )
 
         db.session.add_all([cafe, boutique])

@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+
+{% block title %}Aviso de Privacidad | J2M Interactive{% endblock %}
+
+{% block content %}
+<div class="min-h-screen bg-slate-900 text-slate-100 py-12 px-4 sm:px-6 lg:px-8">
+  <div class="max-w-3xl mx-auto bg-slate-800 border border-slate-700 rounded-3xl p-6 sm:p-10 shadow-2xl space-y-6">
+    
+    <div class="border-b border-slate-700 pb-4 flex justify-between items-center">
+      <div>
+        <h1 class="text-2xl font-extrabold text-white">Aviso de Privacidad</h1>
+        <p class="text-xs text-indigo-400 mt-1">Última actualización: 4 de Octubre de 2026</p>
+      </div>
+      <a href="/" class="text-xs text-slate-400 hover:text-white transition flex items-center space-x-1">
+        <i class="fa-solid fa-arrow-left"></i>
+        <span>Volver</span>
+      </a>
+    </div>
+
+    <div class="space-y-4 text-sm text-slate-300 leading-relaxed">
+      <h2 class="text-base font-bold text-white">1. Responsable del Tratamiento de Datos</h2>
+      <p>
+        <strong>J2M Interactive</strong> y sus comercios afiliados son responsables del uso y protección de sus datos personales. 
+        Este documento describe la forma en que recabamos y utilizamos la información recabada a través de nuestras tarjetas digitales y formularios de lealtad.
+      </p>
+
+      <h2 class="text-base font-bold text-white">2. Datos Personales Recabados</h2>
+      <p>
+        Para la emisión y sincronización de su tarjeta de lealtad digital en Apple Wallet y Google Wallet, podemos recabar:
+      </p>
+      <ul class="list-disc pl-5 space-y-1 text-slate-400">
+        <li>Nombre completo</li>
+        <li>Dirección de correo electrónico</li>
+        <li>Número de teléfono móvil</li>
+        <li>Fecha de nacimiento (para promociones y beneficios de cumpleaños)</li>
+        <li>Historial de compras, puntos y sellos acumulados</li>
+      </ul>
+
+      <h2 class="text-base font-bold text-white">3. Finalidades del Tratamiento</h2>
+      <p>
+        Los datos personales son utilizados exclusivamente para:
+      </p>
+      <ul class="list-disc pl-5 space-y-1 text-slate-400">
+        <li>Administrar su cuenta y saldo en el programa de recompensas del comercio emisor.</li>
+        <li>Emitir, actualizar y enviar notificaciones push a su tarjeta en Apple Wallet y Google Wallet.</li>
+        <li>Hacer efectivas promociones de cumpleaños y beneficios exclusivos.</li>
+      </ul>
+
+      <h2 class="text-base font-bold text-white">4. Ejercicio de Derechos ARCO</h2>
+      <p>
+        Usted tiene derecho a Acceder, Rectificar, Cancelar u Oponerse al tratamiento de sus datos personales enviando una solicitud a 
+        <a href="mailto:privacidad@j2minteractive.com" class="text-indigo-400 underline">privacidad@j2minteractive.com</a>.
+      </p>
+    </div>
+
+  </div>
+</div>
+{% endblock %}
