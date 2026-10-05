@@ -20,6 +20,7 @@ class Business(db.Model):
     stamps_reward_limit = db.Column(db.Integer, default=10, nullable=False)
     latitude = db.Column(db.Float, nullable=True)
     longitude = db.Column(db.Float, nullable=True)
+    cooldown_minutes = db.Column(db.Integer, default=60, nullable=False)  # anti-fraude cooldown
     is_active = db.Column(db.Boolean, default=True, nullable=False)
     created_at = db.Column(
         db.DateTime,

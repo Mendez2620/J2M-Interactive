@@ -25,4 +25,11 @@ def create_app(config_name=None):
     # Register routes / blueprints
     register_routes(app)
 
+    # Register CLI commands
+    @app.cli.command('check-birthdays')
+    def check_birthdays():
+        """Execute the daily birthday campaign."""
+        from app.services.birthday_service import BirthdayService
+        sent = BirthdayService.run_daily_campaign()
+        print(f'Sent {sent} birthday greetings')
     return app

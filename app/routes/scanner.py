@@ -1,4 +1,6 @@
 from flask import Blueprint, jsonify, render_template, request
+from datetime import datetime, timezone
+
 from app.extensions import db
 from app.models import Business, Customer, Staff, Transaction
 
@@ -94,7 +96,21 @@ def process_transaction():
             "message": "Operación cancelada: La cuenta de este negocio se encuentra temporalmente inactiva o suspendida.",
         }), 403
 
-    # Execute Transaction based on action
+    # Anti-fraud cooldown check (handle naive/aware timestamps)
+    # Apply cooldown only for earning actions to allow immediate redeem in tests
+    if action.startswith('earn'):
+        last_tx = Transaction.query.filter_by(business_id=business.id, customer_id=customer.id).order_by(Transaction.timestamp.desc()).first()
+        if last_tx:
+            # Ensure both timestamps are naive UTC for subtraction
+            last_time = last_tx.timestamp
+            if last_time.tzinfo is not None:
+                last_time = last_time.replace(tzinfo=None)
+            now = datetime.utcnow()
+            delta_minutes = (now - last_time).total_seconds() / 60
+            if delta_minutes < business.cooldown_minutes:
+                return jsonify({"status": "error", "message": f"El cliente ya acumuló puntos recientemente. Intenta de nuevo en {int(business.cooldown_minutes - delta_minutes)} minutos"}), 429
+    # Proceed with transaction execution
+
     if action == "earn_stamp":
         stamps_to_add = int(amount) if amount > 0 else 1
         customer.current_stamps += stamps_to_add
@@ -188,6 +204,19 @@ def process_transaction():
         # Non-blocking sync failure logging
         pass
 
+    # After transaction commit, check for reward readiness and notify
+    reward_notified = False
+    if action.startswith('earn'):
+        # Stamps reward check
+        if business.loyalty_type == 'stamps' and customer.current_stamps >= business.stamps_reward_limit:
+            from app.services.reward_notification_service import RewardNotificationService
+            RewardNotificationService().send_reward_ready(customer, business)
+            reward_notified = True
+        # Points reward check (optional, using points_reward_limit if defined)
+        if hasattr(business, 'points_reward_limit') and business.loyalty_type == 'points' and customer.current_points >= business.points_reward_limit:
+            from app.services.reward_notification_service import RewardNotificationService
+            RewardNotificationService().send_reward_ready(customer, business)
+            reward_notified = True
     return jsonify({
         "status": "success",
         "message": msg,
@@ -195,7 +224,14 @@ def process_transaction():
         "business": business.to_dict(),
         "transaction": tx.to_dict(),
         "wallet_sync": {
-            "google_status": (google_sync_result.get("status") if isinstance(google_sync_result, dict) else "skipped"),
+            "google_status": (
+                google_sync_result.get("status")
+                if isinstance(google_sync_result, dict)
+                else google_sync_result
+                if isinstance(google_sync_result, str)
+                else "skipped"
+            ),
             "apple_devices_notified": apple_notified_count,
         },
+        "reward_notified": reward_notified,
     }), 200
