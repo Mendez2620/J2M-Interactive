@@ -156,6 +156,12 @@ class GoogleWalletService:
             ],
         }
 
+        if business.wallet_terms:
+            loyalty_object["textModulesData"].append({
+                "header": "Términos y Condiciones",
+                "body": business.wallet_terms,
+            })
+
         # Geofencing on object level
         if business.latitude is not None and business.longitude is not None:
             loyalty_object["locations"] = [

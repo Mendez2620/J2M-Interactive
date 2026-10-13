@@ -48,20 +48,34 @@ def calculate_age_distribution():
 @admin_bp.route("", methods=["GET"])
 @admin_bp.route("/dashboard", methods=["GET"])
 def dashboard():
-    """Super Admin Dashboard view with cross-tenant analytics and business listings."""
-    businesses = Business.query.order_by(Business.created_at.desc()).all()
-    total_businesses = len(businesses)
+    """Super Admin Clean Dashboard with business search, category filter, and pagination."""
+    page = request.args.get("page", 1, type=int)
+    per_page = 10
+    search = (request.args.get("q") or "").strip()
+    category_id = request.args.get("category_id", type=int)
+
+    query = Business.query
+    if search:
+        query = query.filter(Business.name.ilike(f"%{search}%"))
+    if category_id:
+        query = query.filter(Business.category_id == category_id)
+
+    query = query.order_by(Business.created_at.desc())
+    pagination = query.paginate(page=page, per_page=per_page, error_out=False)
+    businesses = pagination.items
+
+    total_businesses = Business.query.count()
     total_customers = Customer.query.count()
     total_transactions = Transaction.query.count()
-    
-    total_volume_query = db.session.query(db.func.sum(Transaction.purchase_amount)).scalar()
-    total_purchase_volume = float(total_volume_query or 0.0)
-
-    age_stats = calculate_age_distribution()
-    staff_list = Staff.query.order_by(Staff.created_at.desc()).all()
     categories = BusinessCategory.query.order_by(BusinessCategory.name).all()
 
+    # Preserved JSON response for testing / API clients
     if request.is_json or request.headers.get("Accept") == "application/json":
+        all_businesses = Business.query.order_by(Business.created_at.desc()).all()
+        total_volume_query = db.session.query(db.func.sum(Transaction.purchase_amount)).scalar()
+        total_purchase_volume = float(total_volume_query or 0.0)
+        age_stats = calculate_age_distribution()
+        staff_list = Staff.query.order_by(Staff.created_at.desc()).all()
         return jsonify({
             "status": "success",
             "metrics": {
@@ -71,21 +85,21 @@ def dashboard():
                 "total_purchase_volume": total_purchase_volume,
                 "age_distribution": age_stats,
             },
-            "businesses": [b.to_dict() for b in businesses],
+            "businesses": [b.to_dict() for b in all_businesses],
             "staff": [s.to_dict() for s in staff_list],
             "categories": [c.to_dict() for c in categories],
         }), 200
 
     return render_template(
         "admin/dashboard.html",
+        businesses=businesses,
+        pagination=pagination,
+        categories=categories,
         total_businesses=total_businesses,
         total_customers=total_customers,
         total_transactions=total_transactions,
-        total_purchase_volume=total_purchase_volume,
-        age_stats=age_stats,
-        businesses=businesses,
-        staff_list=staff_list,
-        categories=categories,
+        current_search=search,
+        current_category=category_id,
     )
 
 
@@ -119,6 +133,9 @@ def create_business():
     logo_url = data.get("logo_url") or None
     latitude = float(data.get("latitude")) if data.get("latitude") is not None and str(data.get("latitude")).strip() != "" else None
     longitude = float(data.get("longitude")) if data.get("longitude") is not None and str(data.get("longitude")).strip() != "" else None
+    cooldown_minutes = int(data.get("cooldown_minutes") or 60)
+    reward_description = (data.get("reward_description") or "Recompensa de lealtad").strip()
+    wallet_terms = (data.get("wallet_terms") or "").strip() or None
     is_active = True if str(data.get("is_active", "true")).lower() in ("true", "1", "t") else False
 
     business = Business(
@@ -133,6 +150,9 @@ def create_business():
         stamps_reward_limit=stamps_reward_limit,
         latitude=latitude,
         longitude=longitude,
+        cooldown_minutes=cooldown_minutes,
+        reward_description=reward_description,
+        wallet_terms=wallet_terms,
         is_active=is_active,
     )
     db.session.add(business)
@@ -147,15 +167,16 @@ def create_business():
 
 @admin_bp.route("/business/<int:business_id>", methods=["GET"])
 def get_business_details(business_id: int):
-    """Detailed analytics, audit log, customer list, and staff for a specific business."""
+    """Detailed modular view with tabs for a specific business."""
     business = db.session.get(Business, business_id)
     if not business:
         return jsonify({"status": "error", "message": "Negocio no encontrado"}), 404
 
     customers = business.customers.order_by(Customer.created_at.desc()).all()
     transactions = business.transactions.order_by(Transaction.timestamp.desc()).all()
-    staff_members = business.staff_members.all()
+    staff_members = business.staff_members.order_by(Staff.created_at.desc()).all()
     total_volume = sum(t.purchase_amount for t in transactions)
+    categories = BusinessCategory.query.order_by(BusinessCategory.name).all()
 
     if request.is_json or request.headers.get("Accept") == "application/json":
         return jsonify({
@@ -175,11 +196,86 @@ def get_business_details(business_id: int):
     return render_template(
         "admin/business_detail.html",
         business=business,
+        categories=categories,
         customers=customers,
         transactions=transactions,
         staff_members=staff_members,
         total_volume=total_volume,
     )
+
+
+@admin_bp.route("/business/<int:business_id>/update", methods=["POST"])
+def update_business(business_id: int):
+    """Updates general, wallet, or loyalty rules for a business."""
+    business = db.session.get(Business, business_id)
+    if not business:
+        return jsonify({"status": "error", "message": "Negocio no encontrado"}), 404
+
+    data = request.get_json(silent=True) or request.form.to_dict()
+
+    if "name" in data and data["name"].strip():
+        business.name = data["name"].strip()
+    if "slug" in data and data["slug"].strip():
+        new_slug = data["slug"].strip().lower()
+        existing = Business.query.filter(Business.slug == new_slug, Business.id != business.id).first()
+        if existing:
+            return jsonify({"status": "error", "message": f"El slug '{new_slug}' ya está en uso."}), 409
+        business.slug = new_slug
+    if "category_id" in data:
+        try:
+            business.category_id = int(data["category_id"]) if data["category_id"] else None
+        except (ValueError, TypeError):
+            business.category_id = None
+    if "logo_url" in data:
+        business.logo_url = data["logo_url"].strip() or None
+    if "primary_color" in data and data["primary_color"].strip():
+        business.primary_color = data["primary_color"].strip()
+    if "secondary_color" in data and data["secondary_color"].strip():
+        business.secondary_color = data["secondary_color"].strip()
+    if "latitude" in data:
+        try:
+            business.latitude = float(data["latitude"]) if str(data["latitude"]).strip() != "" else None
+        except (ValueError, TypeError):
+            business.latitude = None
+    if "longitude" in data:
+        try:
+            business.longitude = float(data["longitude"]) if str(data["longitude"]).strip() != "" else None
+        except (ValueError, TypeError):
+            business.longitude = None
+    if "wallet_terms" in data:
+        business.wallet_terms = data["wallet_terms"].strip() or None
+    if "loyalty_type" in data and data["loyalty_type"].strip():
+        business.loyalty_type = data["loyalty_type"].strip()
+    if "points_per_currency" in data:
+        try:
+            business.points_per_currency = float(data["points_per_currency"])
+        except (ValueError, TypeError):
+            pass
+    if "stamps_reward_limit" in data:
+        try:
+            business.stamps_reward_limit = int(data["stamps_reward_limit"])
+        except (ValueError, TypeError):
+            pass
+    if "reward_description" in data:
+        business.reward_description = data["reward_description"].strip() or None
+    if "cooldown_minutes" in data:
+        try:
+            business.cooldown_minutes = max(0, int(data["cooldown_minutes"]))
+        except (ValueError, TypeError):
+            pass
+    if "is_active" in data:
+        business.is_active = True if str(data["is_active"]).lower() in ("true", "1", "t", "on") else False
+
+    db.session.commit()
+
+    if request.is_json or request.headers.get("Accept") == "application/json":
+        return jsonify({
+            "status": "success",
+            "message": "Negocio actualizado correctamente.",
+            "business": business.to_dict(),
+        }), 200
+
+    return redirect(f"/admin/business/{business.id}")
 
 
 @admin_bp.route("/business/<int:business_id>/toggle-status", methods=["POST"])
@@ -200,7 +296,8 @@ def toggle_business_status(business_id: int):
             "is_active": business.is_active,
         }), 200
 
-    return redirect(f"/admin/business/{business.id}")
+    next_url = request.args.get("next") or request.referrer or f"/admin/business/{business.id}"
+    return redirect(next_url)
 
 
 @admin_bp.route("/business/<int:business_id>/export/excel", methods=["GET"])
@@ -278,11 +375,53 @@ def create_staff(business_id: int):
     db.session.add(staff_member)
     db.session.commit()
 
-    return jsonify({
-        "status": "success",
-        "message": f"Usuario de staff '{username}' ({role}) creado exitosamente.",
-        "staff": staff_member.to_dict(),
-    }), 201
+    if request.is_json or request.headers.get("Accept") == "application/json":
+        return jsonify({
+            "status": "success",
+            "message": f"Usuario de staff '{username}' ({role}) creado exitosamente.",
+            "staff": staff_member.to_dict(),
+        }), 201
+
+    return redirect(f"/admin/business/{business.id}?tab=staff")
+
+
+@admin_bp.route("/staff/<int:staff_id>/toggle-status", methods=["POST"])
+def toggle_staff_status(staff_id: int):
+    """Activates or deactivates a staff member."""
+    staff = db.session.get(Staff, staff_id)
+    if not staff:
+        return jsonify({"status": "error", "message": "Usuario no encontrado"}), 404
+
+    staff.is_active = not staff.is_active
+    db.session.commit()
+
+    if request.is_json or request.headers.get("Accept") == "application/json":
+        return jsonify({
+            "status": "success",
+            "message": "Estado de usuario actualizado.",
+            "is_active": staff.is_active,
+        }), 200
+
+    next_url = request.args.get("next") or request.referrer or f"/admin/business/{staff.business_id}?tab=staff"
+    return redirect(next_url)
+
+
+@admin_bp.route("/staff/<int:staff_id>/delete", methods=["POST"])
+def delete_staff(staff_id: int):
+    """Deletes a staff member."""
+    staff = db.session.get(Staff, staff_id)
+    if not staff:
+        return jsonify({"status": "error", "message": "Usuario no encontrado"}), 404
+
+    business_id = staff.business_id
+    db.session.delete(staff)
+    db.session.commit()
+
+    if request.is_json or request.headers.get("Accept") == "application/json":
+        return jsonify({"status": "success", "message": "Usuario eliminado."}), 200
+
+    next_url = request.args.get("next") or request.referrer or f"/admin/business/{business_id}?tab=staff"
+    return redirect(next_url)
 
 
 @admin_bp.route("/staff", methods=["GET"])

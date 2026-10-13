@@ -21,6 +21,8 @@ class Business(db.Model):
     latitude = db.Column(db.Float, nullable=True)
     longitude = db.Column(db.Float, nullable=True)
     cooldown_minutes = db.Column(db.Integer, default=60, nullable=False)  # anti-fraude cooldown
+    reward_description = db.Column(db.String(255), default="Recompensa de lealtad", nullable=True)
+    wallet_terms = db.Column(db.Text, nullable=True)
     is_active = db.Column(db.Boolean, default=True, nullable=False)
     created_at = db.Column(
         db.DateTime,
@@ -55,6 +57,9 @@ class Business(db.Model):
             "stamps_reward_limit": self.stamps_reward_limit,
             "latitude": self.latitude,
             "longitude": self.longitude,
+            "cooldown_minutes": self.cooldown_minutes,
+            "reward_description": self.reward_description or "Recompensa de lealtad",
+            "wallet_terms": self.wallet_terms or f"Presenta esta tarjeta digital en cada visita a {self.name} para acumular beneficios exclusivos.",
             "is_active": self.is_active,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }

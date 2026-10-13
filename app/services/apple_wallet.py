@@ -132,14 +132,16 @@ class AppleWalletService:
             },
         ]
 
+        terms_text = business.wallet_terms or (
+            f"Presenta esta tarjeta digital en cada visita a {business.name} "
+            "para acumular beneficios exclusivos."
+        )
+
         back_fields = [
             {
                 "key": "terms",
                 "label": "Términos y Condiciones",
-                "value": (
-                    f"Presenta esta tarjeta digital en cada visita a {business.name} "
-                    "para acumular beneficios exclusivos."
-                ),
+                "value": terms_text,
             },
             {
                 "key": "customer_support",
