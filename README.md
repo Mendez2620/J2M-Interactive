@@ -19,7 +19,7 @@ Plataforma SaaS Multi-Tenant para la emisión, gestión y sincronización en tie
   - Entrega del pase `.pkpass` actualizado en la pantalla de bloqueo de iOS.
 - 📍 **Geofencing & Notificaciones de Proximidad**: Muestra la tarjeta automáticamente en la pantalla bloqueada del cliente cuando se aproxima a la sucursal física.
 - 🎂 **Registro Público con Cumpleaños (`/join/<slug>`)**: Onboarding responsivo para clientes con captura de fecha de nacimiento y botones directos de guardado en Wallet.
-- 📊 **Panel Super Admin (`/admin`)**: Dashboard con KPIs consolidados, volumen de ventas, métricas por sucursal, distribución demográfica por edades y gestión de usuarios (Gerentes y Cajeros).
+- 📊 **Panel Super Admin (`/admin`)**: acceso por sesión y CSRF para administradores globales separados del staff de cada negocio; incluye KPIs, branding y gestión de usuarios.
 - 📷 **Web App de Escaneo Adaptativa (`/scanner`)**: Terminal móvil con lector de cámara QR (`html5-qrcode`), entrada manual / NFC, y botones de transacción adaptados al programa del negocio.
 
 ---
@@ -105,23 +105,30 @@ cp .env.example .env
 
 En desarrollo local, el sistema utiliza **SQLite** (`sqlite:///j2m_loyalty.db`) y genera automáticamente claves criptográficas transitorias si no se configuran certificados reales.
 
-### 5. Iniciar la aplicación
+### 5. Aplicar migraciones y crear el primer administrador
+```bash
+python -m flask --app run.py db upgrade
+python -m flask --app run.py create-platform-admin
+```
+El comando solicita nombre, correo, teléfono y contraseña sin incorporar secretos al código. La contraseña debe tener al menos 12 caracteres, mayúsculas, minúsculas y un número. Producción se niega a iniciar con la clave predeterminada o con una `SECRET_KEY` menor de 32 caracteres, fuerza `DEBUG=False` y debe usar `SESSION_COOKIE_SECURE=true` bajo HTTPS.
+
+### 6. Iniciar la aplicación
 ```bash
 python run.py
 ```
 La aplicación estará disponible en:
 - **Página de Escáner**: `http://127.0.0.1:5000/scanner`
-- **Panel Super Admin**: `http://127.0.0.1:5000/admin`
+- **Login Super Admin**: `http://127.0.0.1:5000/admin/login`
 - **Health Check**: `http://127.0.0.1:5000/api/health`
 
 ---
 
 ## 🧪 Ejecución de Pruebas Unitarias
 
-El proyecto cuenta con una suite completa de **18 pruebas unitarias e integración**:
+El proyecto cuenta con una suite completa de **47 pruebas unitarias e integración**. El mismo comando se ejecuta automáticamente en GitHub Actions para pushes y pull requests:
 
 ```bash
-python -m unittest discover tests
+python -m unittest discover tests -v
 ```
 
 ---
@@ -134,7 +141,12 @@ python -m unittest discover tests
 | `GET` | `/join/<slug>` | Página pública de registro de clientes |
 | `POST` | `/join/<slug>` | Procesa registro, guarda cumpleaños y retorna enlaces a Wallets |
 | `GET` | `/admin` | Panel de Control Super Admin con métricas demográficas |
+| `GET/POST` | `/admin/login` | Inicio de sesión del administrador global |
+| `POST` | `/admin/logout` | Cierre de sesión administrativa |
+| `POST` | `/admin/users/create` | Alta de administrador global |
+| `POST` | `/admin/users/edit/<id>` | Edición de administrador global (el nombre histórico del parámetro es `staff_id`) |
 | `POST` | `/admin/business/<id>/staff` | Creación de Gerentes y Cajeros |
+| `POST` | `/admin/staff/<id>/reset-password` | Restablecimiento no destructivo de contraseña de staff |
 | `GET` | `/scanner` | Terminal web de escaneo QR adaptativa |
 | `POST` | `/api/scanner/lookup` | Búsqueda de cliente por QR token, ID o teléfono |
 | `POST` | `/api/scanner/process` | Procesa abono/canje y dispara sincronización en tiempo real |
@@ -146,6 +158,18 @@ python -m unittest discover tests
 ---
 
 ## 🔐 Configuración para Producción
+
+### Imágenes de negocios
+Los formularios administrativos aceptan `logo_file` y `cover_file` en PNG, JPG o WEBP, con máximo de 5 MB por imagen y 12 MB por solicitud. Pillow decodifica y verifica el contenido real antes de escribir el lote completo; si una imagen o el commit falla, se eliminan solamente los archivos recién creados. Se guardan con nombres únicos bajo `app/static/uploads/`, directorio excluido de Git. La vista pública usa el logo y la portada subidos; `logo_url` continúa disponible como alternativa remota.
+
+Google Wallet usa el archivo local únicamente cuando `PUBLIC_BASE_URL` contiene la URL pública HTTPS del despliegue. Apple Wallet convierte el logo y portada validados a recursos PNG del paquete. La aceptación final por Google, las dimensiones/revisión visual de Apple y la distribución real siguen dependiendo de credenciales, consolas y dispositivos externos.
+
+### Limitación de downgrade inicial
+
+La revisión inicial `9a85c3791398` funciona tanto como bootstrap de una base vacía como actualización de una base heredada. Por ello `flask db downgrade` está bloqueado deliberadamente en esa revisión: no existe información histórica suficiente para distinguir qué tablas pertenecían previamente a una instalación heredada. El bloqueo ocurre antes de eliminar columnas o tablas. Para revertir, restaura un backup verificado en lugar de ejecutar una eliminación destructiva.
+
+### Seguridad pendiente de las APIs operativas
+El login web administrativo sí usa sesiones seguras y comprobación de cuenta activa. En cambio, `/api/scanner/login` aún devuelve un token simulado y las rutas de manager confían en un `staff_id` enviado por el cliente; no deben considerarse mecanismos de producción. La siguiente prioridad es emitir JWT firmados con expiración/rotación, validar el token en cada operación y derivar `staff_id` y `business_id` exclusivamente de sus claims, incluyendo pruebas de aislamiento entre tenants.
 
 ### Google Wallet
 1. En **Google Cloud Console**, habilita la **Google Wallet API**.
@@ -171,6 +195,8 @@ python -m unittest discover tests
    APPLE_WWDR_PATH=certs/wwdr.pem
    APPLE_WEB_SERVICE_URL=https://api.tudominio.com/api/apple/v1
    ```
+
+Sin credenciales reales, las pruebas usan el modo mock de Wallet: validan estructura de pases, JWT y llamadas simuladas, pero no prueban emisión efectiva en cuentas de Google/Apple, APNs ni instalación en dispositivos físicos.
 
 ---
 

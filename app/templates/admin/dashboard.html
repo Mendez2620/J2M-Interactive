@@ -31,6 +31,12 @@
           <i class="fa-solid fa-plus text-xs"></i>
           <span>Nuevo Negocio</span>
         </button>
+        <!-- Ajustes button -->
+        <button id="settingsBtn" class="inline-flex items-center space-x-1.5 px-3.5 py-1.5 rounded-lg bg-slate-200 hover:bg-slate-300 text-xs font-semibold text-slate-800 shadow-sm transition" onclick="openSettingsModal()">
+          <i class="fa-solid fa-gear"></i>
+          <span>Ajustes ⚙️</span>
+        </button>
+        <form method="POST" action="/admin/logout"><button class="text-xs font-semibold text-slate-500 hover:text-slate-900" title="Cerrar sesión"><i class="fa-solid fa-right-from-bracket"></i></button></form>
       </div>
     </div>
   </header>
@@ -260,14 +266,18 @@
         </button>
       </div>
 
-      <form id="createBusinessForm" class="space-y-4">
+      <form id="createBusinessForm" class="space-y-4" enctype="multipart/form-data">
         <div>
           <label class="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">Nombre Comercial</label>
           <input type="text" id="bName" name="name" required placeholder="Ej. Restaurante La Parroquia"
                  class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900 focus:outline-none focus:bg-white focus:ring-2 focus:ring-slate-900">
         </div>
-
         <div class="grid grid-cols-2 gap-3">
+          <div><label class="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">Archivo de logo</label><input type="file" name="logo_file" accept="image/png,image/jpeg,image/webp" class="w-full text-xs" onchange="previewUpload(this, 'logoPreview')"><img id="logoPreview" class="hidden mt-2 h-20 max-w-full object-contain rounded border" alt="Vista previa del logo"></div>
+          <div><label class="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">Imagen de portada</label><input type="file" name="cover_file" accept="image/png,image/jpeg,image/webp" class="w-full text-xs" onchange="previewUpload(this, 'coverPreview')"><img id="coverPreview" class="hidden mt-2 h-20 w-full object-cover rounded border" alt="Vista previa de la portada"></div>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
             <label class="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">Slug URL</label>
             <input type="text" id="bSlug" name="slug" required placeholder="la-parroquia"
@@ -319,10 +329,16 @@
               <option value="points">Puntos (Points)</option>
             </select>
           </div>
-          <div>
-            <label class="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">Límite Sellos / Ratio</label>
-            <input type="number" id="bLimitRatio" name="limit_ratio" value="10" step="0.5"
+          <div id="createStampsBlock">
+            <label class="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">Límite de Sellos</label>
+            <input type="number" id="bStampsLimit" name="stamps_reward_limit" value="10" min="1" step="1"
                    class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900 focus:outline-none focus:bg-white focus:ring-2 focus:ring-slate-900">
+            <p class="text-[11px] text-slate-500 mt-1">Número entero positivo de sellos para obtener la recompensa.</p>
+          </div>
+          <div id="createPointsBlock" class="hidden">
+            <label class="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">Puntos por unidad monetaria</label>
+            <input type="number" id="bPointsRate" name="points_per_currency" value="1" min="0.1" step="0.1" class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm">
+            <p class="text-[11px] text-slate-500 mt-1">Este negocio opera bajo el esquema de Puntos. El límite de sellos no aplica.</p>
           </div>
         </div>
 
@@ -354,7 +370,91 @@
   </div>
 
 </div>
+<!-- Settings Modal -->
+<div id="settingsModal" class="fixed inset-0 bg-slate-900/50 backdrop-blur-xs z-50 hidden flex items-center justify-center p-4">
+  <div class="bg-white border border-slate-200 rounded-2xl max-w-lg w-full p-6 shadow-xl space-y-5 max-h-[90vh] overflow-y-auto">
+    <div class="flex justify-between items-center border-b border-slate-100 pb-3">
+      <div>
+        <h3 class="text-base font-bold text-slate-900">Configuración de Administradores</h3>
+        <p class="text-xs text-slate-500">Agregar o editar usuarios administradores.</p>
+      </div>
+      <button onclick="closeSettingsModal()" class="text-slate-400 hover:text-slate-700 text-lg p-1">
+        <i class="fa-solid fa-xmark"></i>
+      </button>
+    </div>
+    <!-- Tabs -->
+    <div class="flex border-b border-slate-200 mb-4">
+      <button class="px-4 py-2 text-sm font-medium border-b-2 border-slate-900" id="addAdminTabBtn" onclick="showAddAdminTab()">Agregar Administrador</button>
+      <button class="px-4 py-2 text-sm font-medium" id="editAdminTabBtn" onclick="showEditAdminTab()">Editar Administrador</button>
+    </div>
+    <!-- Add Admin Form -->
+    <form id="addAdminForm" class="space-y-4" onsubmit="return submitAddAdmin(event)">
+      <div>
+        <label class="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">Nombre</label>
+        <input type="text" name="name" required class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900 focus:outline-none focus:bg-white focus:ring-2 focus:ring-slate-900" />
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">Correo</label>
+        <input type="email" name="email" required class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900 focus:outline-none focus:bg-white focus:ring-2 focus:ring-slate-900" />
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">Teléfono</label>
+        <input type="text" name="phone" class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900 focus:outline-none focus:bg-white focus:ring-2 focus:ring-slate-900" />
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">Contraseña</label>
+        <input type="password" name="password" required minlength="12" class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900 focus:outline-none focus:bg-white focus:ring-2 focus:ring-slate-900" />
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">Confirmar contraseña</label>
+        <input type="password" name="password_confirmation" required minlength="12" class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm" />
+      </div>
+      <div class="flex justify-end space-x-2">
+        <button type="button" onclick="closeSettingsModal()" class="px-3 py-1.5 text-sm bg-slate-200 hover:bg-slate-300 rounded">Cancelar</button>
+        <button type="submit" class="px-3 py-1.5 text-sm bg-slate-900 hover:bg-slate-800 text-white rounded">Crear</button>
+      </div>
+    </form>
+    <!-- Edit Admin Form -->
+    <form id="editAdminForm" class="space-y-4 hidden" onsubmit="return submitEditAdmin(event)">
+      <div><label class="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">Administrador</label><select id="adminSelector" class="w-full border rounded-lg px-3 py-2" onchange="selectAdmin(this.value)"><option value="">Selecciona una cuenta</option>{% for admin in platform_admins %}<option value="{{ admin.id }}" data-name="{{ admin.name }}" data-email="{{ admin.email }}" data-phone="{{ admin.phone or '' }}">{{ admin.name }} — {{ admin.email }}</option>{% endfor %}</select></div>
+      <input type="hidden" name="staff_id" id="editStaffId" />
+      <div>
+        <label class="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">Nombre</label>
+        <input type="text" name="name" id="editName" class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900 focus:outline-none focus:bg-white focus:ring-2 focus:ring-slate-900" />
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">Correo</label>
+        <input type="email" name="email" id="editEmail" class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900 focus:outline-none focus:bg-white focus:ring-2 focus:ring-slate-900" />
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">Teléfono</label>
+        <input type="text" name="phone" id="editPhone" class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900 focus:outline-none focus:bg-white focus:ring-2 focus:ring-slate-900" />
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">Nueva Contraseña (opcional)</label>
+        <input type="password" name="password" id="editPassword" class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900 focus:outline-none focus:bg-white focus:ring-2 focus:ring-slate-900" />
+      </div>
+      <div class="flex justify-end space-x-2">
+        <button type="button" onclick="closeSettingsModal()" class="px-3 py-1.5 text-sm bg-slate-200 hover:bg-slate-300 rounded">Cancelar</button>
+        <button type="submit" class="px-3 py-1.5 text-sm bg-slate-900 hover:bg-slate-800 text-white rounded">Actualizar</button>
+      </div>
+    </form>
+  </div>
+</div>
+<script>
+  function openSettingsModal(){ document.getElementById('settingsModal').classList.remove('hidden'); showAddAdminTab(); }
+  function closeSettingsModal(){ document.getElementById('settingsModal').classList.add('hidden'); document.getElementById('addAdminForm').reset(); document.getElementById('editAdminForm').reset(); }
+  function showAddAdminTab(){ document.getElementById('addAdminForm').classList.remove('hidden'); document.getElementById('editAdminForm').classList.add('hidden'); document.getElementById('addAdminTabBtn').classList.add('border-slate-900'); document.getElementById('addAdminTabBtn').classList.remove('border-transparent'); document.getElementById('editAdminTabBtn').classList.remove('border-slate-900'); document.getElementById('editAdminTabBtn').classList.add('border-transparent'); }
+  function showEditAdminTab(){ document.getElementById('addAdminForm').classList.add('hidden'); document.getElementById('editAdminForm').classList.remove('hidden'); document.getElementById('editAdminTabBtn').classList.add('border-slate-900'); document.getElementById('editAdminTabBtn').classList.remove('border-transparent'); document.getElementById('addAdminTabBtn').classList.remove('border-slate-90'); document.getElementById('addAdminTabBtn').classList.add('border-transparent'); }
+  const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
+  function selectAdmin(id){ const option=document.querySelector(`#adminSelector option[value="${id}"]`); document.getElementById('editStaffId').value=id; document.getElementById('editName').value=option?.dataset.name||''; document.getElementById('editEmail').value=option?.dataset.email||''; document.getElementById('editPhone').value=option?.dataset.phone||''; }
+  async function submitAddAdmin(e){ e.preventDefault(); const form=e.target; const btn=form.querySelector('button[type=submit]'); btn.disabled=true; const payload=Object.fromEntries(new FormData(form)); const res=await fetch('/admin/users/create',{method:'POST',headers:{'Content-Type':'application/json','X-CSRFToken':csrfToken},body:JSON.stringify(payload)}); const data=await res.json(); if(res.ok){window.location.reload();}else{alert(data.message||'Error al crear admin');btn.disabled=false;} }
+  async function submitEditAdmin(e){ e.preventDefault(); const form=e.target; const staffId=document.getElementById('editStaffId').value; if(!staffId){alert('Selecciona un administrador.');return false;} const btn=form.querySelector('button[type=submit]');btn.disabled=true;const payload=Object.fromEntries(new FormData(form));const res=await fetch(`/admin/users/edit/${staffId}`,{method:'POST',headers:{'Content-Type':'application/json','X-CSRFToken':csrfToken},body:JSON.stringify(payload)});const data=await res.json();if(res.ok){window.location.reload();}else{alert(data.message||'Error al editar admin');btn.disabled=false;} }
+</script>
 {% endblock %}
+
+
+
 
 {% block scripts %}
 <script>
@@ -367,34 +467,38 @@
     document.getElementById('createBusinessForm').reset();
   }
 
+  // Dynamic loyalty type listener: disable stamp limit when 'points' is selected
+  (function() {
+    const loyaltySelect = document.getElementById('bLoyaltyType');
+    const stampsInput = document.getElementById('bStampsLimit');
+    const pointsInput = document.getElementById('bPointsRate');
+    function updateLoyaltyFields() {
+      if (!loyaltySelect) return;
+      if (loyaltySelect.value === 'points') {
+        document.getElementById('createStampsBlock').classList.add('hidden'); document.getElementById('createPointsBlock').classList.remove('hidden'); stampsInput.disabled=true; pointsInput.disabled=false;
+      } else {
+        document.getElementById('createStampsBlock').classList.remove('hidden'); document.getElementById('createPointsBlock').classList.add('hidden'); stampsInput.disabled=false; pointsInput.disabled=true;
+      }
+    }
+    if (loyaltySelect) {
+      loyaltySelect.addEventListener('change', updateLoyaltyFields);
+      updateLoyaltyFields();
+    }
+  })();
+
   document.getElementById('createBusinessForm').addEventListener('submit', async function(e) {
     e.preventDefault();
     const btn = document.getElementById('saveBusinessBtn');
     btn.disabled = true;
     btn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin mr-1"></i> Creando...';
 
-    const loyaltyType = document.getElementById('bLoyaltyType').value;
-    const limitRatio = parseFloat(document.getElementById('bLimitRatio').value) || 10;
-
-    const payload = {
-      name: document.getElementById('bName').value,
-      slug: document.getElementById('bSlug').value,
-      category_id: document.getElementById('bCategory').value || null,
-      logo_url: document.getElementById('bLogo').value || null,
-      primary_color: document.getElementById('bPrimaryColor').value,
-      secondary_color: document.getElementById('bSecondaryColor').value,
-      loyalty_type: loyaltyType,
-      stamps_reward_limit: loyaltyType === 'stamps' ? Math.round(limitRatio) : 10,
-      points_per_currency: loyaltyType === 'points' ? limitRatio : 1.0,
-      latitude: parseFloat(document.getElementById('bLat').value) || null,
-      longitude: parseFloat(document.getElementById('bLng').value) || null
-    };
+    const payload = new FormData(this);
 
     try {
       const res = await fetch('/admin/business/create', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        headers: { 'X-CSRFToken': csrfToken },
+        body: payload
       });
       const data = await res.json();
       if (res.ok && data.status === 'success') {
@@ -410,5 +514,6 @@
       btn.innerHTML = 'Crear Negocio';
     }
   });
+  function previewUpload(input,id){const img=document.getElementById(id);if(input.files&&input.files[0]){img.src=URL.createObjectURL(input.files[0]);img.classList.remove('hidden');}}
 </script>
 {% endblock %}

@@ -31,6 +31,14 @@ class Config:
     # JWT
     JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "default-jwt-secret-key")
     JWT_ACCESS_TOKEN_EXPIRES = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRES", 86400))
+    # Two 5 MB images plus multipart form overhead.
+    MAX_CONTENT_LENGTH = int(os.getenv("MAX_CONTENT_LENGTH", 12 * 1024 * 1024))
+    PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
+    SESSION_COOKIE_HTTPONLY = True
+    SESSION_COOKIE_SAMESITE = "Lax"
+    SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "false").lower() == "true"
+    PERMANENT_SESSION_LIFETIME = 3600
+    CSRF_ENABLED = True
 
 
 class DevelopmentConfig(Config):
@@ -47,6 +55,8 @@ class TestingConfig(Config):
     """Testing environment configuration."""
     TESTING = True
     SQLALCHEMY_DATABASE_URI = "sqlite:///:memory:"
+    CSRF_ENABLED = False
+    UPLOAD_FOLDER = os.path.join(os.getenv("TEMP", "."), "j2m-test-uploads")
 
 
 config_by_name = {

@@ -3,11 +3,13 @@ import json
 import zipfile
 import hashlib
 import unittest
+import os
+from PIL import Image
 from app import create_app
 from app.extensions import db
 from app.models import Business, Customer
 from app.services import AppleWalletService
-from app.services.apple_wallet import hex_to_rgb
+from app.services.apple_wallet import MINIMAL_PNG_BYTES, hex_to_rgb
 
 
 class AppleWalletTestCase(unittest.TestCase):
@@ -120,6 +122,24 @@ class AppleWalletTestCase(unittest.TestCase):
                 asset_bytes = zf.read(asset_name)
                 actual_hash = hashlib.sha1(asset_bytes).hexdigest()
                 self.assertEqual(actual_hash, expected_hash)
+
+    def test_uploaded_branding_is_embedded_as_png_assets(self):
+        upload_dir = self.app.config["UPLOAD_FOLDER"]
+        os.makedirs(upload_dir, exist_ok=True)
+        logo_path = os.path.join(upload_dir, "apple-logo.png")
+        cover_path = os.path.join(upload_dir, "apple-cover.png")
+        Image.new("RGB", (40, 20), "red").save(logo_path, "PNG")
+        Image.new("RGB", (80, 40), "blue").save(cover_path, "PNG")
+        self.business_stamps.logo_path = "uploads/apple-logo.png"
+        self.business_stamps.cover_path = "uploads/apple-cover.png"
+        db.session.commit()
+        with zipfile.ZipFile(AppleWalletService().generate_pkpass(self.customer_stamps), "r") as archive:
+            logo = archive.read("logo.png")
+            strip = archive.read("strip.png")
+            self.assertTrue(logo.startswith(b"\x89PNG"))
+            self.assertTrue(strip.startswith(b"\x89PNG"))
+            self.assertNotEqual(logo, MINIMAL_PNG_BYTES)
+            self.assertNotEqual(strip, MINIMAL_PNG_BYTES)
 
     def test_apple_wallet_endpoint_download(self):
         """Test GET /api/customers/<id>/wallet/apple returns a downloadable .pkpass file."""

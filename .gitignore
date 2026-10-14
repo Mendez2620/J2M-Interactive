@@ -73,3 +73,7 @@ instance/
 # Logs
 *.log
 logs/
+
+# Runtime uploads (keep directory marker only)
+app/static/uploads/*
+!app/static/uploads/.gitkeep
