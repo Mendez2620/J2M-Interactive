@@ -3,7 +3,7 @@ import unittest
 from datetime import date
 from app import create_app
 from app.extensions import db
-from app.models import Business, Customer, Staff, Transaction
+from app.models import Business, Customer, PlatformAdmin, Staff, Transaction
 
 
 class Phase3TestCase(unittest.TestCase):
@@ -39,6 +39,7 @@ class Phase3TestCase(unittest.TestCase):
         )
         db.session.add_all([self.cafe, self.boutique])
         db.session.commit()
+        self._login_as_admin()
 
     def tearDown(self):
         db.session.remove()
@@ -77,6 +78,23 @@ class Phase3TestCase(unittest.TestCase):
         self.assertIsNotNone(customer)
         self.assertEqual(customer.birthdate, date(1998, 5, 15))
         self.assertEqual(customer.business_id, self.cafe.id)
+
+    def _login_as_admin(self):
+        """Helper: create an admin Staff and log in via the test client session."""
+        existing = PlatformAdmin.query.filter_by(email="admin@test.com").first()
+        if existing:
+            return existing
+        admin = PlatformAdmin(
+            name="Admin Test",
+            email="admin@test.com",
+            is_active=True,
+        )
+        admin.set_password("adminpass")
+        db.session.add(admin)
+        db.session.commit()
+        with self.client.session_transaction() as sess:
+            sess["platform_admin_id"] = admin.id
+        return admin
 
     def test_admin_dashboard_metrics_and_age_distribution(self):
         """Test super admin metrics including birthdate-based age grouping."""

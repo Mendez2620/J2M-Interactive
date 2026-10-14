@@ -13,6 +13,8 @@ class Business(db.Model):
         db.Integer, db.ForeignKey("business_categories.id", ondelete="SET NULL"), nullable=True, index=True
     )
     logo_url = db.Column(db.String(255), nullable=True)
+    logo_path = db.Column(db.String(255), nullable=True)
+    cover_path = db.Column(db.String(255), nullable=True)
     primary_color = db.Column(db.String(7), default="#000000", nullable=False)
     secondary_color = db.Column(db.String(7), default="#FFFFFF", nullable=False)
     loyalty_type = db.Column(db.String(20), default="stamps", nullable=False)  # 'stamps' or 'points'
@@ -50,6 +52,8 @@ class Business(db.Model):
             "category_id": self.category_id,
             "category_name": self.category.name if self.category else "Sin categoría",
             "logo_url": self.logo_url,
+            "logo_path": self.logo_path,
+            "cover_path": self.cover_path,
             "primary_color": self.primary_color,
             "secondary_color": self.secondary_color,
             "loyalty_type": self.loyalty_type,

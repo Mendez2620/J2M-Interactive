@@ -4,14 +4,9 @@ from app.extensions import db
 
 app = create_app(os.getenv("FLASK_ENV", "development"))
 
-# Auto-create tables in development mode if using SQLite
-with app.app_context():
-    db.create_all()
-
-
 @app.cli.command("init-db")
 def init_db():
-    """CLI Command to initialize and create database tables."""
+    """Development-only helper; existing databases must use `flask db upgrade`."""
     with app.app_context():
         db.create_all()
         print("Database tables created successfully!")

@@ -5,7 +5,7 @@ import openpyxl
 from datetime import date
 from app import create_app
 from app.extensions import db
-from app.models import Business, BusinessCategory, Customer, Staff, Transaction
+from app.models import Business, BusinessCategory, Customer, PlatformAdmin, Staff, Transaction
 
 
 class Phase5TestCase(unittest.TestCase):
@@ -76,11 +76,29 @@ class Phase5TestCase(unittest.TestCase):
         )
         db.session.add(tx)
         db.session.commit()
+        self._login_as_admin()
 
     def tearDown(self):
         db.session.remove()
         db.drop_all()
         self.app_context.pop()
+
+    def _login_as_admin(self):
+        """Helper: create an admin Staff and log in via the test client session."""
+        existing = PlatformAdmin.query.filter_by(email="admin@test.com").first()
+        if existing:
+            return existing
+        admin = PlatformAdmin(
+            name="Admin Test",
+            email="admin@test.com",
+            is_active=True,
+        )
+        admin.set_password("adminpass")
+        db.session.add(admin)
+        db.session.commit()
+        with self.client.session_transaction() as sess:
+            sess["platform_admin_id"] = admin.id
+        return admin
 
     def test_business_crud_and_category_assignment(self):
         """Test creating a new Business through the admin API with category and geolocation."""

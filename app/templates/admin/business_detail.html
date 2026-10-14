@@ -45,6 +45,7 @@
           <i class="fa-solid fa-qrcode text-[10px]"></i>
           <span>Escáner</span>
         </a>
+        <form method="POST" action="/admin/logout"><button class="px-2 py-1.5 text-slate-500 hover:text-slate-900" title="Cerrar sesión"><i class="fa-solid fa-right-from-bracket"></i></button></form>
       </div>
     </div>
   </header>
@@ -102,7 +103,7 @@
           <p class="text-xs text-slate-500 mt-0.5">Configura colores, logotipo, ubicación geográfica y textos al reverso de la tarjeta (Apple &amp; Google Wallet).</p>
         </div>
 
-        <form method="POST" action="/admin/business/{{ business.id }}/update" class="space-y-5 max-w-3xl">
+        <form method="POST" action="/admin/business/{{ business.id }}/update" enctype="multipart/form-data" class="space-y-5 max-w-3xl">
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label class="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">Nombre Comercial</label>
@@ -114,6 +115,11 @@
               <input type="text" name="slug" value="{{ business.slug }}" required
                      class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900 focus:outline-none focus:bg-white focus:ring-2 focus:ring-slate-900">
             </div>
+          </div>
+
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div><label class="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">Sustituir logo</label><input type="file" name="logo_file" accept="image/png,image/jpeg,image/webp" class="w-full text-xs" onchange="previewUpload(this,'detailLogoPreview')"><img id="detailLogoPreview" src="{{ url_for('static', filename=business.logo_path) if business.logo_path else '' }}" class="mt-2 h-24 max-w-full object-contain rounded border {{ 'hidden' if not business.logo_path }}" alt="Vista previa del logo"></div>
+            <div><label class="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">Sustituir portada</label><input type="file" name="cover_file" accept="image/png,image/jpeg,image/webp" class="w-full text-xs" onchange="previewUpload(this,'detailCoverPreview')"><img id="detailCoverPreview" src="{{ url_for('static', filename=business.cover_path) if business.cover_path else '' }}" class="mt-2 h-24 w-full object-cover rounded border {{ 'hidden' if not business.cover_path }}" alt="Vista previa de la portada"></div>
           </div>
 
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -216,6 +222,7 @@
               <input type="number" step="0.1" name="points_per_currency" value="{{ business.points_per_currency }}" min="0.1"
                      class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900 focus:outline-none focus:bg-white focus:ring-2 focus:ring-slate-900">
               <p class="text-[11px] text-slate-500 mt-1">Puntos otorgados por cada unidad monetaria gastada.</p>
+              <p class="text-[11px] text-blue-700 mt-1">Este negocio opera bajo el esquema de Puntos. El límite de sellos no aplica.</p>
             </div>
           </div>
 
@@ -292,6 +299,7 @@
                   </span>
                 </td>
                 <td class="py-3 px-4 text-right space-x-1">
+                  <button type="button" onclick="openResetModal({{ s.id }}, '{{ s.username|e }}')" class="px-2.5 py-1 text-xs rounded border border-amber-200 bg-amber-50 hover:bg-amber-100 text-amber-800" title="Restablecer contraseña"><i class="fa-solid fa-key text-[10px]"></i></button>
                   <!-- Toggle status form -->
                   <form method="POST" action="/admin/staff/{{ s.id }}/toggle-status" class="inline-block">
                     <button type="submit"
@@ -436,14 +444,13 @@
                     class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900 focus:outline-none focus:bg-white focus:ring-2 focus:ring-slate-900">
               <option value="cashier">Cajero</option>
               <option value="manager">Gerente</option>
-              <option value="admin">Admin Negocio</option>
             </select>
           </div>
         </div>
 
         <div>
           <label class="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">Contraseña</label>
-          <input type="password" name="password" required placeholder="••••••••"
+          <input type="password" name="password" required minlength="12" placeholder="12+ caracteres, mayúscula y número"
                  class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900 focus:outline-none focus:bg-white focus:ring-2 focus:ring-slate-900">
         </div>
 
@@ -470,6 +477,17 @@
             Crear Usuario
           </button>
         </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="resetPasswordModal" class="fixed inset-0 bg-slate-900/50 z-50 hidden flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl max-w-md w-full p-6 shadow-xl">
+      <h3 class="text-base font-bold">Restablecer contraseña</h3><p id="resetUserLabel" class="text-xs text-slate-500 mb-4"></p>
+      <form id="resetPasswordForm" method="POST" class="space-y-4">
+        <input type="password" name="password" minlength="12" required placeholder="Nueva contraseña" class="w-full border rounded-lg px-3 py-2">
+        <input type="password" name="password_confirmation" minlength="12" required placeholder="Confirmar contraseña" class="w-full border rounded-lg px-3 py-2">
+        <div class="flex gap-2 justify-end"><button type="button" onclick="closeResetModal()" class="px-3 py-2 border rounded-lg">Cancelar</button><button class="px-3 py-2 bg-slate-900 text-white rounded-lg">Actualizar</button></div>
       </form>
     </div>
   </div>
@@ -507,9 +525,13 @@
     if (type === 'stamps') {
       stampsBlock.classList.remove('hidden');
       pointsBlock.classList.add('hidden');
+      stampsBlock.querySelector('input').disabled = false;
+      pointsBlock.querySelector('input').disabled = true;
     } else {
       stampsBlock.classList.add('hidden');
       pointsBlock.classList.remove('hidden');
+      stampsBlock.querySelector('input').disabled = true;
+      pointsBlock.querySelector('input').disabled = false;
     }
   }
 
@@ -520,6 +542,9 @@
   function closeStaffModal() {
     document.getElementById('staffModal').classList.add('hidden');
   }
+  function openResetModal(id, username){const form=document.getElementById('resetPasswordForm');form.action=`/admin/staff/${id}/reset-password`;document.getElementById('resetUserLabel').textContent=`Usuario: ${username}`;document.getElementById('resetPasswordModal').classList.remove('hidden');}
+  function closeResetModal(){document.getElementById('resetPasswordModal').classList.add('hidden');document.getElementById('resetPasswordForm').reset();}
+  function previewUpload(input,id){const img=document.getElementById(id);if(input.files&&input.files[0]){img.src=URL.createObjectURL(input.files[0]);img.classList.remove('hidden');}}
 
   document.addEventListener('DOMContentLoaded', function() {
     const params = new URLSearchParams(window.location.search);
