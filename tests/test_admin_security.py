@@ -2,6 +2,7 @@ import base64
 import io
 import unittest
 import os
+from html.parser import HTMLParser
 
 from app import create_app
 from app.extensions import db
@@ -11,6 +12,15 @@ from app.models import Business, PlatformAdmin, Staff
 PNG_1PX = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 )
+
+
+class EventAttributeParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.handlers = []
+
+    def handle_starttag(self, _tag, attrs):
+        self.handlers.extend(value or "" for name, value in attrs if name.startswith("on"))
 
 
 class AdminSecurityTestCase(unittest.TestCase):
@@ -61,9 +71,20 @@ class AdminSecurityTestCase(unittest.TestCase):
         response = self.client.get(f"/admin/business/{self.business.id}?tab=staff")
         html = response.get_data(as_text=True)
         self.assertNotIn("onclick=\"openResetModal", html)
+        self.assertNotIn("onsubmit=\"return confirm", html)
         self.assertIn("data-reset-password", html)
+        self.assertIn("data-confirm-delete", html)
         self.assertIn("data-username=", html)
-        self.assertNotIn("alert(1)", html.split("<script>", 1)[-1])
+        parser = EventAttributeParser()
+        parser.feed(html)
+        self.assertFalse(any("alert(1)" in handler for handler in parser.handlers))
+        platform_admin = PlatformAdmin(name="x\");alert(2);//", email="event-audit@j2m.test", is_active=True)
+        platform_admin.set_password("AdminSeguro123")
+        db.session.add(platform_admin)
+        db.session.commit()
+        dashboard_parser = EventAttributeParser()
+        dashboard_parser.feed(self.client.get("/admin").get_data(as_text=True))
+        self.assertFalse(any("alert(2)" in handler for handler in dashboard_parser.handlers))
 
     def test_login_rejects_wrong_password_and_inactive_account(self):
         bad = self.client.post("/admin/login", data={"email": "global@j2m.test", "password": "incorrecta"})
@@ -153,6 +174,21 @@ class AdminSecurityTestCase(unittest.TestCase):
         invalid_points = self.client.post(f"/admin/business/{self.business.id}/update", json={"loyalty_type": "points", "points_per_currency": 0})
         self.assertEqual(invalid_points.status_code, 400)
         self.assertEqual(db.session.get(Business, self.business.id).loyalty_type, "stamps")
+        original_name = self.business.name
+        for invalid in (float("nan"), float("inf"), float("-inf"), -1, 0, "abc"):
+            with self.subTest(program="points", value=invalid):
+                response = self.client.post(f"/admin/business/{self.business.id}/update", json={"name": "No debe persistir", "loyalty_type": "points", "points_per_currency": invalid})
+                self.assertEqual(response.status_code, 400)
+                current = db.session.get(Business, self.business.id)
+                self.assertEqual(current.name, original_name)
+                self.assertEqual(current.loyalty_type, "stamps")
+        for invalid in (float("nan"), float("inf"), -1, 0, 1.5, "1.5", "abc", True):
+            with self.subTest(program="stamps", value=invalid):
+                response = self.client.post(f"/admin/business/{self.business.id}/update", json={"name": "No debe persistir", "loyalty_type": "stamps", "stamps_reward_limit": invalid})
+                self.assertEqual(response.status_code, 400)
+                current = db.session.get(Business, self.business.id)
+                self.assertEqual(current.name, original_name)
+                self.assertEqual(current.stamps_reward_limit, 10)
 
     def test_csrf_is_enforced_when_enabled(self):
         self.login()

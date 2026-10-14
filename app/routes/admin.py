@@ -1,7 +1,9 @@
 from datetime import date, datetime
 from flask import Blueprint, jsonify, render_template, request, send_file, redirect, current_app
 from io import BytesIO
+import math
 import os
+import re
 import uuid
 import warnings
 from PIL import Image, UnidentifiedImageError
@@ -91,8 +93,15 @@ def parse_loyalty(data, current=None):
     stamps = current.stamps_reward_limit if current else 10
     points = current.points_per_currency if current else 1.0
     if loyalty_type == "stamps":
+        raw_stamps = data.get("stamps_reward_limit", stamps)
         try:
-            stamps = int(data.get("stamps_reward_limit", stamps))
+            if isinstance(raw_stamps, bool):
+                raise ValueError
+            if isinstance(raw_stamps, float) and (not math.isfinite(raw_stamps) or not raw_stamps.is_integer()):
+                raise ValueError
+            if isinstance(raw_stamps, str) and not re.fullmatch(r"[+-]?\d+", raw_stamps.strip()):
+                raise ValueError
+            stamps = int(raw_stamps)
         except (TypeError, ValueError):
             raise ValueError("El límite de sellos debe ser un entero positivo.")
         if stamps <= 0:
@@ -102,7 +111,7 @@ def parse_loyalty(data, current=None):
             points = float(data.get("points_per_currency", points))
         except (TypeError, ValueError):
             raise ValueError("Los puntos por moneda deben ser un número positivo.")
-        if points <= 0:
+        if not math.isfinite(points) or points <= 0:
             raise ValueError("Los puntos por moneda deben ser un número positivo.")
     return loyalty_type, points, stamps
 

@@ -19,14 +19,18 @@ EXPECTED_TABLES = {
 
 
 class MigrationTestCase(unittest.TestCase):
-    def upgrade(self, database_path):
+    def run_db_command(self, database_path, command):
         env = os.environ.copy()
         env["DATABASE_URL"] = f"sqlite:///{database_path.as_posix()}"
         env["FLASK_ENV"] = "development"
         result = subprocess.run(
-            [sys.executable, "-m", "flask", "--app", "run.py", "db", "upgrade"],
+            [sys.executable, "-m", "flask", "--app", "run.py", "db", command],
             cwd=ROOT, env=env, capture_output=True, text=True,
         )
+        return result
+
+    def upgrade(self, database_path):
+        result = self.run_db_command(database_path, "upgrade")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_upgrade_creates_complete_schema_on_empty_database(self):
@@ -53,6 +57,21 @@ class MigrationTestCase(unittest.TestCase):
             self.upgrade(path)
             with sqlite3.connect(path) as connection:
                 self.assertEqual(connection.execute("SELECT id, name, slug FROM businesses").fetchall(), [(1, "Negocio existente", "existente")])
+                columns = {row[1] for row in connection.execute("PRAGMA table_info(businesses)")}
+                self.assertTrue({"logo_path", "cover_path"} <= columns)
+                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "9a85c3791398")
+
+    def test_downgrade_is_blocked_before_destroying_fresh_schema(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            path = Path(directory) / "downgrade.sqlite"
+            self.upgrade(path)
+            with sqlite3.connect(path) as connection:
+                connection.execute("INSERT INTO businesses (id, name, slug, primary_color, secondary_color, loyalty_type, points_per_currency, stamps_reward_limit, cooldown_minutes, is_active, created_at) VALUES (1, 'Conservar', 'conservar', '#000000', '#FFFFFF', 'stamps', 1.0, 10, 60, 1, '2026-01-01')")
+            result = self.run_db_command(path, "downgrade")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Downgrade bloqueado", result.stdout + result.stderr)
+            with sqlite3.connect(path) as connection:
+                self.assertEqual(connection.execute("SELECT name FROM businesses WHERE id = 1").fetchone()[0], "Conservar")
                 columns = {row[1] for row in connection.execute("PRAGMA table_info(businesses)")}
                 self.assertTrue({"logo_path", "cover_path"} <= columns)
                 self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "9a85c3791398")

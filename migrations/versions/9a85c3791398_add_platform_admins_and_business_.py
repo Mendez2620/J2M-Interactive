@@ -125,9 +125,7 @@ def _create_fresh_schema():
 
 
 def downgrade():
-    with op.batch_alter_table('businesses', schema=None) as batch_op:
-        batch_op.drop_column('cover_path')
-        batch_op.drop_column('logo_path')
-
-    op.drop_index(op.f('ix_platform_admins_email'), table_name='platform_admins')
-    op.drop_table('platform_admins')
+    raise RuntimeError(
+        "Downgrade bloqueado: esta revisión sirve como bootstrap y actualización heredada; "
+        "no es posible determinar de forma segura qué tablas o columnas pertenecían a la base original."
+    )
