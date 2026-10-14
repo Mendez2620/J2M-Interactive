@@ -38,15 +38,9 @@ class GoogleWalletService:
             or os.getenv("GOOGLE_SA_PRIVATE_KEY")
         )
 
-        self.is_mock_key = False
-        if raw_key and "-----BEGIN" in raw_key:
-            # Handle escaped newlines from environment variables
-            self.sa_private_key = raw_key.replace("\\n", "\n")
-        else:
-            # Generate a transient RSA private key for local development / testing fallback
-            logger.info("No valid GOOGLE_SA_PRIVATE_KEY provided. Generating transient development RSA key.")
-            self.sa_private_key = self._generate_dev_private_key()
-            self.is_mock_key = True
+        self.is_mock_key = True
+        logger.info("GoogleWalletService running in mock mode – generated transient RSA key.")
+        self.sa_private_key = self._generate_dev_private_key()
 
     @staticmethod
     def _generate_dev_private_key() -> str:

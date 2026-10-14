@@ -235,3 +235,44 @@ def process_transaction():
         },
         "reward_notified": reward_notified,
     }), 200
+
+@scanner_bp.route("/api/scanner/login", methods=["POST"])
+def staff_login():
+    """
+    Authenticates a Staff member (Cajero/Gerente) and returns user context.
+    """
+    data = request.get_json(silent=True) or request.form.to_dict()
+    username_or_email = (data.get("username") or data.get("email") or "").strip()
+    password = (data.get("password") or "").strip()
+
+    if not username_or_email or not password:
+        return jsonify({"status": "error", "message": "Por favor ingresa usuario/correo y contraseña."}), 400
+
+    staff = Staff.query.filter(
+        (Staff.username == username_or_email) | (Staff.email == username_or_email)
+    ).first()
+
+    if not staff or not staff.check_password(password):
+        return jsonify({"status": "error", "message": "Credenciales inválidas."}), 401
+
+    if not staff.is_active:
+        return jsonify({"status": "error", "message": "Tu cuenta de usuario se encuentra inactiva."}), 403
+
+    business = staff.business
+    if not business or not business.is_active:
+        return jsonify({"status": "error", "message": "El negocio asignado se encuentra inactivo."}), 403
+
+    return jsonify({
+        "status": "success",
+        "message": f"Bienvenido, {staff.name}",
+        "access_token": f"jwt-session-token-{staff.id}",
+        "user": {
+            "id": staff.id,
+            "name": staff.name,
+            "username": staff.username,
+            "role": staff.role,
+            "business_id": business.id,
+            "business_name": business.name,
+            "loyalty_type": business.loyalty_type,
+        }
+    }), 200
