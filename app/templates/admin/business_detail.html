@@ -40,11 +40,11 @@
             <span>{{ 'Suspender Cuenta' if business.is_active else 'Activar Cuenta' }}</span>
           </button>
         </form>
-        <a href="/scanner" target="_blank"
+        {% if config.DEBUG %}<a href="/scanner" target="_blank"
            class="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold flex items-center space-x-1.5 shadow-xs transition">
           <i class="fa-solid fa-qrcode text-[10px]"></i>
           <span>Escáner</span>
-        </a>
+        </a>{% endif %}
         <form method="POST" action="/admin/logout"><button class="px-2 py-1.5 text-slate-500 hover:text-slate-900" title="Cerrar sesión"><i class="fa-solid fa-right-from-bracket"></i></button></form>
       </div>
     </div>
@@ -252,6 +252,15 @@
 
       <!-- Tab 3: Usuarios / Staff -->
       <div id="tabContent-staff" class="p-6 space-y-6 hidden">
+        <div class="grid sm:grid-cols-2 gap-3">
+          {% for channel, label in [('web', 'Panel web'), ('mobile', 'Aplicación móvil')] %}
+          {% set enabled = business.web_access_enabled if channel == 'web' else business.mobile_access_enabled %}
+          <form method="POST" action="/admin/business/{{ business.id }}/access/{{ channel }}" class="flex items-center justify-between rounded-lg border border-slate-200 p-4">
+            <div><div class="font-semibold text-sm">{{ label }}</div><div class="text-xs text-slate-500">Canal del negocio: {{ 'habilitado' if enabled else 'deshabilitado' }}</div></div>
+            <button type="submit" class="px-3 py-1.5 text-xs rounded border {{ 'bg-rose-50 text-rose-700' if enabled else 'bg-emerald-50 text-emerald-700' }}">{{ 'Deshabilitar' if enabled else 'Habilitar' }}</button>
+          </form>
+          {% endfor %}
+        </div>
         <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pb-3 border-b border-slate-100">
           <div>
             <h3 class="text-sm font-bold text-slate-900 uppercase tracking-wider">Equipo &amp; Accesos del Comercio</h3>
@@ -273,6 +282,7 @@
                 <th class="py-3 px-4">Rol</th>
                 <th class="py-3 px-4">Contacto</th>
                 <th class="py-3 px-4 text-center">Estado</th>
+                <th class="py-3 px-4 text-center">Canales</th>
                 <th class="py-3 px-4 text-right">Acciones</th>
               </tr>
             </thead>
@@ -298,6 +308,14 @@
                     {{ 'Activo' if s.is_active else 'Inactivo' }}
                   </span>
                 </td>
+                <td class="py-3 px-4 text-center space-x-1">
+                  {% for channel, label in [('web', 'Web'), ('mobile', 'Móvil')] %}
+                  {% set enabled = s.web_access_enabled if channel == 'web' else s.mobile_access_enabled %}
+                  <form method="POST" action="/admin/staff/{{ s.id }}/access/{{ channel }}" class="inline-block">
+                    <button type="submit" class="px-2 py-1 text-xs rounded border {{ 'bg-emerald-50 text-emerald-700' if enabled else 'bg-slate-50 text-slate-500' }}">{{ label }}: {{ 'Sí' if enabled else 'No' }}</button>
+                  </form>
+                  {% endfor %}
+                </td>
                 <td class="py-3 px-4 text-right space-x-1">
                   <button type="button" data-reset-password data-staff-id="{{ s.id }}" data-username="{{ s.username }}" class="px-2.5 py-1 text-xs rounded border border-amber-200 bg-amber-50 hover:bg-amber-100 text-amber-800" title="Restablecer contraseña"><i class="fa-solid fa-key text-[10px]"></i></button>
                   <!-- Toggle status form -->
@@ -320,7 +338,7 @@
               </tr>
               {% else %}
               <tr>
-                <td colspan="5" class="py-8 text-center text-slate-400 text-xs">
+                <td colspan="6" class="py-8 text-center text-slate-400 text-xs">
                   No hay miembros de staff registrados para este negocio. Haz clic en "Nuevo Usuario" para crear uno.
                 </td>
               </tr>

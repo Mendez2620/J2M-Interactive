@@ -199,6 +199,12 @@ class AdminSecurityTestCase(unittest.TestCase):
             session["csrf_token"] = "known-token"
         accepted = self.client.post("/admin/users/create", json={"name": "Con CSRF", "email": "csrf@j2m.test", "password": "SeguraNueva123"}, headers={"X-CSRFToken": "known-token"})
         self.assertEqual(accepted.status_code, 201)
+        blocked_channel = self.client.post(f"/admin/business/{self.business.id}/access/mobile")
+        self.assertEqual(blocked_channel.status_code, 400)
+        enabled_channel = self.client.post(f"/admin/business/{self.business.id}/access/mobile",
+                                           headers={"X-CSRFToken": "known-token", "Accept": "application/json"})
+        self.assertEqual(enabled_channel.status_code, 200)
+        self.assertTrue(enabled_channel.get_json()["enabled"])
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_TABLES = {
     "alembic_version", "apple_devices", "business_categories", "businesses",
     "customers", "platform_admins", "staff", "transactions",
+    "staff_sessions",
 }
 
 
@@ -52,6 +53,15 @@ class MigrationTestCase(unittest.TestCase):
                 connection.execute(text("DROP TABLE platform_admins"))
                 connection.execute(text("ALTER TABLE businesses DROP COLUMN logo_path"))
                 connection.execute(text("ALTER TABLE businesses DROP COLUMN cover_path"))
+                connection.execute(text("ALTER TABLE businesses DROP COLUMN web_access_enabled"))
+                connection.execute(text("ALTER TABLE businesses DROP COLUMN mobile_access_enabled"))
+                connection.execute(text("ALTER TABLE staff DROP COLUMN web_access_enabled"))
+                connection.execute(text("ALTER TABLE staff DROP COLUMN mobile_access_enabled"))
+                connection.execute(text("ALTER TABLE staff DROP COLUMN auth_version"))
+                connection.execute(text("ALTER TABLE staff DROP COLUMN permissions"))
+                connection.execute(text("DROP TABLE staff_sessions"))
+                connection.execute(text("DROP INDEX ix_transactions_request_id"))
+                connection.execute(text("ALTER TABLE transactions DROP COLUMN request_id"))
                 connection.execute(text("INSERT INTO businesses (id, name, slug, primary_color, secondary_color, loyalty_type, points_per_currency, stamps_reward_limit, cooldown_minutes, is_active, created_at) VALUES (1, 'Negocio existente', 'existente', '#000000', '#FFFFFF', 'stamps', 1.0, 10, 60, 1, '2026-01-01')"))
             engine.dispose()
             self.upgrade(path)
@@ -59,7 +69,8 @@ class MigrationTestCase(unittest.TestCase):
                 self.assertEqual(connection.execute("SELECT id, name, slug FROM businesses").fetchall(), [(1, "Negocio existente", "existente")])
                 columns = {row[1] for row in connection.execute("PRAGMA table_info(businesses)")}
                 self.assertTrue({"logo_path", "cover_path"} <= columns)
-                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "9a85c3791398")
+                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "c4f1a2b3d4e5")
+                self.assertEqual(connection.execute("SELECT web_access_enabled, mobile_access_enabled FROM businesses WHERE id = 1").fetchone(), (0, 0))
 
     def test_downgrade_is_blocked_before_destroying_fresh_schema(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
@@ -74,7 +85,7 @@ class MigrationTestCase(unittest.TestCase):
                 self.assertEqual(connection.execute("SELECT name FROM businesses WHERE id = 1").fetchone()[0], "Conservar")
                 columns = {row[1] for row in connection.execute("PRAGMA table_info(businesses)")}
                 self.assertTrue({"logo_path", "cover_path"} <= columns)
-                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "9a85c3791398")
+                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "c4f1a2b3d4e5")
 
 
 if __name__ == "__main__":

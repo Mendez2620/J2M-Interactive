@@ -12,6 +12,7 @@ from app.extensions import db
 from app.models import Business, BusinessCategory, Customer, PlatformAdmin, Staff, Transaction
 from app.security import platform_admin_required, valid_email, validate_password
 from app.services import ExportService
+from app.staff_auth import revoke_staff_sessions
 
 admin_bp = Blueprint("admin", __name__, url_prefix="/admin")
 
@@ -441,6 +442,9 @@ def toggle_business_status(business_id: int):
         return jsonify({"status": "error", "message": "Negocio no encontrado"}), 404
 
     business.is_active = not business.is_active
+    if not business.is_active:
+        for member in business.staff_members:
+            revoke_staff_sessions(member)
     db.session.commit()
 
     status_str = "activado" if business.is_active else "suspendido"
@@ -531,6 +535,9 @@ def create_staff(business_id: int):
         phone=phone,
         role=role,
         is_active=True,
+        permissions="view_stats" if role == "manager" else "scanner_operate",
+        web_access_enabled=False,
+        mobile_access_enabled=False,
     )
     staff_member.set_password(password)
 
@@ -556,6 +563,7 @@ def toggle_staff_status(staff_id: int):
         return jsonify({"status": "error", "message": "Usuario no encontrado"}), 404
 
     staff.is_active = not staff.is_active
+    revoke_staff_sessions(staff)
     db.session.commit()
 
     if request.is_json or request.headers.get("Accept") == "application/json":
@@ -604,9 +612,46 @@ def reset_staff_password(staff_id: int):
     if password_error:
         return jsonify({"status": "error", "message": password_error}), 400
     staff.set_password(password)
+    revoke_staff_sessions(staff)
     db.session.commit()
     if request.is_json or request.headers.get("Accept") == "application/json":
         return jsonify({"status": "success", "message": "Contraseña actualizada correctamente.", "staff": staff.to_dict()}), 200
+    return redirect(f"/admin/business/{staff.business_id}?tab=staff")
+
+
+@admin_bp.route("/business/<int:business_id>/access/<channel>", methods=["POST"])
+@platform_admin_required
+def toggle_business_access(business_id: int, channel: str):
+    if channel not in {"web", "mobile"}:
+        return jsonify({"status": "error", "message": "Canal inválido."}), 400
+    business = db.session.get(Business, business_id)
+    if not business:
+        return jsonify({"status": "error", "message": "Negocio no encontrado."}), 404
+    field = f"{channel}_access_enabled"
+    setattr(business, field, not getattr(business, field))
+    if not getattr(business, field):
+        for member in business.staff_members:
+            revoke_staff_sessions(member)
+    db.session.commit()
+    if request.is_json or request.headers.get("Accept") == "application/json":
+        return jsonify({"status": "success", "channel": channel, "enabled": getattr(business, field)}), 200
+    return redirect(f"/admin/business/{business.id}?tab=staff")
+
+
+@admin_bp.route("/staff/<int:staff_id>/access/<channel>", methods=["POST"])
+@platform_admin_required
+def toggle_staff_access(staff_id: int, channel: str):
+    if channel not in {"web", "mobile"}:
+        return jsonify({"status": "error", "message": "Canal inválido."}), 400
+    staff = db.session.get(Staff, staff_id)
+    if not staff:
+        return jsonify({"status": "error", "message": "Usuario no encontrado."}), 404
+    field = f"{channel}_access_enabled"
+    setattr(staff, field, not getattr(staff, field))
+    revoke_staff_sessions(staff)
+    db.session.commit()
+    if request.is_json or request.headers.get("Accept") == "application/json":
+        return jsonify({"status": "success", "channel": channel, "enabled": getattr(staff, field)}), 200
     return redirect(f"/admin/business/{staff.business_id}?tab=staff")
 
 

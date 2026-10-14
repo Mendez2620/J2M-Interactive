@@ -3,6 +3,7 @@ from flask import Blueprint, jsonify, render_template, request
 from app.extensions import db
 from app.models import Business, Customer
 from app.services import GoogleWalletService
+from app.wallet_access import issue_wallet_token
 
 business_bp = Blueprint("business", __name__)
 
@@ -78,14 +79,10 @@ def join_business(slug: str):
         customer = Customer.query.filter_by(business_id=business.id, phone=phone).first()
 
     if customer:
-        # Update details if necessary
-        customer.full_name = full_name
-        if birthdate:
-            customer.birthdate = birthdate
-        if phone and not customer.phone:
-            customer.phone = phone
-        if email and not customer.email:
-            customer.email = email
+        return jsonify({
+            "status": "error",
+            "message": "Ya existe una cuenta con esos datos. Utiliza el proceso de recuperación verificada.",
+        }), 409
     else:
         customer = Customer(
             business_id=business.id,
@@ -101,14 +98,15 @@ def join_business(slug: str):
     db.session.commit()
 
     # Generate Wallet links
-    google_service = GoogleWalletService()
-    _, google_save_url = google_service.create_jwt_pass(customer)
-    apple_wallet_url = f"/api/customers/{customer.id}/wallet/apple"
+    wallet_token = issue_wallet_token(customer)
+    google_wallet_url = f"/api/customers/{customer.id}/wallet/google?token={wallet_token}"
+    apple_wallet_url = f"/api/customers/{customer.id}/wallet/apple?token={wallet_token}"
 
     return jsonify({
         "status": "success",
         "message": "Registro completado con éxito.",
-        "customer": customer.to_dict(),
-        "google_wallet_url": google_save_url,
+        "customer": {"id": customer.id, "full_name": customer.full_name,
+                     "birthdate": customer.birthdate.isoformat() if customer.birthdate else None},
+        "google_wallet_url": google_wallet_url,
         "apple_wallet_url": apple_wallet_url,
     }), 201

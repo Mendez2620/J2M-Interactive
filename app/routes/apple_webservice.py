@@ -159,8 +159,10 @@ def log_apple_message():
     """
     data = request.get_json(silent=True) or {}
     logs = data.get("logs", [])
-    for msg in logs:
-        logger.info("[Apple Wallet Client Log] %s", msg)
+    if not isinstance(logs, list):
+        return jsonify({"error": "Invalid logs"}), 400
+    # Do not persist client-supplied content: it may contain pass tokens or PII.
+    logger.info("Apple Wallet client reported %d diagnostic message(s)", min(len(logs), 50))
     return "", 200
 
 

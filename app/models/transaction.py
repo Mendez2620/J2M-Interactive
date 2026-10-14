@@ -20,6 +20,7 @@ class Transaction(db.Model):
     points_amount = db.Column(db.Float, default=0.0, nullable=False)
     stamps_amount = db.Column(db.Integer, default=0, nullable=False)
     purchase_amount = db.Column(db.Float, default=0.0, nullable=False)
+    request_id = db.Column(db.String(64), nullable=True, unique=True, index=True)
     timestamp = db.Column(
         db.DateTime,
         default=lambda: datetime.now(timezone.utc),
@@ -42,6 +43,7 @@ class Transaction(db.Model):
             "points_amount": self.points_amount,
             "stamps_amount": self.stamps_amount,
             "purchase_amount": self.purchase_amount,
+            "request_id": self.request_id,
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
         }
 

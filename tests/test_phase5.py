@@ -156,7 +156,7 @@ class Phase5TestCase(unittest.TestCase):
             "/api/scanner/lookup",
             json={"token": self.customer_cueva.qr_code_token, "business_id": self.business_suspended.id},
         )
-        self.assertEqual(lookup_res.status_code, 403)
+        self.assertEqual(lookup_res.status_code, 401)
 
         # 3. Scanner transaction on suspended business -> 403
         tx_res = self.client.post(
@@ -168,7 +168,7 @@ class Phase5TestCase(unittest.TestCase):
                 "amount": 50,
             },
         )
-        self.assertEqual(tx_res.status_code, 403)
+        self.assertEqual(tx_res.status_code, 401)
 
     def test_excel_export_endpoint(self):
         """Test GET /admin/business/<id>/export/excel returns a valid formatted .xlsx file."""

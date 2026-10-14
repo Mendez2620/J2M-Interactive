@@ -4,7 +4,7 @@ import zipfile
 import unittest
 from app import create_app
 from app.extensions import db
-from app.models import Business, Customer, AppleDevice
+from app.models import Business, Customer, AppleDevice, Staff
 from app.services import AppleWalletService, GoogleWalletService
 
 
@@ -28,8 +28,14 @@ class Phase4TestCase(unittest.TestCase):
             stamps_reward_limit=6,
             latitude=19.4194,
             longitude=-99.1656,
+            mobile_access_enabled=True,
         )
         db.session.add(self.business)
+        db.session.commit()
+        self.staff = Staff(business_id=self.business.id, username="scanner", role="cashier",
+                           mobile_access_enabled=True, permissions="scanner_operate")
+        self.staff.set_password("ScannerPassword123!")
+        db.session.add(self.staff)
         db.session.commit()
 
         # Seed sample customer
@@ -154,16 +160,19 @@ class Phase4TestCase(unittest.TestCase):
         )
         db.session.add(device)
         db.session.commit()
+        login = self.client.post("/api/scanner/login", json={"username": "scanner",
+            "password": "ScannerPassword123!", "business_slug": self.business.slug})
+        auth = {"Authorization": f"Bearer {login.get_json()['access_token']}",
+                "Idempotency-Key": "phase4-wallet-sync"}
 
         # Perform scanner transaction (+1 stamp)
         res = self.client.post(
             "/api/scanner/process",
             json={
-                "customer_id": self.customer.id,
-                "business_id": self.business.id,
+                "token": self.customer.qr_code_token,
                 "action": "earn_stamp",
                 "amount": 1,
-            },
+            }, headers=auth,
         )
         self.assertEqual(res.status_code, 200)
         data = res.get_json()

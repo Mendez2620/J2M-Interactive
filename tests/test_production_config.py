@@ -13,9 +13,16 @@ class ProductionConfigTestCase(unittest.TestCase):
                     create_app("production")
 
     def test_production_forces_debug_off_with_robust_secret(self):
-        with patch.dict(os.environ, {"SECRET_KEY": "a-robust-production-secret-key-with-entropy-123", "FLASK_DEBUG": "true"}, clear=False):
+        with patch.dict(os.environ, {"SECRET_KEY": "a-robust-production-secret-key-with-entropy-123",
+                                    "JWT_SECRET_KEY": "another-independent-jwt-key-with-entropy-456",
+                                    "CORS_ORIGINS": "https://app.example.com", "FLASK_DEBUG": "true"}, clear=False):
             app = create_app("production")
             self.assertFalse(app.debug)
+            client = app.test_client()
+            self.assertEqual(client.get("/api/health").status_code, 200)
+            self.assertEqual(client.get("/admin/login").status_code, 200)
+            self.assertEqual(client.get("/scanner").status_code, 404)
+            self.assertIn("max-age=31536000", client.get("/api/health").headers["Strict-Transport-Security"])
 
 
 if __name__ == "__main__":

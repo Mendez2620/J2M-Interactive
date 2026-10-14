@@ -6,6 +6,7 @@ from app.models.staff import Staff
 from app.models.transaction import Transaction
 from app.models.apple_device import AppleDevice
 from app.models.platform_admin import PlatformAdmin
+from app.models.staff_session import StaffSession
 
 __all__ = [
     "db",
@@ -16,4 +17,5 @@ __all__ = [
     "Transaction",
     "AppleDevice",
     "PlatformAdmin",
+    "StaffSession",
 ]

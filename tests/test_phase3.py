@@ -26,6 +26,7 @@ class Phase3TestCase(unittest.TestCase):
             stamps_reward_limit=5,
             latitude=19.4326,
             longitude=-99.1332,
+            mobile_access_enabled=True,
         )
         self.boutique = Business(
             name="Moda Urbana",
@@ -36,9 +37,12 @@ class Phase3TestCase(unittest.TestCase):
             points_per_currency=2.0,
             latitude=19.4200,
             longitude=-99.1600,
+            mobile_access_enabled=True,
         )
         db.session.add_all([self.cafe, self.boutique])
         db.session.commit()
+        self.cafe_staff = self._scanner_staff(self.cafe, "cafe-cashier")
+        self.boutique_staff = self._scanner_staff(self.boutique, "boutique-cashier")
         self._login_as_admin()
 
     def tearDown(self):
@@ -95,6 +99,21 @@ class Phase3TestCase(unittest.TestCase):
         with self.client.session_transaction() as sess:
             sess["platform_admin_id"] = admin.id
         return admin
+
+    def _scanner_staff(self, business, username):
+        staff = Staff(business_id=business.id, username=username, role="cashier",
+                      mobile_access_enabled=True, permissions="scanner_operate")
+        staff.set_password("ScannerPassword123!")
+        db.session.add(staff)
+        db.session.commit()
+        return staff
+
+    def _mobile_headers(self, staff):
+        response = self.client.post("/api/scanner/login", json={
+            "username": staff.username, "password": "ScannerPassword123!",
+            "business_slug": staff.business.slug})
+        self.assertEqual(response.status_code, 200)
+        return {"Authorization": f"Bearer {response.get_json()['access_token']}"}
 
     def test_admin_dashboard_metrics_and_age_distribution(self):
         """Test super admin metrics including birthdate-based age grouping."""
@@ -181,7 +200,7 @@ class Phase3TestCase(unittest.TestCase):
         # 1. Lookup by QR token
         lookup_res = self.client.post(
             "/api/scanner/lookup",
-            json={"token": customer.qr_code_token, "business_id": self.cafe.id},
+            json={"token": customer.qr_code_token}, headers=self._mobile_headers(self.cafe_staff),
         )
         self.assertEqual(lookup_res.status_code, 200)
         self.assertEqual(lookup_res.get_json()["customer"]["full_name"], "Pedro Pascal")
@@ -190,11 +209,9 @@ class Phase3TestCase(unittest.TestCase):
         earn_res = self.client.post(
             "/api/scanner/process",
             json={
-                "customer_id": customer.id,
-                "business_id": self.cafe.id,
+                "token": customer.qr_code_token,
                 "action": "earn_stamp",
-                "amount": 1,
-            },
+            }, headers={**self._mobile_headers(self.cafe_staff), "Idempotency-Key": "phase3-stamp-earn"},
         )
         self.assertEqual(earn_res.status_code, 200)
         self.assertEqual(earn_res.get_json()["customer"]["current_stamps"], 5)
@@ -203,11 +220,10 @@ class Phase3TestCase(unittest.TestCase):
         redeem_res = self.client.post(
             "/api/scanner/process",
             json={
-                "customer_id": customer.id,
-                "business_id": self.cafe.id,
+                "token": customer.qr_code_token,
                 "action": "redeem_stamp",
                 "amount": 5,
-            },
+            }, headers={**self._mobile_headers(self.cafe_staff), "Idempotency-Key": "phase3-stamp-redeem"},
         )
         self.assertEqual(redeem_res.status_code, 200)
         self.assertEqual(redeem_res.get_json()["customer"]["current_stamps"], 0)
@@ -216,11 +232,10 @@ class Phase3TestCase(unittest.TestCase):
         fail_res = self.client.post(
             "/api/scanner/process",
             json={
-                "customer_id": customer.id,
-                "business_id": self.cafe.id,
+                "token": customer.qr_code_token,
                 "action": "redeem_stamp",
                 "amount": 5,
-            },
+            }, headers={**self._mobile_headers(self.cafe_staff), "Idempotency-Key": "phase3-stamp-fail"},
         )
         self.assertEqual(fail_res.status_code, 400)
 
@@ -239,12 +254,11 @@ class Phase3TestCase(unittest.TestCase):
         earn_res = self.client.post(
             "/api/scanner/process",
             json={
-                "customer_id": customer.id,
-                "business_id": self.boutique.id,
+                "token": customer.qr_code_token,
                 "action": "earn_points",
                 "amount": 0,
                 "purchase_amount": 100.0,
-            },
+            }, headers={**self._mobile_headers(self.boutique_staff), "Idempotency-Key": "phase3-points-earn"},
         )
         self.assertEqual(earn_res.status_code, 200)
         self.assertEqual(earn_res.get_json()["customer"]["current_points"], 250.0)
@@ -253,11 +267,10 @@ class Phase3TestCase(unittest.TestCase):
         redeem_res = self.client.post(
             "/api/scanner/process",
             json={
-                "customer_id": customer.id,
-                "business_id": self.boutique.id,
+                "token": customer.qr_code_token,
                 "action": "redeem_points",
                 "amount": 100.0,
-            },
+            }, headers={**self._mobile_headers(self.boutique_staff), "Idempotency-Key": "phase3-points-redeem"},
         )
         self.assertEqual(redeem_res.status_code, 200)
         self.assertEqual(redeem_res.get_json()["customer"]["current_points"], 150.0)
@@ -266,11 +279,10 @@ class Phase3TestCase(unittest.TestCase):
         fail_res = self.client.post(
             "/api/scanner/process",
             json={
-                "customer_id": customer.id,
-                "business_id": self.boutique.id,
+                "token": customer.qr_code_token,
                 "action": "redeem_points",
                 "amount": 500.0,
-            },
+            }, headers={**self._mobile_headers(self.boutique_staff), "Idempotency-Key": "phase3-points-fail"},
         )
         self.assertEqual(fail_res.status_code, 400)
 

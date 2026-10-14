@@ -3,6 +3,7 @@ from flask import Blueprint, jsonify, request, send_file
 from app.extensions import db
 from app.models import Customer
 from app.services import GoogleWalletService, AppleWalletService
+from app.wallet_access import validate_wallet_token
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,8 @@ def get_google_wallet_pass(customer_id: int):
     Returns:
         JSON with the Google Wallet Save URL and JWT token.
     """
+    if not request.args.get("token"):
+        return jsonify({"status": "error", "message": "Token de Wallet requerido."}), 403
     customer = db.session.get(Customer, customer_id)
     if not customer:
         return (
@@ -33,6 +36,9 @@ def get_google_wallet_pass(customer_id: int):
             }),
             404,
         )
+
+    if not validate_wallet_token(request.args.get("token", ""), customer):
+        return jsonify({"status": "error", "message": "Token de Wallet inválido o expirado."}), 403
 
     if not customer.business:
         return (
@@ -71,7 +77,7 @@ def get_google_wallet_pass(customer_id: int):
         return (
             jsonify({
                 "status": "error",
-                "message": f"Error al generar el pase de Google Wallet: {str(e)}"
+                "message": "No fue posible generar el pase de Google Wallet."
             }),
             500,
         )
@@ -87,6 +93,8 @@ def get_apple_wallet_pass(customer_id: int):
     Returns:
         Binary stream (.pkpass) with mimetype 'application/vnd.apple.pkpass'.
     """
+    if not request.args.get("token"):
+        return jsonify({"status": "error", "message": "Token de Wallet requerido."}), 403
     customer = db.session.get(Customer, customer_id)
     if not customer:
         return (
@@ -96,6 +104,9 @@ def get_apple_wallet_pass(customer_id: int):
             }),
             404,
         )
+
+    if not validate_wallet_token(request.args.get("token", ""), customer):
+        return jsonify({"status": "error", "message": "Token de Wallet inválido o expirado."}), 403
 
     if not customer.business:
         return (
@@ -123,7 +134,7 @@ def get_apple_wallet_pass(customer_id: int):
         return (
             jsonify({
                 "status": "error",
-                "message": f"Error al generar el pase de Apple Wallet: {str(e)}"
+                "message": "No fue posible generar el pase de Apple Wallet."
             }),
             500,
         )

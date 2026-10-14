@@ -31,6 +31,8 @@ class Phase6TestCase(unittest.TestCase):
             stamps_reward_limit=5,
             cooldown_minutes=5,
             is_active=True,
+            web_access_enabled=True,
+            mobile_access_enabled=True,
         )
         self.business2 = Business(
             name='Negocio Dos',
@@ -42,6 +44,8 @@ class Phase6TestCase(unittest.TestCase):
             stamps_reward_limit=5,
             cooldown_minutes=5,
             is_active=True,
+            web_access_enabled=True,
+            mobile_access_enabled=True,
         )
         db.session.add_all([self.business1, self.business2])
         db.session.commit()
@@ -52,10 +56,19 @@ class Phase6TestCase(unittest.TestCase):
             username='manager1',
             name='Manager One',
             role='manager',
+            web_access_enabled=True,
+            mobile_access_enabled=True,
+            permissions='view_stats,view_transactions,scanner_operate',
         )
-        self.manager_staff.set_password('secret')
+        self.manager_staff.set_password('ManagerPassword123!')
         db.session.add(self.manager_staff)
         db.session.commit()
+        mobile_login = self.client.post('/api/scanner/login', json={
+            'username': 'manager1', 'password': 'ManagerPassword123!', 'business_slug': 'negocio-uno'})
+        web_login = self.client.post('/api/scanner/login', json={
+            'username': 'manager1', 'password': 'ManagerPassword123!', 'business_slug': 'negocio-uno', 'channel': 'web'})
+        self.auth = {'Authorization': f"Bearer {mobile_login.get_json()['access_token']}"}
+        self.web_auth = {'Authorization': f"Bearer {web_login.get_json()['access_token']}"}
 
         # Customer for business1
         self.customer = Customer(
@@ -86,7 +99,7 @@ class Phase6TestCase(unittest.TestCase):
         # Access own business transactions – should succeed
         resp = self.client.get(
             f'/manager/{self.business1.id}/transactions',
-            query_string={'staff_id': self.manager_staff.id}
+            query_string={'staff_id': 999999}, headers=self.web_auth
         )
         self.assertEqual(resp.status_code, 200)
         data = resp.get_json()
@@ -95,21 +108,20 @@ class Phase6TestCase(unittest.TestCase):
         # Attempt to access other business – should be forbidden
         resp2 = self.client.get(
             f'/manager/{self.business2.id}/transactions',
-            query_string={'staff_id': self.manager_staff.id}
+            query_string={'staff_id': self.manager_staff.id}, headers=self.web_auth
         )
         self.assertEqual(resp2.status_code, 403)
-        self.assertIn('Acceso no autorizado', resp2.get_json()['message'])
+        self.assertIn('no autorizado', resp2.get_json()['message'])
 
     def test_reward_notification_triggered_on_stamp_limit(self):
         # Process a transaction that reaches the stamp reward limit (5)
         payload = {
-            'customer_id': self.customer.id,
-            'business_id': self.business1.id,
+            'token': self.customer.qr_code_token,
             'action': 'earn_stamp',
             'amount': 1,
-            'staff_id': self.manager_staff.id,
+            'request_id': 'phase6-reward',
         }
-        resp = self.client.post('/api/scanner/process', json=payload)
+        resp = self.client.post('/api/scanner/process', json=payload, headers=self.auth)
         self.assertEqual(resp.status_code, 200)
         data = resp.get_json()
         self.assertIn(data['wallet_sync']['google_status'], ['mock_success', 'success'])
@@ -117,19 +129,19 @@ class Phase6TestCase(unittest.TestCase):
     def test_anti_fraud_cooldown_enforced(self):
         # First transaction – should succeed
         payload = {
-            'customer_id': self.customer.id,
-            'business_id': self.business1.id,
+            'token': self.customer.qr_code_token,
             'action': 'earn_stamp',
             'amount': 1,
-            'staff_id': self.manager_staff.id,
+            'request_id': 'phase6-cooldown-1',
         }
-        resp1 = self.client.post('/api/scanner/process', json=payload)
+        resp1 = self.client.post('/api/scanner/process', json=payload, headers=self.auth)
         self.assertEqual(resp1.status_code, 200)
 
         # Immediate second transaction – should be blocked by cooldown
-        resp2 = self.client.post('/api/scanner/process', json=payload)
+        payload['request_id'] = 'phase6-cooldown-2'
+        resp2 = self.client.post('/api/scanner/process', json=payload, headers=self.auth)
         self.assertEqual(resp2.status_code, 429)
-        self.assertIn('Intenta de nuevo en', resp2.get_json()['message'])
+        self.assertIn('cooldown', resp2.get_json()['message'])
 
 if __name__ == '__main__':
     unittest.main()
