@@ -3,6 +3,7 @@ import time
 import logging
 import jwt
 import requests
+from flask import current_app, has_app_context
 from typing import Dict, Any, Tuple, Optional
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -78,11 +79,16 @@ class GoogleWalletService:
             "hexBackgroundColor": business.primary_color or "#1E3A8A",
         }
 
-        # Optional logo URI if available
-        if business.logo_url:
+        # Google requires a publicly reachable HTTPS URL for images.
+        logo_uri = business.logo_url
+        if not logo_uri and business.logo_path and has_app_context():
+            public_base_url = current_app.config.get("PUBLIC_BASE_URL", "")
+            if public_base_url.startswith("https://"):
+                logo_uri = f"{public_base_url}/static/{business.logo_path.lstrip('/')}"
+        if logo_uri:
             loyalty_class["programLogo"] = {
                 "sourceUri": {
-                    "uri": business.logo_url
+                    "uri": logo_uri
                 },
                 "contentDescription": {
                     "defaultValue": {

@@ -14,6 +14,14 @@ def create_app(config_name=None):
     config_class = config_by_name.get(config_name, config_by_name["default"])
     app.config.from_object(config_class)
 
+    if config_name == "production":
+        secret = os.getenv("SECRET_KEY", app.config.get("SECRET_KEY") or "")
+        app.config["SECRET_KEY"] = secret
+        forbidden = {"default-dev-secret-key-j2m", "change-this-secret-key-in-production-j2m-loyalty"}
+        if secret in forbidden or len(secret) < 32:
+            raise RuntimeError("Producción requiere SECRET_KEY aleatoria de al menos 32 caracteres.")
+        app.config["DEBUG"] = False
+
     # Initialize extensions
     db.init_app(app)
     migrate.init_app(app, db)

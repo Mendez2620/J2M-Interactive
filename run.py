@@ -22,7 +22,7 @@ def seed_db():
 if __name__ == "__main__":
     host = os.getenv("HOST", "127.0.0.1")
     port = int(os.getenv("PORT", 5000))
-    debug = os.getenv("FLASK_DEBUG", "True").lower() in ("true", "1", "t")
+    debug = False if os.getenv("FLASK_ENV", "development") == "production" else os.getenv("FLASK_DEBUG", "True").lower() in ("true", "1", "t")
 
     print(f"Starting J2M Interactive Loyalty SaaS on http://{host}:{port}")
     app.run(host=host, port=port, debug=debug)

@@ -1,8 +1,10 @@
 from datetime import date, datetime
 from flask import Blueprint, jsonify, render_template, request, send_file, redirect, current_app
+from io import BytesIO
 import os
-import tempfile
 import uuid
+import warnings
+from PIL import Image, UnidentifiedImageError
 from werkzeug.utils import secure_filename
 from app.extensions import db
 from app.models import Business, BusinessCategory, Customer, PlatformAdmin, Staff, Transaction
@@ -12,44 +14,74 @@ from app.services import ExportService
 admin_bp = Blueprint("admin", __name__, url_prefix="/admin")
 
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
-IMAGE_SIGNATURES = {
-    "png": (b"\x89PNG\r\n\x1a\n",),
-    "jpg": (b"\xff\xd8\xff",),
-    "webp": (b"RIFF",),
-}
+ALLOWED_IMAGE_FORMATS = {"PNG": "png", "JPEG": "jpg", "WEBP": "webp"}
 
 
-def save_image(upload):
-    """Validate image extension, size and magic bytes, then store under static/uploads."""
+def validate_image(upload):
+    """Fully decode an uploaded image with Pillow and return safe in-memory data."""
     if not upload or not upload.filename:
         return None
     safe_name = secure_filename(upload.filename)
     extension = safe_name.rsplit(".", 1)[-1].lower() if "." in safe_name else ""
     if extension == "jpeg":
         extension = "jpg"
-    if extension not in IMAGE_SIGNATURES:
+    if extension not in set(ALLOWED_IMAGE_FORMATS.values()):
         raise ValueError("Solo se permiten imágenes PNG, JPG y WEBP.")
     content = upload.read(MAX_IMAGE_BYTES + 1)
-    upload.stream.seek(0)
     if len(content) > MAX_IMAGE_BYTES:
         raise ValueError("Cada imagen debe pesar 5 MB o menos.")
-    valid = any(content.startswith(signature) for signature in IMAGE_SIGNATURES[extension])
-    if extension == "png":
-        valid = valid and len(content) >= 20 and content[-8:-4] == b"IEND"
-    elif extension == "jpg":
-        valid = valid and len(content) >= 4 and content.endswith(b"\xff\xd9")
-    elif extension == "webp":
-        declared_size = int.from_bytes(content[4:8], "little") + 8 if len(content) >= 12 else 0
-        valid = content.startswith(b"RIFF") and content[8:12] == b"WEBP" and declared_size <= len(content)
-    if not valid:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(BytesIO(content)) as image:
+                detected_format = image.format
+                image.verify()
+            with Image.open(BytesIO(content)) as image:
+                image.load()
+    except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError, Image.DecompressionBombWarning):
         raise ValueError("El contenido del archivo no corresponde a una imagen válida.")
+    detected_extension = ALLOWED_IMAGE_FORMATS.get(detected_format)
+    if detected_extension != extension:
+        raise ValueError("La extensión no coincide con el formato real de la imagen.")
+    return content, extension
+
+
+def persist_images(files):
+    """Validate the whole batch before writing, preventing partial orphan files."""
+    prepared = {
+        field: validate_image(files.get(field))
+        for field in ("logo_file", "cover_file")
+    }
     upload_dir = current_app.config.get("UPLOAD_FOLDER")
     if not upload_dir:
         upload_dir = os.path.join(current_app.root_path, "static", "uploads")
     os.makedirs(upload_dir, exist_ok=True)
-    filename = f"{uuid.uuid4().hex}.{extension}"
-    upload.save(os.path.join(upload_dir, filename))
-    return f"uploads/{filename}"
+    paths = {}
+    created_files = []
+    try:
+        for field, prepared_image in prepared.items():
+            if not prepared_image:
+                paths[field] = None
+                continue
+            content, extension = prepared_image
+            filename = f"{uuid.uuid4().hex}.{extension}"
+            absolute_path = os.path.join(upload_dir, filename)
+            with open(absolute_path, "xb") as image_file:
+                image_file.write(content)
+            created_files.append(absolute_path)
+            paths[field] = f"uploads/{filename}"
+    except Exception:
+        cleanup_created_files(created_files)
+        raise
+    return paths, created_files
+
+
+def cleanup_created_files(paths):
+    for path in paths:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
 
 
 def parse_loyalty(data, current=None):
@@ -218,9 +250,11 @@ def create_business():
     wallet_terms = (data.get("wallet_terms") or "").strip() or None
     is_active = str(data.get("is_active", "true")).lower() in ("true", "1", "t")
 
+    created_files = []
     try:
-        logo_path = save_image(files.get("logo_file")) if files else None
-        cover_path = save_image(files.get("cover_file")) if files else None
+        image_paths, created_files = persist_images(files) if files else ({}, [])
+        logo_path = image_paths.get("logo_file")
+        cover_path = image_paths.get("cover_file")
     except ValueError as exc:
         return jsonify({"status": "error", "message": str(exc)}), 400
 
@@ -243,8 +277,13 @@ def create_business():
         wallet_terms=wallet_terms,
         is_active=is_active,
     )
-    db.session.add(business)
-    db.session.commit()
+    try:
+        db.session.add(business)
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        cleanup_created_files(created_files)
+        raise
 
     return jsonify({
         "status": "success",
@@ -338,6 +377,7 @@ def update_business(business_id: int):
         try:
             loyalty_type, points, stamps = parse_loyalty(data, business)
         except ValueError as exc:
+            db.session.rollback()
             return jsonify({"status": "error", "message": str(exc)}), 400
         business.loyalty_type = loyalty_type
         business.points_per_currency = points
@@ -353,17 +393,25 @@ def update_business(business_id: int):
         business.is_active = True if str(data["is_active"]).lower() in ("true", "1", "t", "on") else False
     # File upload handling for logo and cover (if multipart/form-data)
     if request.content_type and request.content_type.startswith('multipart/form-data'):
+        created_files = []
         try:
-            logo_path = save_image(request.files.get("logo_file"))
-            cover_path = save_image(request.files.get("cover_file"))
+            image_paths, created_files = persist_images(request.files)
+            logo_path = image_paths.get("logo_file")
+            cover_path = image_paths.get("cover_file")
         except ValueError as exc:
+            db.session.rollback()
             return jsonify({"status": "error", "message": str(exc)}), 400
         if logo_path:
             business.logo_path = logo_path
         if cover_path:
             business.cover_path = cover_path
 
-    db.session.commit()
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        cleanup_created_files(locals().get("created_files", []))
+        raise
 
     if request.is_json or request.headers.get("Accept") == "application/json":
         return jsonify({

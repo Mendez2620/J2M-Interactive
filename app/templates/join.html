@@ -3,15 +3,15 @@
 {% block title %}Únete a {{ business.name }} | Tarjeta Digital de Lealtad{% endblock %}
 
 {% block content %}
-<div class="min-h-screen flex items-center justify-center py-8 px-4 sm:px-6 lg:px-8" 
-     style="background: linear-gradient(135deg, {{ business.primary_color }}15 0%, #ffffff 100%);">
+<div class="min-h-screen flex items-center justify-center py-8 px-4 sm:px-6 lg:px-8 bg-cover bg-center"
+     style="{% if business.cover_path %}background-image: linear-gradient(rgba(255,255,255,.82), rgba(255,255,255,.94)), url('{{ url_for('static', filename=business.cover_path) }}');{% else %}background: linear-gradient(135deg, {{ business.primary_color }}15 0%, #ffffff 100%);{% endif %}">
   <div class="max-w-md w-full space-y-6 bg-white p-6 sm:p-8 rounded-3xl shadow-xl border border-slate-100">
     
     <!-- Business Header & Branding -->
     <div class="text-center">
-      {% if business.logo_url %}
+      {% if business.logo_path or business.logo_url %}
         <img class="mx-auto h-20 w-auto rounded-2xl shadow-sm object-contain p-2 bg-white border border-slate-100" 
-             src="{{ business.logo_url }}" alt="{{ business.name }}">
+             src="{{ url_for('static', filename=business.logo_path) if business.logo_path else business.logo_url }}" alt="{{ business.name }}">
       {% else %}
         <div class="mx-auto h-16 w-16 rounded-2xl flex items-center justify-center text-white text-2xl font-bold shadow-md"
              style="background-color: {{ business.primary_color }};">

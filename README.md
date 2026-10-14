@@ -110,7 +110,7 @@ En desarrollo local, el sistema utiliza **SQLite** (`sqlite:///j2m_loyalty.db`) 
 python -m flask --app run.py db upgrade
 python -m flask --app run.py create-platform-admin
 ```
-El comando solicita nombre, correo, teléfono y contraseña sin incorporar secretos al código. La contraseña debe tener al menos 12 caracteres, mayúsculas, minúsculas y un número. En producción configura una `SECRET_KEY` aleatoria y `SESSION_COOKIE_SECURE=true` bajo HTTPS.
+El comando solicita nombre, correo, teléfono y contraseña sin incorporar secretos al código. La contraseña debe tener al menos 12 caracteres, mayúsculas, minúsculas y un número. Producción se niega a iniciar con la clave predeterminada o con una `SECRET_KEY` menor de 32 caracteres, fuerza `DEBUG=False` y debe usar `SESSION_COOKIE_SECURE=true` bajo HTTPS.
 
 ### 6. Iniciar la aplicación
 ```bash
@@ -125,7 +125,7 @@ La aplicación estará disponible en:
 
 ## 🧪 Ejecución de Pruebas Unitarias
 
-El proyecto cuenta con una suite completa de **38 pruebas unitarias e integración**:
+El proyecto cuenta con una suite completa de **46 pruebas unitarias e integración**. El mismo comando se ejecuta automáticamente en GitHub Actions para pushes y pull requests:
 
 ```bash
 python -m unittest discover tests -v
@@ -160,7 +160,9 @@ python -m unittest discover tests -v
 ## 🔐 Configuración para Producción
 
 ### Imágenes de negocios
-Los formularios administrativos aceptan `logo_file` y `cover_file` en PNG, JPG o WEBP, con máximo de 5 MB por imagen. Se guardan con nombres únicos bajo `app/static/uploads/`, directorio excluido de Git. `logo_url` continúa disponible para compatibilidad con Wallet. La sustitución conserva el archivo anterior para evitar borrar recursos compartidos; la limpieza debe realizarse con una tarea de mantenimiento que compruebe referencias.
+Los formularios administrativos aceptan `logo_file` y `cover_file` en PNG, JPG o WEBP, con máximo de 5 MB por imagen y 12 MB por solicitud. Pillow decodifica y verifica el contenido real antes de escribir el lote completo; si una imagen o el commit falla, se eliminan solamente los archivos recién creados. Se guardan con nombres únicos bajo `app/static/uploads/`, directorio excluido de Git. La vista pública usa el logo y la portada subidos; `logo_url` continúa disponible como alternativa remota.
+
+Google Wallet usa el archivo local únicamente cuando `PUBLIC_BASE_URL` contiene la URL pública HTTPS del despliegue. Apple Wallet convierte el logo y portada validados a recursos PNG del paquete. La aceptación final por Google, las dimensiones/revisión visual de Apple y la distribución real siguen dependiendo de credenciales, consolas y dispositivos externos.
 
 ### Seguridad pendiente de las APIs operativas
 El login web administrativo sí usa sesiones seguras y comprobación de cuenta activa. En cambio, `/api/scanner/login` aún devuelve un token simulado y las rutas de manager confían en un `staff_id` enviado por el cliente; no deben considerarse mecanismos de producción. La siguiente prioridad es emitir JWT firmados con expiración/rotación, validar el token en cada operación y derivar `staff_id` y `business_id` exclusivamente de sus claims, incluyendo pruebas de aislamiento entre tenants.

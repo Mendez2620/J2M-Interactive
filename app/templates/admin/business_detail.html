@@ -299,7 +299,7 @@
                   </span>
                 </td>
                 <td class="py-3 px-4 text-right space-x-1">
-                  <button type="button" onclick="openResetModal({{ s.id }}, '{{ s.username|e }}')" class="px-2.5 py-1 text-xs rounded border border-amber-200 bg-amber-50 hover:bg-amber-100 text-amber-800" title="Restablecer contraseña"><i class="fa-solid fa-key text-[10px]"></i></button>
+                  <button type="button" data-reset-password data-staff-id="{{ s.id }}" data-username="{{ s.username }}" class="px-2.5 py-1 text-xs rounded border border-amber-200 bg-amber-50 hover:bg-amber-100 text-amber-800" title="Restablecer contraseña"><i class="fa-solid fa-key text-[10px]"></i></button>
                   <!-- Toggle status form -->
                   <form method="POST" action="/admin/staff/{{ s.id }}/toggle-status" class="inline-block">
                     <button type="submit"
@@ -542,11 +542,14 @@
   function closeStaffModal() {
     document.getElementById('staffModal').classList.add('hidden');
   }
-  function openResetModal(id, username){const form=document.getElementById('resetPasswordForm');form.action=`/admin/staff/${id}/reset-password`;document.getElementById('resetUserLabel').textContent=`Usuario: ${username}`;document.getElementById('resetPasswordModal').classList.remove('hidden');}
+  function openResetModal(id, username){const form=document.getElementById('resetPasswordForm');form.action=`/admin/staff/${encodeURIComponent(id)}/reset-password`;document.getElementById('resetUserLabel').textContent=`Usuario: ${username}`;document.getElementById('resetPasswordModal').classList.remove('hidden');}
   function closeResetModal(){document.getElementById('resetPasswordModal').classList.add('hidden');document.getElementById('resetPasswordForm').reset();}
   function previewUpload(input,id){const img=document.getElementById(id);if(input.files&&input.files[0]){img.src=URL.createObjectURL(input.files[0]);img.classList.remove('hidden');}}
 
   document.addEventListener('DOMContentLoaded', function() {
+    document.querySelectorAll('[data-reset-password]').forEach((button) => {
+      button.addEventListener('click', () => openResetModal(button.dataset.staffId, button.dataset.username));
+    });
     const params = new URLSearchParams(window.location.search);
     const activeTab = params.get('tab') || 'info';
     switchTab(activeTab);

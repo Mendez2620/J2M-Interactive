@@ -4,7 +4,10 @@ import os
 import hashlib
 import zipfile
 import logging
+from pathlib import Path
 from typing import Dict, Any, Optional, List
+from flask import current_app, has_app_context
+from PIL import Image, ImageOps, UnidentifiedImageError
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.serialization import pkcs7
@@ -241,15 +244,19 @@ class AppleWalletService:
         pass_dict = self.build_pass_json(customer)
         pass_json_bytes = json.dumps(pass_dict, indent=2, ensure_ascii=False).encode("utf-8")
 
-        # Required pass assets
+        business = customer.business
+        logo_asset = self._business_asset(business.logo_path, (320, 100), fit=False)
+        strip_asset = self._business_asset(business.cover_path, (750, 294), fit=True)
+
+        # Required pass assets. Uploaded branding is converted to safe PNG data.
         assets = {
             "pass.json": pass_json_bytes,
-            "icon.png": MINIMAL_PNG_BYTES,
-            "icon@2x.png": MINIMAL_PNG_BYTES,
-            "logo.png": MINIMAL_PNG_BYTES,
-            "logo@2x.png": MINIMAL_PNG_BYTES,
-            "strip.png": MINIMAL_PNG_BYTES,
-            "strip@2x.png": MINIMAL_PNG_BYTES,
+            "icon.png": logo_asset or MINIMAL_PNG_BYTES,
+            "icon@2x.png": logo_asset or MINIMAL_PNG_BYTES,
+            "logo.png": logo_asset or MINIMAL_PNG_BYTES,
+            "logo@2x.png": logo_asset or MINIMAL_PNG_BYTES,
+            "strip.png": strip_asset or MINIMAL_PNG_BYTES,
+            "strip@2x.png": strip_asset or MINIMAL_PNG_BYTES,
         }
 
         # Build manifest.json with SHA-1 hashes of all assets
@@ -272,6 +279,32 @@ class AppleWalletService:
 
         pkpass_buffer.seek(0)
         return pkpass_buffer
+
+    @staticmethod
+    def _business_asset(relative_path, size, fit):
+        if not relative_path or not has_app_context():
+            return None
+        configured_upload = current_app.config.get("UPLOAD_FOLDER")
+        if configured_upload and relative_path.startswith("uploads/"):
+            static_root = Path(configured_upload).resolve()
+            image_path = (static_root / Path(relative_path).name).resolve()
+        else:
+            static_root = Path(current_app.static_folder).resolve()
+            image_path = (static_root / relative_path).resolve()
+        try:
+            image_path.relative_to(static_root)
+            with Image.open(image_path) as source:
+                image = source.convert("RGBA")
+                if fit:
+                    image = ImageOps.fit(image, size, method=Image.Resampling.LANCZOS)
+                else:
+                    image.thumbnail(size, Image.Resampling.LANCZOS)
+                output = io.BytesIO()
+                image.save(output, format="PNG", optimize=True)
+                return output.getvalue()
+        except (FileNotFoundError, OSError, UnidentifiedImageError, ValueError):
+            logger.warning("Could not load business branding asset: %s", relative_path)
+            return None
 
     def send_push_notification(self, push_token: str) -> bool:
         """

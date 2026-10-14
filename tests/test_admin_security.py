@@ -1,6 +1,7 @@
 import base64
 import io
 import unittest
+import os
 
 from app import create_app
 from app.extensions import db
@@ -49,6 +50,20 @@ class AdminSecurityTestCase(unittest.TestCase):
         self.assertIn(b"Ajustes", dashboard.data)
         self.assertEqual(detail.status_code, 200)
         self.assertIn(b"Restablecer", detail.data)
+
+    def test_reset_button_does_not_interpolate_username_into_javascript(self):
+        self.login()
+        username = "x');alert(1);//"
+        staff = Staff(business_id=self.business.id, username=username, role="cashier", is_active=True)
+        staff.set_password("TenantSeguro123")
+        db.session.add(staff)
+        db.session.commit()
+        response = self.client.get(f"/admin/business/{self.business.id}?tab=staff")
+        html = response.get_data(as_text=True)
+        self.assertNotIn("onclick=\"openResetModal", html)
+        self.assertIn("data-reset-password", html)
+        self.assertIn("data-username=", html)
+        self.assertNotIn("alert(1)", html.split("<script>", 1)[-1])
 
     def test_login_rejects_wrong_password_and_inactive_account(self):
         bad = self.client.post("/admin/login", data={"email": "global@j2m.test", "password": "incorrecta"})
@@ -105,6 +120,9 @@ class AdminSecurityTestCase(unittest.TestCase):
         updated = self.client.post(f"/admin/business/{created['id']}/update", data={"cover_file": (io.BytesIO(PNG_1PX), "cover.png")}, content_type="multipart/form-data", headers={"Accept": "application/json"})
         self.assertEqual(updated.status_code, 200)
         self.assertTrue(updated.get_json()["business"]["cover_path"].startswith("uploads/"))
+        public_page = self.client.get("/join/con-logo").get_data(as_text=True)
+        self.assertIn(created["logo_path"], public_page)
+        self.assertIn(updated.get_json()["business"]["cover_path"], public_page)
         dangerous = self.client.post("/admin/business/create", data={"name": "Malo", "slug": "malo", "logo_file": (io.BytesIO(b"MZ executable"), "payload.png")}, content_type="multipart/form-data")
         self.assertEqual(dangerous.status_code, 400)
 
@@ -113,6 +131,20 @@ class AdminSecurityTestCase(unittest.TestCase):
         oversized = PNG_1PX + (b"0" * (5 * 1024 * 1024))
         response = self.client.post("/admin/business/create", data={"name": "Grande", "slug": "grande", "logo_file": (io.BytesIO(oversized), "large.png")}, content_type="multipart/form-data")
         self.assertEqual(response.status_code, 400)
+
+    def test_two_five_mb_images_fit_request_limit_and_partial_failure_leaves_no_files(self):
+        self.login()
+        upload_dir = self.app.config["UPLOAD_FOLDER"]
+        os.makedirs(upload_dir, exist_ok=True)
+        before = set(os.listdir(upload_dir))
+        large_png = PNG_1PX + (b"0" * (5 * 1024 * 1024 - len(PNG_1PX)))
+        accepted = self.client.post("/admin/business/create", data={"name": "Dos imágenes", "slug": "dos-imagenes", "logo_file": (io.BytesIO(large_png), "logo.png"), "cover_file": (io.BytesIO(large_png), "cover.png")}, content_type="multipart/form-data")
+        self.assertEqual(accepted.status_code, 201)
+        after_success = set(os.listdir(upload_dir))
+        self.assertEqual(len(after_success - before), 2)
+        rejected = self.client.post("/admin/business/create", data={"name": "Parcial", "slug": "parcial", "logo_file": (io.BytesIO(PNG_1PX), "logo.png"), "cover_file": (io.BytesIO(b"not an image"), "cover.png")}, content_type="multipart/form-data")
+        self.assertEqual(rejected.status_code, 400)
+        self.assertEqual(set(os.listdir(upload_dir)), after_success)
 
     def test_loyalty_validation_for_create_and_update(self):
         self.login()

@@ -99,6 +99,13 @@ class GoogleWalletTestCase(unittest.TestCase):
         self.assertEqual(loyalty_object["loyaltyPoints"]["label"], "Puntos")
         self.assertEqual(loyalty_object["loyaltyPoints"]["balance"]["string"], "350 pts")
 
+    def test_uploaded_logo_uses_public_https_url(self):
+        self.app.config["PUBLIC_BASE_URL"] = "https://loyalty.example"
+        self.business_points.logo_path = "uploads/logo-safe.png"
+        db.session.commit()
+        loyalty_class = GoogleWalletService().create_or_update_class(self.business_points)
+        self.assertEqual(loyalty_class["programLogo"]["sourceUri"]["uri"], "https://loyalty.example/static/uploads/logo-safe.png")
+
     def test_google_wallet_endpoint_success(self):
         """Test GET /api/customers/<id>/wallet/google endpoint with valid customer."""
         response = self.client.get(f"/api/customers/{self.customer_stamps.id}/wallet/google")
