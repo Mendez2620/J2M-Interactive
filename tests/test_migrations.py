@@ -16,6 +16,7 @@ EXPECTED_TABLES = {
     "alembic_version", "apple_devices", "business_categories", "businesses",
     "customers", "platform_admins", "staff", "transactions",
     "staff_sessions",
+    "access_audits",
 }
 
 
@@ -72,7 +73,7 @@ class MigrationTestCase(unittest.TestCase):
                 self.assertEqual(connection.execute("SELECT id, name, slug FROM businesses").fetchall(), [(1, "Negocio existente", "existente")])
                 columns = {row[1] for row in connection.execute("PRAGMA table_info(businesses)")}
                 self.assertTrue({"logo_path", "cover_path"} <= columns)
-                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "d5e6f7a8b9c0")
+                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "e6f7a8b9c0d1")
                 self.assertEqual(connection.execute("SELECT web_access_enabled, mobile_access_enabled FROM businesses WHERE id = 1").fetchone(), (0, 0))
 
     def test_downgrade_is_blocked_before_destroying_fresh_schema(self):
@@ -88,7 +89,7 @@ class MigrationTestCase(unittest.TestCase):
                 self.assertEqual(connection.execute("SELECT name FROM businesses WHERE id = 1").fetchone()[0], "Conservar")
                 columns = {row[1] for row in connection.execute("PRAGMA table_info(businesses)")}
                 self.assertTrue({"logo_path", "cover_path"} <= columns)
-                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "d5e6f7a8b9c0")
+                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "e6f7a8b9c0d1")
 
     def test_idempotency_migration_preserves_rows_and_scopes_keys_by_business(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
@@ -119,6 +120,23 @@ class MigrationTestCase(unittest.TestCase):
                 connection.execute(
                     "INSERT INTO transactions (business_id, customer_id, type, points_amount, stamps_amount, purchase_amount, request_id, request_fingerprint, timestamp) VALUES (2, 2, 'earn', 0, 1, 0, 'shared-key', 'b', '2026-01-02')"
                 )
+
+    def test_access_audit_migration_preserves_existing_permissions_and_users(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            path = Path(directory) / "access-audit.sqlite"
+            self.upgrade(path, "d5e6f7a8b9c0")
+            with sqlite3.connect(path) as connection:
+                connection.execute(
+                    "INSERT INTO businesses (id, name, slug, primary_color, secondary_color, loyalty_type, points_per_currency, stamps_reward_limit, cooldown_minutes, is_active, web_access_enabled, mobile_access_enabled, created_at) VALUES (1, 'Conservar', 'conservar', '#000000', '#FFFFFF', 'stamps', 1.0, 10, 0, 1, 1, 1, '2026-01-01')"
+                )
+                connection.execute(
+                    "INSERT INTO staff (id, business_id, username, password_hash, role, is_active, web_access_enabled, mobile_access_enabled, auth_version, permissions, created_at) VALUES (1, 1, 'gerente', 'hash', 'manager', 1, 1, 0, 3, 'view_stats,manage_cashiers', '2026-01-01')"
+                )
+            self.upgrade(path)
+            with sqlite3.connect(path) as connection:
+                self.assertIn("access_audits", {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")})
+                self.assertEqual(connection.execute("SELECT username, auth_version, permissions FROM staff WHERE id = 1").fetchone(), ("gerente", 3, "view_stats,manage_cashiers"))
+                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "e6f7a8b9c0d1")
 
 
 if __name__ == "__main__":
