@@ -24,7 +24,7 @@ PROFILE_PERMISSIONS = {
 # The old capability keeps its original cashier-management scope, but never
 # grants password reset or mobile access implicitly.
 LEGACY_PERMISSION_ALIASES = {
-    "manage_cashiers": {"view_cashiers", "create_cashiers", "edit_cashiers", "toggle_cashiers"},
+    "manage_cashiers": {"view_cashiers", "create_cashiers"},
 }
 
 

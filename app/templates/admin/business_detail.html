@@ -627,10 +627,15 @@
       const profiles = {basic: ['view_stats'], operational: ['view_stats','view_transactions','view_customers','export_reports','view_cashiers','create_cashiers','edit_cashiers','toggle_cashiers']};
       document.querySelectorAll('input[name="permission"]').forEach(input => input.checked = profiles[event.target.value].includes(input.value));
     });
+    document.getElementById('permissionGroups').addEventListener('change', (event) => {
+      if (event.target.matches('input[name="permission"]')) {
+        document.getElementById('permissionProfile').value = 'custom';
+      }
+    });
     permissionsForm.addEventListener('submit', async (event) => {
       event.preventDefault(); const save = document.getElementById('savePermissions'); save.disabled = true; permissionsMessage.classList.add('hidden');
       const payload = {profile: document.getElementById('permissionProfile').value, web_access_enabled: document.getElementById('permissionWebAccess').checked, mobile_access_enabled: document.getElementById('permissionMobileAccess').checked, permissions: [...document.querySelectorAll('input[name="permission"]:checked')].map(input => input.value)};
-      try { const response = await fetch(permissionsEndpoint, {method: 'PUT', headers: {'Content-Type':'application/json','Accept':'application/json','X-CSRFToken':document.querySelector('meta[name="csrf-token"]').content}, body: JSON.stringify(payload)}); const data = await response.json(); if (!response.ok) throw new Error(data.message || 'Los cambios no se guardaron.'); showPermissionsMessage('Cambios guardados. Las sesiones anteriores fueron invalidadas.', true); loadedPermissions.staff = data.staff; }
+      try { const response = await fetch(permissionsEndpoint, {method: 'PUT', headers: {'Content-Type':'application/json','Accept':'application/json','X-CSRFToken':document.querySelector('meta[name="csrf-token"]').content}, body: JSON.stringify(payload)}); const data = await response.json(); if (!response.ok) throw new Error(data.message || 'Los cambios no se guardaron.'); showPermissionsMessage('Cambios guardados. Las sesiones anteriores fueron invalidadas.', true); loadedPermissions.staff = data.staff; window.setTimeout(() => { const url = new URL(window.location.href); url.searchParams.set('tab', 'staff'); window.location.assign(url.toString()); }, 500); }
       catch (error) { showPermissionsMessage(error.message, false); } finally { save.disabled = false; }
     });
     document.querySelectorAll('[data-reset-password]').forEach((button) => {

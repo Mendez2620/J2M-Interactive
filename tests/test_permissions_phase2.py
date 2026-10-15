@@ -74,6 +74,8 @@ class PermissionsPhase2TestCase(unittest.TestCase):
         self.admin_login()
         valid = self.client.put(self.permissions_url(), json={"profile": "custom", "permissions": ["view_stats", "reset_cashier_password", "scanner_operate"], "web_access_enabled": True, "mobile_access_enabled": True})
         self.assertEqual(valid.status_code, 200)
+        self.assertEqual(valid.get_json()["staff"]["permissions"], ["reset_cashier_password", "scanner_operate", "view_stats"])
+        self.assertEqual(self.client.get(self.permissions_url()).get_json()["profile"], "custom")
         for permissions in (["unknown"], ["view_stats", "view_stats"]):
             response = self.client.put(self.permissions_url(), json={"profile": "custom", "permissions": permissions, "web_access_enabled": True, "mobile_access_enabled": True})
             self.assertEqual(response.status_code, 400)
@@ -130,12 +132,31 @@ class PermissionsPhase2TestCase(unittest.TestCase):
         db.session.commit()
         headers = self.token(self.manager)
         self.assertEqual(self.client.get(f"/manager/business/{self.business.id}/staff", headers=headers).status_code, 200)
-        self.assertEqual(self.client.post(f"/manager/business/{self.business.id}/staff/{self.cashier.id}/toggle-status", headers=headers).status_code, 200)
+        self.assertEqual(self.client.patch(f"/manager/business/{self.business.id}/staff/{self.cashier.id}", headers=headers, json={"name": "No autorizado"}).status_code, 403)
+        self.assertEqual(self.client.post(f"/manager/business/{self.business.id}/staff/{self.cashier.id}/toggle-status", headers=headers).status_code, 403)
         self.assertEqual(self.client.post(f"/manager/business/{self.business.id}/staff/{self.cashier.id}/reset-password", headers=headers, json={"password": "ChangedPass123", "password_confirmation": "ChangedPass123"}).status_code, 403)
-        self.cashier.is_active = True
-        db.session.commit()
         cashier_headers = self.token(self.cashier, "web")
         self.assertEqual(self.client.post(f"/manager/business/{self.business.id}/staff", headers=cashier_headers, json={"username": "forbidden", "password": "Forbidden123"}).status_code, 403)
+
+    def test_sensitive_admin_actions_are_audited_without_secrets(self):
+        self.admin_login()
+        created = self.client.post(f"/admin/business/{self.business.id}/staff", json={
+            "username": "audited", "name": "Audited", "role": "cashier", "password": "SecretValue123",
+        })
+        self.assertEqual(created.status_code, 201)
+        staff_id = created.get_json()["staff"]["id"]
+        self.assertEqual(self.client.post(f"/admin/business/{self.business.id}/access/web", headers={"Accept": "application/json"}).status_code, 200)
+        self.assertEqual(self.client.post(f"/admin/staff/{staff_id}/access/mobile", headers={"Accept": "application/json"}).status_code, 200)
+        self.assertEqual(self.client.post(f"/admin/staff/{staff_id}/reset-password", json={"password": "AnotherSecret123", "password_confirmation": "AnotherSecret123"}).status_code, 200)
+        self.assertEqual(self.client.post(f"/admin/staff/{staff_id}/delete", headers={"Accept": "application/json"}).status_code, 200)
+        actions = {audit.action for audit in AccessAudit.query.filter_by(business_id=self.business.id).all()}
+        self.assertTrue({"staff_created", "business_channel_updated", "staff_channel_updated", "password_reset", "staff_deleted"} <= actions)
+        business_audit = AccessAudit.query.filter_by(action="business_channel_updated").one()
+        self.assertIsNone(business_audit.affected_staff_id)
+        serialized = " ".join((audit.previous_state or "") + (audit.new_state or "") for audit in AccessAudit.query.all())
+        self.assertNotIn("SecretValue123", serialized)
+        self.assertNotIn("AnotherSecret123", serialized)
+        self.assertNotIn("password_hash", serialized)
 
     def test_admin_modal_is_rendered_without_dynamic_event_attributes(self):
         self.admin_login()

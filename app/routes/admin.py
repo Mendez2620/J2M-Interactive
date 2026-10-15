@@ -546,6 +546,14 @@ def create_staff(business_id: int):
     staff_member.set_password(password)
 
     db.session.add(staff_member)
+    db.session.flush()
+    created_state = staff_access_state(staff_member) | {
+        "username": staff_member.username, "role": staff_member.role,
+    }
+    db.session.add(access_audit(
+        "staff_created", staff_member, new=created_state,
+        platform_admin_id=current_platform_admin().id,
+    ))
     db.session.commit()
 
     if request.is_json or request.headers.get("Accept") == "application/json":
@@ -595,6 +603,11 @@ def delete_staff(staff_id: int):
         return jsonify({"status": "error", "message": "Usuario no encontrado"}), 404
 
     business_id = staff.business_id
+    previous = staff_access_state(staff) | {"username": staff.username, "role": staff.role}
+    db.session.add(access_audit(
+        "staff_deleted", staff, previous=previous,
+        platform_admin_id=current_platform_admin().id,
+    ))
     db.session.delete(staff)
     db.session.commit()
 
@@ -640,11 +653,23 @@ def toggle_business_access(business_id: int, channel: str):
     business = db.session.get(Business, business_id)
     if not business:
         return jsonify({"status": "error", "message": "Negocio no encontrado."}), 404
+    previous = {
+        "web_access_enabled": business.web_access_enabled,
+        "mobile_access_enabled": business.mobile_access_enabled,
+    }
     field = f"{channel}_access_enabled"
     setattr(business, field, not getattr(business, field))
     if not getattr(business, field):
         for member in business.staff_members:
             revoke_staff_sessions(member)
+    new_state = {
+        "web_access_enabled": business.web_access_enabled,
+        "mobile_access_enabled": business.mobile_access_enabled,
+    }
+    db.session.add(access_audit(
+        "business_channel_updated", previous=previous, new=new_state,
+        platform_admin_id=current_platform_admin().id, business_id=business.id,
+    ))
     db.session.commit()
     if request.is_json or request.headers.get("Accept") == "application/json":
         return jsonify({"status": "success", "channel": channel, "enabled": getattr(business, field)}), 200

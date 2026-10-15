@@ -126,7 +126,7 @@ La aplicación estará disponible en:
 
 ## 🧪 Ejecución de Pruebas Unitarias
 
-El proyecto cuenta con una suite completa de **71 pruebas unitarias e integración**. El mismo comando se ejecuta automáticamente en GitHub Actions para pushes y pull requests:
+El proyecto cuenta con una suite completa de **72 pruebas unitarias e integración**. El mismo comando se ejecuta automáticamente en GitHub Actions para pushes y pull requests:
 
 ```bash
 python -m unittest discover tests -v
@@ -202,7 +202,7 @@ El Web Service PassKit conserva `ApplePass` para registrar, retirar y descargar 
 
 ### Migración de seguridad
 
-La revisión incremental `c4f1a2b3d4e5` añade canales, permisos, versión de autenticación, sesiones revocables e idempotencia sin cambiar identificadores ni saldos. La revisión `d5e6f7a8b9c0` añade fingerprints canónicos y cambia la unicidad de `request_id` al ámbito de cada negocio. La revisión `e6f7a8b9c0d1` añade el historial append-only `access_audits`. Bases existentes conservan empleados, permisos heredados, clientes, saldos, transacciones y sesiones. Se valida tanto una SQLite vacía como una heredada con datos. Los downgrades se bloquean antes de eliminar información; para revertir debe restaurarse un respaldo verificado.
+La revisión incremental `c4f1a2b3d4e5` añade canales, permisos, versión de autenticación, sesiones revocables e idempotencia sin cambiar identificadores ni saldos. La revisión `d5e6f7a8b9c0` añade fingerprints canónicos y cambia la unicidad de `request_id` al ámbito de cada negocio. La revisión `e6f7a8b9c0d1` añade el historial append-only `access_audits`; `f7a8b9c0d1e2` permite auditorías de canal a nivel negocio sin inventar un empleado afectado. Bases existentes conservan empleados, permisos heredados, clientes, saldos, transacciones y sesiones. Se valida tanto una SQLite vacía como una heredada con datos. Los downgrades se bloquean antes de eliminar información; para revertir debe restaurarse un respaldo verificado.
 
 ### Fases posteriores y riesgos conocidos
 

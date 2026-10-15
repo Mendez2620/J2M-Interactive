@@ -14,7 +14,7 @@ class AccessAudit(db.Model):
     # later deletion of an administrator, employee, or tenant record.
     platform_admin_id = db.Column(db.Integer, nullable=True)
     actor_staff_id = db.Column(db.Integer, nullable=True)
-    affected_staff_id = db.Column(db.Integer, nullable=False, index=True)
+    affected_staff_id = db.Column(db.Integer, nullable=True, index=True)
     business_id = db.Column(db.Integer, nullable=False, index=True)
     previous_state = db.Column(db.Text, nullable=True)
     new_state = db.Column(db.Text, nullable=True)
