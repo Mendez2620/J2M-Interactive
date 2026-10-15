@@ -8,6 +8,7 @@ from app.models.apple_device import AppleDevice
 from app.models.platform_admin import PlatformAdmin
 from app.models.staff_session import StaffSession
 from app.models.access_audit import AccessAudit
+from app.models.customer_recovery import CustomerRecoveryAuthorization, CustomerRecoveryChallenge
 
 __all__ = [
     "db",
@@ -20,4 +21,6 @@ __all__ = [
     "PlatformAdmin",
     "StaffSession",
     "AccessAudit",
+    "CustomerRecoveryAuthorization",
+    "CustomerRecoveryChallenge",
 ]

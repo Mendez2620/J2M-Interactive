@@ -38,6 +38,8 @@ def create_app(config_name=None):
     db.init_app(app)
     migrate.init_app(app, db)
     cors.init_app(app, resources={r"/api/*": {"origins": app.config.get("CORS_ORIGINS", "*")}})
+    from app.email_service import build_recovery_mailer
+    app.extensions["recovery_mailer"] = build_recovery_mailer(app.config)
     # Import models so SQLAlchemy / Alembic are aware of them
     from app import models  # noqa: F401
 
@@ -52,7 +54,8 @@ def create_app(config_name=None):
     def protect_admin_forms():
         from flask import jsonify, request
         protected_manager_path = request.path in {"/manager/login", "/manager/logout"} or request.path.startswith("/manager/portal")
-        if app.config.get("CSRF_ENABLED", True) and request.method in {"POST", "PUT", "PATCH", "DELETE"} and (request.path.startswith("/admin") or protected_manager_path):
+        protected_recovery_path = request.path.startswith("/recover/")
+        if app.config.get("CSRF_ENABLED", True) and request.method in {"POST", "PUT", "PATCH", "DELETE"} and (request.path.startswith("/admin") or protected_manager_path or protected_recovery_path):
             if not validate_csrf():
                 payload = {"status": "error", "message": "Token CSRF inválido o ausente."}
                 return jsonify(payload), 400

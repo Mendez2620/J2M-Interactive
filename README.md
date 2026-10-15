@@ -19,6 +19,7 @@ Plataforma SaaS Multi-Tenant para la emisión, gestión y sincronización en tie
   - Entrega del pase `.pkpass` actualizado en la pantalla de bloqueo de iOS.
 - 📍 **Geofencing & Notificaciones de Proximidad**: Muestra la tarjeta automáticamente en la pantalla bloqueada del cliente cuando se aproxima a la sucursal física.
 - 🎂 **Registro Público con Cumpleaños (`/join/<slug>`)**: Onboarding responsivo para clientes con captura de fecha de nacimiento y botones directos de guardado en Wallet.
+- ✉️ **Recuperación verificada (`/recover/<slug>`)**: reemite la tarjeta existente tras validar un código de correo temporal, sin cambiar QR, saldo ni historial.
 - 📊 **Panel Super Admin (`/admin`)**: acceso por sesión y CSRF para administradores globales separados del staff de cada negocio; incluye KPIs, branding y gestión de usuarios.
 - 🔐 **API operativa autenticada**: JWT de acceso corto, refresh rotatorio, revocación, aislamiento multinegocio, permisos explícitos y canales web/móvil independientes.
 - 📷 **Escáner web solo de desarrollo (`/scanner`)**: queda oculto y responde 404 fuera de debug; producción debe consumir la API desde la app Flutter.
@@ -126,7 +127,7 @@ La aplicación estará disponible en:
 
 ## 🧪 Ejecución de Pruebas Unitarias
 
-El proyecto cuenta con una suite completa de **80 pruebas unitarias e integración**. El mismo comando se ejecuta automáticamente en GitHub Actions para pushes y pull requests:
+El proyecto cuenta con una suite completa de **92 pruebas unitarias e integración**. El mismo comando se ejecuta automáticamente en GitHub Actions para pushes y pull requests:
 
 ```bash
 python -m unittest discover tests -v
@@ -141,6 +142,12 @@ python -m unittest discover tests -v
 | `GET` | `/api/health` | Health Check de la aplicación |
 | `GET` | `/join/<slug>` | Página pública de registro de clientes |
 | `POST` | `/join/<slug>` | Procesa registro, guarda cumpleaños y retorna enlaces a Wallets |
+| `GET` | `/recover/<slug>` | Recuperación pública de una tarjeta existente |
+| `POST` | `/recover/<slug>/request` | Solicita un código genérico sin enumerar cuentas |
+| `POST` | `/recover/<slug>/verify` | Verifica el código y crea autorización temporal de navegador |
+| `POST` | `/recover/<slug>/end` | Revoca la autorización temporal actual |
+| `GET` | `/recover/<slug>/wallet/apple` | Reemite el `.pkpass` del cliente verificado |
+| `GET` | `/recover/<slug>/wallet/google` | Redirige al guardado Google Wallet del cliente verificado |
 | `GET` | `/admin` | Panel de Control Super Admin con métricas demográficas |
 | `GET/POST` | `/admin/login` | Inicio de sesión del administrador global |
 | `POST` | `/admin/logout` | Cierre de sesión administrativa |
@@ -212,6 +219,14 @@ La navegación se construye desde el catálogo central de permisos. Dashboard, c
 `POST /join/<slug>` solo crea clientes nuevos. Si teléfono o correo ya existen responde `409` sin modificar datos ni revelar el QR; la recuperación verificada queda pendiente. Los enlaces iniciales de Wallet usan un token autenticado y cifrado, ligado al cliente y válido 15 minutos. Deben servirse exclusivamente por HTTPS y excluirse de access logs; las respuestas usan `no-store` y `Referrer-Policy: no-referrer`, y la API no devuelve por separado el JWT interno de Google. Los modos mock de Apple/Google siguen disponibles.
 
 El Web Service PassKit conserva `ApplePass` para registrar, retirar y descargar pases. Para la lista de actualizaciones, Apple no envía un token de pase porque puede haber varios: el `deviceLibraryIdentifier` actúa como secreto compartido y solo se devuelven registros asociados exactamente a ese dispositivo y `passTypeIdentifier`. Se admite la ruta oficial `GET /devices/<device>/registrations/<pass-type>` y se conserva temporalmente el alias anterior. Producción requiere HTTPS. Véase [Adding a Web Service to Update Passes](https://developer.apple.com/documentation/WalletPasses/adding-a-web-service-to-update-passes).
+
+### Recuperación de clientes por correo
+
+La recuperación crea desafíos persistentes de diez minutos con códigos de ocho dígitos almacenados únicamente mediante HMAC. Cada desafío admite cinco intentos, es de un solo uso y su consumo se realiza con una actualización condicional atómica. Los límites por correo y huella HMAC de IP también se consultan en base de datos. La autorización posterior dura 15 minutos, se guarda mediante hash y queda ligada al cliente y negocio dentro de una cookie Flask `HttpOnly`; nunca se coloca en URLs o almacenamiento web.
+
+Producción requiere SMTP configurado mediante `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM` y `SMTP_USE_TLS`. Si falta la configuración o falla la entrega, no se crea acceso y la respuesta pública sigue siendo genérica. Para desarrollo puede utilizarse Mailpit, MailHog u otro receptor SMTP local, por ejemplo puerto 1025 con TLS desactivado. Las pruebas usan exclusivamente el transportador en memoria y no exponen su bandeja mediante HTTP.
+
+Los clientes sin correo deben solicitar asistencia; recuperar por SMS requiere un proveedor real y controles equivalentes, por lo que no se simula. Reemitir una tarjeta conserva cliente, QR, número de serie Apple, saldo, movimientos y registros de dispositivos. No revoca una tarjeta instalada en un teléfono perdido; rotar una identidad comprometida es una operación distinta. La emisión real continúa dependiendo de credenciales válidas de Apple y Google; en modo mock solo se valida el paquete y la URL de desarrollo.
 
 ### Migración de seguridad
 

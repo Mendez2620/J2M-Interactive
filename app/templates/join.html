@@ -121,6 +121,7 @@
           <span>Obtener mi Tarjeta de Lealtad</span>
           <i class="fa-solid fa-arrow-right ml-2"></i>
         </button>
+        <a href="{{ url_for('recovery.recover', business_slug=business.slug) }}" class="block text-center text-sm font-semibold text-indigo-700 underline">¿Ya tienes una tarjeta? Recupérala aquí</a>
       </form>
     </div>
 
@@ -153,11 +154,6 @@
         </a>
       </div>
 
-      <div class="pt-4 border-t border-slate-100">
-        <p class="text-xs text-slate-400">
-          Código de Miembro: <span id="customer-token-display" class="font-mono font-bold text-slate-600"></span>
-        </p>
-      </div>
     </div>
     {% endif %}
 
@@ -201,7 +197,6 @@
         document.getElementById('customer-greeting').textContent = `¡Hola ${data.customer.full_name}! Guarda tu tarjeta digital en tu billetera móvil:`;
         document.getElementById('google-wallet-btn').href = data.google_wallet_url;
         document.getElementById('apple-wallet-btn').href = data.apple_wallet_url;
-        document.getElementById('customer-token-display').textContent = data.customer.qr_code_token;
       } else {
         alert(data.message || 'Ocurrió un error al registrarte. Intenta nuevamente.');
         submitBtn.disabled = false;
