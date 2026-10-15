@@ -1,4 +1,7 @@
 from flask import Blueprint, jsonify
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+from app.extensions import db
 from app.routes.auth import auth_bp
 from app.routes.business import business_bp
 from app.routes.customer import customer_bp
@@ -19,6 +22,17 @@ def health_check():
         jsonify({"status": "ok", "app": "J2M Interactive Loyalty SaaS"}),
         200,
     )
+
+
+@main_bp.route("/api/ready", methods=["GET"])
+def readiness_check():
+    """Read-only readiness probe for the critical database dependency."""
+    try:
+        db.session.execute(text("SELECT 1"))
+    except SQLAlchemyError:
+        db.session.rollback()
+        return jsonify({"status": "unavailable", "database": "unavailable"}), 503
+    return jsonify({"status": "ready", "database": "available"}), 200
 
 
 def register_routes(app):

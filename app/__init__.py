@@ -1,6 +1,11 @@
 import hmac
+import json
+import logging
 import os
-from flask import Flask
+import secrets
+import time
+from datetime import datetime, timezone
+from flask import Flask, g, jsonify, request
 from app.config import config_by_name
 from app.extensions import db, migrate, cors
 from app.routes import register_routes
@@ -31,8 +36,17 @@ def create_app(config_name=None):
         app.config["JWT_SECRET_KEY"] = jwt_secret
         if app.config.get("CORS_ORIGINS") == "*":
             raise RuntimeError("Producción requiere CORS_ORIGINS explícito.")
-        from werkzeug.middleware.proxy_fix import ProxyFix
-        app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+        if app.config.get("RECOVERY_MAIL_BACKEND") == "memory":
+            raise RuntimeError("Producción no permite el proveedor de correo en memoria.")
+        public_base_url = app.config.get("PUBLIC_BASE_URL", "")
+        if public_base_url and not public_base_url.startswith("https://"):
+            raise RuntimeError("PUBLIC_BASE_URL debe utilizar HTTPS en producción.")
+        proxy_count = app.config.get("TRUSTED_PROXY_COUNT", 0)
+        if proxy_count < 0 or proxy_count > 10:
+            raise RuntimeError("TRUSTED_PROXY_COUNT debe estar entre 0 y 10.")
+        if proxy_count:
+            from werkzeug.middleware.proxy_fix import ProxyFix
+            app.wsgi_app = ProxyFix(app.wsgi_app, x_for=proxy_count, x_proto=proxy_count, x_host=proxy_count)
 
     # Initialize extensions
     db.init_app(app)
@@ -49,10 +63,13 @@ def create_app(config_name=None):
     from app.security import csrf_token, validate_csrf, wants_json
 
     app.jinja_env.globals["csrf_token"] = csrf_token
+    app.jinja_env.globals["csp_nonce"] = lambda: getattr(g, "csp_nonce", "")
 
     @app.before_request
     def protect_admin_forms():
-        from flask import jsonify, request
+        g.request_started_at = time.perf_counter()
+        g.request_id = secrets.token_hex(16)
+        g.csp_nonce = secrets.token_urlsafe(18)
         protected_manager_path = request.path in {"/manager/login", "/manager/logout"} or request.path.startswith("/manager/portal")
         protected_recovery_path = request.path.startswith("/recover/")
         if app.config.get("CSRF_ENABLED", True) and request.method in {"POST", "PUT", "PATCH", "DELETE"} and (request.path.startswith("/admin") or protected_manager_path or protected_recovery_path):
@@ -64,13 +81,45 @@ def create_app(config_name=None):
     def upload_too_large(_error):
         return {"status": "error", "message": "El archivo excede el tamaño permitido."}, 413
 
+    @app.errorhandler(500)
+    def internal_error(error):
+        db.session.rollback()
+        app.logger.error(json.dumps({
+            "timestamp": datetime.now(timezone.utc).isoformat(), "level": "error",
+            "component": "flask", "event": "unhandled_error",
+            "request_id": getattr(g, "request_id", None),
+            "endpoint": request.endpoint, "path": request.path,
+        }), exc_info=error)
+        return jsonify({"status": "error", "message": "Error interno.",
+                        "request_id": getattr(g, "request_id", None)}), 500
+
     @app.after_request
     def security_headers(response):
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("X-Frame-Options", "DENY")
         response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
         response.headers.setdefault("Permissions-Policy", "camera=(self), geolocation=()")
-        response.headers.setdefault("Content-Security-Policy", "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://cdnjs.cloudflare.com; script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://cdnjs.cloudflare.com https://unpkg.com")
+        nonce = getattr(g, "csp_nonce", "")
+        if config_name == "production":
+            csp = (f"default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; "
+                   f"img-src 'self' data: https:; font-src 'self' https://cdnjs.cloudflare.com; "
+                   f"style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; "
+                   f"script-src 'self' 'nonce-{nonce}' https://unpkg.com; script-src-attr 'none'; "
+                   f"connect-src 'self'")
+        else:
+            csp = "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; script-src 'self' 'unsafe-inline' https://unpkg.com"
+        response.headers.setdefault("Content-Security-Policy", csp)
+        response.headers.setdefault("X-Request-ID", getattr(g, "request_id", ""))
+        if request.path.startswith(("/admin", "/manager", "/recover", "/api/scanner")):
+            response.headers.setdefault("Cache-Control", "no-store")
+        duration_ms = round((time.perf_counter() - getattr(g, "request_started_at", time.perf_counter())) * 1000, 2)
+        if app.config.get("LOG_REQUESTS"):
+            app.logger.info(json.dumps({
+                "timestamp": datetime.now(timezone.utc).isoformat(), "level": "info",
+                "component": "http", "request_id": getattr(g, "request_id", None),
+                "endpoint": request.endpoint, "path": request.path,
+                "status": response.status_code, "duration_ms": duration_ms,
+            }))
         if config_name == "production":
             response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
         return response

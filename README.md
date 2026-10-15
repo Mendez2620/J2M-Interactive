@@ -268,6 +268,12 @@ La revisión `c0d1e2f3a4b5` incorpora el ledger de lealtad y el estado de cooldo
 
 Sin credenciales reales, las pruebas usan el modo mock de Wallet: validan estructura de pases, JWT y llamadas simuladas, pero no prueban emisión efectiva en cuentas de Google/Apple, APNs ni instalación en dispositivos físicos.
 
+### Operación en producción
+
+La revisión `d1e2f3a4b5c6` añade límites de autenticación persistentes y atómicos por IP e identidad para administradores, gerentes y cajeros. La aplicación emite IDs de correlación, logs HTTP estructurados y expone `/api/ready` para verificar la base sin modificar datos. Producción usa Tailwind compilado localmente y una CSP con nonce sin `unsafe-inline` en `script-src`; los estilos inline se conservan únicamente para branding dinámico y layouts heredados.
+
+Consulte [docs/production-deployment.md](docs/production-deployment.md) para configuración, proxy, secretos, migraciones, respaldos, restauración, monitoreo y limitaciones externas.
+
 ---
 
 ## 📄 Licencia
