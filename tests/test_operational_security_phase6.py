@@ -9,6 +9,7 @@ from threading import Barrier
 from unittest.mock import patch
 
 from sqlalchemy.exc import OperationalError
+from flask import render_template
 
 from app import create_app
 from app.config import ProductionConfig, TestingConfig
@@ -132,6 +133,26 @@ class OperationalSecurityPhase6TestCase(unittest.TestCase):
         self.assertEqual(client.post("/manager/login", data=payload).status_code, 400)
         response = client.post("/manager/login", data={**payload, "csrf_token": token})
         self.assertEqual(response.status_code, 302)
+
+    def test_csp_compatible_dynamic_controls_are_explicitly_bound(self):
+        client = self.app.test_client()
+        with client.session_transaction() as browser_session:
+            browser_session["platform_admin_id"] = PlatformAdmin.query.filter_by(email="admin@example.test").one().id
+        dashboard = client.get("/admin").get_data(as_text=True)
+        detail = client.get("/admin/business/1").get_data(as_text=True)
+        with self.app.test_request_context("/scanner"):
+            scanner = render_template("scanner.html", businesses=[])
+
+        for html in (dashboard, detail, scanner):
+            self.assertNotRegex(html, r"\son(?:change|input)=")
+        for marker in ("data-auto-submit", 'data-preview-target="logoPreview"', "data-admin-selector"):
+            self.assertIn(marker, dashboard)
+        self.assertIn("select.form.requestSubmit()", dashboard)
+        self.assertIn("selectAdmin(event.target.value)", dashboard)
+        self.assertIn('data-preview-target="detailLogoPreview"', detail)
+        self.assertIn("addEventListener('change', toggleLoyaltyFields)", detail)
+        self.assertIn("data-points-preview", scanner)
+        self.assertIn("addEventListener('input', calculatePointsPreview)", scanner)
 
     def test_production_csp_local_assets_and_proxy_trust(self):
         env = {"SECRET_KEY": "session-secret-with-more-than-32-characters-a",

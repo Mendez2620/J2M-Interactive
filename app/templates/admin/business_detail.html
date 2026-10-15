@@ -118,8 +118,8 @@
           </div>
 
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div><label class="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">Sustituir logo</label><input type="file" name="logo_file" accept="image/png,image/jpeg,image/webp" class="w-full text-xs" onchange="previewUpload(this,'detailLogoPreview')"><img id="detailLogoPreview" src="{{ url_for('static', filename=business.logo_path) if business.logo_path else '' }}" class="mt-2 h-24 max-w-full object-contain rounded border {{ 'hidden' if not business.logo_path }}" alt="Vista previa del logo"></div>
-            <div><label class="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">Sustituir portada</label><input type="file" name="cover_file" accept="image/png,image/jpeg,image/webp" class="w-full text-xs" onchange="previewUpload(this,'detailCoverPreview')"><img id="detailCoverPreview" src="{{ url_for('static', filename=business.cover_path) if business.cover_path else '' }}" class="mt-2 h-24 w-full object-cover rounded border {{ 'hidden' if not business.cover_path }}" alt="Vista previa de la portada"></div>
+            <div><label class="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">Sustituir logo</label><input type="file" name="logo_file" accept="image/png,image/jpeg,image/webp" class="w-full text-xs" data-preview-target="detailLogoPreview"><img id="detailLogoPreview" src="{{ url_for('static', filename=business.logo_path) if business.logo_path else '' }}" class="mt-2 h-24 max-w-full object-contain rounded border {{ 'hidden' if not business.logo_path }}" alt="Vista previa del logo"></div>
+            <div><label class="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">Sustituir portada</label><input type="file" name="cover_file" accept="image/png,image/jpeg,image/webp" class="w-full text-xs" data-preview-target="detailCoverPreview"><img id="detailCoverPreview" src="{{ url_for('static', filename=business.cover_path) if business.cover_path else '' }}" class="mt-2 h-24 w-full object-cover rounded border {{ 'hidden' if not business.cover_path }}" alt="Vista previa de la portada"></div>
           </div>
 
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -201,7 +201,7 @@
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label class="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">Modelo de Lealtad</label>
-              <select name="loyalty_type" id="ruleLoyaltyType" onchange="toggleLoyaltyFields()"
+              <select name="loyalty_type" id="ruleLoyaltyType" data-loyalty-toggle
                       class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900 focus:outline-none focus:bg-white focus:ring-2 focus:ring-slate-900">
                 <option value="stamps" {% if business.loyalty_type == 'stamps' %}selected{% endif %}>Sellos Digitales (Stamps)</option>
                 <option value="points" {% if business.loyalty_type == 'points' %}selected{% endif %}>Puntos Acumulables (Points)</option>
@@ -646,6 +646,8 @@
         if (!window.confirm(`¿Eliminar al usuario ${form.dataset.username}?`)) event.preventDefault();
       });
     });
+    document.querySelectorAll('[data-preview-target]').forEach((input) => input.addEventListener('change', () => previewUpload(input, input.dataset.previewTarget)));
+    document.querySelector('[data-loyalty-toggle]')?.addEventListener('change', toggleLoyaltyFields);
     const params = new URLSearchParams(window.location.search);
     const activeTab = params.get('tab') || 'info';
     switchTab(activeTab);
