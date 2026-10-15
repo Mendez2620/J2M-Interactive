@@ -126,7 +126,7 @@ La aplicación estará disponible en:
 
 ## 🧪 Ejecución de Pruebas Unitarias
 
-El proyecto cuenta con una suite completa de **72 pruebas unitarias e integración**. El mismo comando se ejecuta automáticamente en GitHub Actions para pushes y pull requests:
+El proyecto cuenta con una suite completa de **80 pruebas unitarias e integración**. El mismo comando se ejecuta automáticamente en GitHub Actions para pushes y pull requests:
 
 ```bash
 python -m unittest discover tests -v
@@ -148,6 +148,13 @@ python -m unittest discover tests -v
 | `POST` | `/admin/users/edit/<id>` | Edición de administrador global (el nombre histórico del parámetro es `staff_id`) |
 | `POST` | `/admin/business/<id>/staff` | Creación de Gerentes y Cajeros |
 | `POST` | `/admin/staff/<id>/reset-password` | Restablecimiento no destructivo de contraseña de staff |
+| `GET/POST` | `/manager/login` | Inicio de sesión web exclusivo para gerentes |
+| `POST` | `/manager/logout` | Revoca únicamente la sesión actual del navegador |
+| `GET` | `/manager/portal` | Dashboard real del negocio según `view_stats` |
+| `GET` | `/manager/portal/customers` | Clientes buscables y paginados según `view_customers` |
+| `GET` | `/manager/portal/transactions` | Movimientos filtrados y paginados según `view_transactions` |
+| `GET` | `/manager/portal/reports` | Descargas PDF/Excel según `export_reports` |
+| `GET/POST` | `/manager/portal/cashiers...` | Gestión visual de cajeros según permisos específicos |
 | `GET/PUT` | `/admin/business/<business_id>/staff/<staff_id>/permissions` | Consulta y actualización administrativa de permisos |
 | `GET` | `/manager/business/<id>/customers` | Clientes mínimos paginados del tenant |
 | `GET/POST` | `/manager/business/<id>/staff` | Consulta o creación autorizada de cajeros |
@@ -192,7 +199,13 @@ Los campos `web_access_enabled` y `mobile_access_enabled` existen tanto en negoc
 
 Los gerentes nuevos reciben solamente `view_stats`; los cajeros reciben `scanner_operate`, sin que estos permisos habiliten por sí solos ningún canal. El permiso heredado `manage_cashiers` conserva consulta, creación, edición y suspensión de cajeros, pero nunca concede restablecimiento de contraseñas ni acceso móvil. Cada operación de `/manager` vuelve a comprobar tenant, rol, canal y permiso en Flask. Los cambios administrativos de permisos, canales, estado y contraseña se registran en `access_audits`; los gerentes solo pueden generar auditoría de suspensión o contraseña sobre cajeros de su propio negocio.
 
-`/manager` deriva identidad y tenant exclusivamente del JWT y ya no confía en `staff_id`. No se ha creado todavía el dashboard visual completo del gerente.
+Las APIs JSON existentes bajo `/manager` derivan identidad y tenant exclusivamente del JWT y no confían en `staff_id`.
+
+### Portal web del gerente
+
+El portal se abre en `/manager/login` y usa una sesión Flask de navegador respaldada por `staff_sessions` con canal `browser`. La cookie es `HttpOnly`, `SameSite=Lax` y `Secure` en producción. No se exponen JWT, refresh tokens ni secretos a JavaScript o URLs. Cada solicitud vuelve a validar expiración, revocación, `auth_version`, rol, tenant, estado de cuenta y acceso web del empleado y negocio; los cambios del Super Admin tienen efecto inmediato. Login, logout y operaciones de escritura usan CSRF, y las páginas privadas se sirven con `Cache-Control: no-store`.
+
+La navegación se construye desde el catálogo central de permisos. Dashboard, clientes, movimientos, reportes y cajeros consultan únicamente el negocio de la sesión autenticada, con búsqueda, filtros y paginación en servidor. Las descargas reutilizan `ExportService`; las operaciones de cajeros conservan validaciones, revocación y auditoría. Las APIs JWT web/móvil existentes permanecen separadas y no aceptan la cookie del portal como autorización.
 
 ### Registro público y Wallet
 

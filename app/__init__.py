@@ -51,7 +51,8 @@ def create_app(config_name=None):
     @app.before_request
     def protect_admin_forms():
         from flask import jsonify, request
-        if app.config.get("CSRF_ENABLED", True) and request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.path.startswith("/admin"):
+        protected_manager_path = request.path in {"/manager/login", "/manager/logout"} or request.path.startswith("/manager/portal")
+        if app.config.get("CSRF_ENABLED", True) and request.method in {"POST", "PUT", "PATCH", "DELETE"} and (request.path.startswith("/admin") or protected_manager_path):
             if not validate_csrf():
                 payload = {"status": "error", "message": "Token CSRF inválido o ausente."}
                 return jsonify(payload), 400

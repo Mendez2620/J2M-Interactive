@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}{% block portal_title %}Panel{% endblock %} · {{ business.name }}{% endblock %}
+{% block head %}<style>.portal-grid{display:grid;grid-template-columns:260px 1fr}.mobile-nav{display:none}@media(max-width:900px){.portal-grid{display:block}.sidebar{display:none}.mobile-nav{display:flex}}.metric{background:white;border:1px solid #e2e8f0;border-radius:1rem;padding:1.15rem}.table-wrap{overflow:auto;border:1px solid #e2e8f0;border-radius:1rem;background:white}.nav-link.active{background:#4f46e5;color:white}.bar{min-width:14px;background:#6366f1;border-radius:6px 6px 0 0}</style>{% endblock %}
+{% block content %}
+<div class="min-h-screen bg-slate-50 portal-grid">
+  <aside class="sidebar bg-slate-950 text-white p-6 min-h-screen sticky top-0">
+    <a href="{{ url_for('manager.manager_portal') }}" class="flex items-center gap-3 mb-9"><span class="w-10 h-10 rounded-xl bg-indigo-500 grid place-items-center font-black">J2M</span><span><strong class="block">J2M Interactive</strong><small class="text-slate-400">Portal Gerente</small></span></a>
+    <nav class="space-y-2 text-sm">
+      {% if 'view_stats' in manager_permissions %}<a class="nav-link {{ 'active' if active == 'dashboard' }} block rounded-xl px-4 py-3" href="{{ url_for('manager.manager_portal') }}"><i class="fa-solid fa-chart-line w-6"></i> Estadísticas</a>{% endif %}
+      {% if 'view_customers' in manager_permissions %}<a class="nav-link {{ 'active' if active == 'customers' }} block rounded-xl px-4 py-3" href="{{ url_for('manager.portal_customers') }}"><i class="fa-solid fa-users w-6"></i> Clientes</a>{% endif %}
+      {% if 'view_transactions' in manager_permissions %}<a class="nav-link {{ 'active' if active == 'transactions' }} block rounded-xl px-4 py-3" href="{{ url_for('manager.portal_transactions') }}"><i class="fa-solid fa-receipt w-6"></i> Movimientos</a>{% endif %}
+      {% if 'export_reports' in manager_permissions %}<a class="nav-link {{ 'active' if active == 'reports' }} block rounded-xl px-4 py-3" href="{{ url_for('manager.portal_reports') }}"><i class="fa-solid fa-file-export w-6"></i> Reportes</a>{% endif %}
+      {% if 'view_cashiers' in manager_permissions or 'create_cashiers' in manager_permissions or 'edit_cashiers' in manager_permissions or 'toggle_cashiers' in manager_permissions or 'reset_cashier_password' in manager_permissions %}<a class="nav-link {{ 'active' if active == 'cashiers' }} block rounded-xl px-4 py-3" href="{{ url_for('manager.portal_cashiers') }}"><i class="fa-solid fa-user-shield w-6"></i> Cajeros</a>{% endif %}
+      <a class="nav-link {{ 'active' if active == 'account' }} block rounded-xl px-4 py-3" href="{{ url_for('manager.manager_account') }}"><i class="fa-solid fa-circle-user w-6"></i> Mi cuenta</a>
+    </nav>
+  </aside>
+  <div class="min-w-0">
+    <header class="bg-white border-b px-4 sm:px-8 py-4 flex items-center justify-between sticky top-0 z-20">
+      <div class="flex items-center gap-3">{% if business.logo_path %}<img src="{{ url_for('static', filename=business.logo_path) }}" alt="Logo" class="w-10 h-10 rounded-xl object-cover">{% endif %}<div><strong class="block">{{ business.name }}</strong><small class="text-slate-500">{{ manager.name or manager.username }}</small></div></div>
+      <form method="POST" action="{{ url_for('manager.manager_logout') }}"><button class="text-sm px-3 py-2 border rounded-lg hover:bg-slate-50">Cerrar sesión</button></form>
+    </header>
+    <nav class="mobile-nav overflow-x-auto gap-2 bg-slate-950 p-3 text-white text-xs">
+      {% if 'view_stats' in manager_permissions %}<a href="{{ url_for('manager.manager_portal') }}" class="px-3 py-2">Inicio</a>{% endif %}{% if 'view_customers' in manager_permissions %}<a href="{{ url_for('manager.portal_customers') }}" class="px-3 py-2">Clientes</a>{% endif %}{% if 'view_transactions' in manager_permissions %}<a href="{{ url_for('manager.portal_transactions') }}" class="px-3 py-2">Movimientos</a>{% endif %}{% if 'export_reports' in manager_permissions %}<a href="{{ url_for('manager.portal_reports') }}" class="px-3 py-2">Reportes</a>{% endif %}{% if 'view_cashiers' in manager_permissions or 'create_cashiers' in manager_permissions or 'edit_cashiers' in manager_permissions or 'toggle_cashiers' in manager_permissions or 'reset_cashier_password' in manager_permissions %}<a href="{{ url_for('manager.portal_cashiers') }}" class="px-3 py-2">Cajeros</a>{% endif %}<a href="{{ url_for('manager.manager_account') }}" class="px-3 py-2">Cuenta</a>
+    </nav>
+    <main class="p-4 sm:p-8 max-w-7xl mx-auto">
+      {% with messages = get_flashed_messages(with_categories=true) %}{% for category, message in messages %}<div class="mb-4 rounded-xl p-3 text-sm {{ 'bg-emerald-50 text-emerald-800' if category == 'success' else 'bg-rose-50 text-rose-800' }}">{{ message }}</div>{% endfor %}{% endwith %}
+      {% block portal_content %}{% endblock %}
+    </main>
+  </div>
+</div>
+{% endblock %}
