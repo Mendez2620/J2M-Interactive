@@ -1,13 +1,29 @@
-from flask import Blueprint, g, jsonify, request, send_file
+import time
+from collections import defaultdict, deque
+from datetime import datetime, timedelta, timezone
+
+from flask import Blueprint, current_app, flash, g, jsonify, redirect, render_template, request, send_file, session, url_for
+from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
 
 from app.extensions import db
-from app.models import Customer, Staff, Transaction
+from app.models import Business, Customer, Staff, Transaction
 from app.security import valid_email, validate_password
 from app.staff_auth import revoke_staff_sessions, staff_required
 from app.access_audit import access_audit, staff_access_state
+from app.manager_auth import create_manager_browser_session, manager_portal_required, revoke_current_manager_session
+from app.permissions import effective_permissions, has_permission
 
 manager_bp = Blueprint("manager", __name__, url_prefix="/manager")
+_portal_login_attempts = defaultdict(deque)
+
+
+@manager_bp.after_request
+def manager_private_cache(response):
+    if request.path.startswith("/manager/portal"):
+        response.headers["Cache-Control"] = "no-store, private"
+        response.headers["Pragma"] = "no-cache"
+    return response
 
 
 def _own_business(business_id):
@@ -203,3 +219,223 @@ def manager_transactions(business_id):
         return denied
     txs = Transaction.query.filter_by(business_id=business_id).order_by(Transaction.timestamp.desc()).all()
     return jsonify({"status": "success", "transactions": [t.to_dict() for t in txs]}), 200
+
+
+def _portal_destination(staff):
+    permissions = effective_permissions(staff)
+    for permission, endpoint in (
+        ("view_stats", "manager.manager_portal"),
+        ("view_customers", "manager.portal_customers"),
+        ("view_transactions", "manager.portal_transactions"),
+        ("export_reports", "manager.portal_reports"),
+        ("view_cashiers", "manager.portal_cashiers"),
+        ("create_cashiers", "manager.portal_cashiers"),
+    ):
+        if permission in permissions:
+            return url_for(endpoint)
+    return url_for("manager.manager_account")
+
+
+@manager_bp.route("/login", methods=["GET", "POST"])
+def manager_login():
+    error = None
+    status = 200
+    if request.method == "POST":
+        identity = (request.form.get("identity") or "").strip()
+        password = request.form.get("password") or ""
+        business_slug = (request.form.get("business_slug") or "").strip()
+        key = f"{request.remote_addr}:{identity.lower()}"
+        now = time.monotonic()
+        attempts = _portal_login_attempts[key]
+        window = current_app.config["AUTH_RATE_LIMIT_WINDOW"]
+        while attempts and attempts[0] < now - window:
+            attempts.popleft()
+        if len(attempts) >= current_app.config["AUTH_RATE_LIMIT_ATTEMPTS"]:
+            error, status = "Demasiados intentos. Intenta más tarde.", 429
+        else:
+            query = Staff.query.join(Staff.business).filter(or_(Staff.username == identity, Staff.email == identity))
+            if business_slug:
+                query = query.filter(Business.slug == business_slug)
+            candidates = query.all() if identity and password else []
+            staff = next((item for item in candidates if item.check_password(password)), None)
+            if (
+                not staff or staff.role != "manager" or not staff.is_active or not staff.business.is_active
+                or not staff.web_access_enabled or not staff.business.web_access_enabled
+            ):
+                attempts.append(now)
+                error, status = "No fue posible iniciar sesión con esas credenciales.", 401
+            elif len(candidates) > 1 and not business_slug:
+                attempts.append(now)
+                error, status = "Indica el identificador del negocio para continuar.", 400
+            else:
+                attempts.clear()
+                create_manager_browser_session(staff)
+                return redirect(_portal_destination(staff))
+    return render_template("manager/login.html", error=error), status
+
+
+@manager_bp.route("/logout", methods=["POST"])
+def manager_logout():
+    revoke_current_manager_session()
+    return redirect(url_for("manager.manager_login"))
+
+
+def _portal_context(active):
+    return {"manager": g.manager, "business": g.manager.business,
+            "manager_permissions": g.manager_permissions, "active": active}
+
+
+@manager_bp.route("/portal", methods=["GET"])
+@manager_portal_required("view_stats")
+def manager_portal():
+    period = 7 if request.args.get("period") == "7" else 30
+    since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=period)
+    business = g.manager.business
+    tx_query = Transaction.query.filter(Transaction.business_id == business.id, Transaction.timestamp >= since)
+    transactions = tx_query.order_by(Transaction.timestamp.desc()).limit(8).all()
+    totals = db.session.query(
+        func.count(Transaction.id), func.coalesce(func.sum(Transaction.points_amount), 0),
+        func.coalesce(func.sum(Transaction.stamps_amount), 0), func.coalesce(func.sum(Transaction.purchase_amount), 0),
+    ).filter(Transaction.business_id == business.id, Transaction.timestamp >= since).one()
+    earned_points = db.session.query(func.coalesce(func.sum(Transaction.points_amount), 0)).filter_by(business_id=business.id, type="earn").filter(Transaction.timestamp >= since).scalar()
+    redeemed_points = db.session.query(func.coalesce(func.sum(Transaction.points_amount), 0)).filter_by(business_id=business.id, type="redeem").filter(Transaction.timestamp >= since).scalar()
+    earned_stamps = db.session.query(func.coalesce(func.sum(Transaction.stamps_amount), 0)).filter_by(business_id=business.id, type="earn").filter(Transaction.timestamp >= since).scalar()
+    redeemed_stamps = db.session.query(func.coalesce(func.sum(Transaction.stamps_amount), 0)).filter_by(business_id=business.id, type="redeem").filter(Transaction.timestamp >= since).scalar()
+    recent_rows = tx_query.with_entities(func.date(Transaction.timestamp), func.count(Transaction.id)).group_by(func.date(Transaction.timestamp)).order_by(func.date(Transaction.timestamp)).all()
+    metrics = {
+        "customers": business.customers.count(), "transactions": totals[0],
+        "current_points": db.session.query(func.coalesce(func.sum(Customer.current_points), 0)).filter_by(business_id=business.id).scalar(),
+        "current_stamps": db.session.query(func.coalesce(func.sum(Customer.current_stamps), 0)).filter_by(business_id=business.id).scalar(),
+        "earned_points": earned_points, "redeemed_points": redeemed_points,
+        "earned_stamps": earned_stamps, "redeemed_stamps": redeemed_stamps,
+        "purchases_recorded": totals[3],
+        "new_customers": Customer.query.filter(Customer.business_id == business.id, Customer.created_at >= since).count(),
+        "rewards_available": Customer.query.filter(Customer.business_id == business.id, Customer.current_stamps >= business.stamps_reward_limit).count() if business.loyalty_type == "stamps" else 0,
+    }
+    return render_template("manager/dashboard.html", metrics=metrics, transactions=transactions,
+                           chart_labels=[str(row[0]) for row in recent_rows], chart_values=[row[1] for row in recent_rows], period=period,
+                           **_portal_context("dashboard"))
+
+
+@manager_bp.route("/portal/customers", methods=["GET"])
+@manager_portal_required("view_customers")
+def portal_customers():
+    page = max(request.args.get("page", 1, type=int), 1)
+    search = (request.args.get("q") or "").strip()
+    query = Customer.query.filter_by(business_id=g.manager.business_id)
+    if search:
+        like = f"%{search}%"
+        query = query.filter(or_(Customer.full_name.ilike(like), Customer.email.ilike(like), Customer.phone.ilike(like)))
+    pagination = query.order_by(Customer.created_at.desc()).paginate(page=page, per_page=20, error_out=False)
+    return render_template("manager/customers.html", pagination=pagination, search=search, **_portal_context("customers"))
+
+
+@manager_bp.route("/portal/transactions", methods=["GET"])
+@manager_portal_required("view_transactions")
+def portal_transactions():
+    page = max(request.args.get("page", 1, type=int), 1)
+    movement = (request.args.get("type") or "").strip()
+    query = Transaction.query.filter_by(business_id=g.manager.business_id)
+    if movement in {"earn", "redeem"}:
+        query = query.filter_by(type=movement)
+    for field, operator in (("from", ">="), ("to", "<")):
+        raw = request.args.get(field)
+        if raw:
+            try:
+                value = datetime.strptime(raw, "%Y-%m-%d") + (timedelta(days=1) if field == "to" else timedelta())
+                query = query.filter(Transaction.timestamp < value if operator == "<" else Transaction.timestamp >= value)
+            except ValueError:
+                pass
+    pagination = query.order_by(Transaction.timestamp.desc()).paginate(page=page, per_page=25, error_out=False)
+    return render_template("manager/transactions.html", pagination=pagination, movement=movement, **_portal_context("transactions"))
+
+
+@manager_bp.route("/portal/reports", methods=["GET"])
+@manager_portal_required("export_reports")
+def portal_reports():
+    return render_template("manager/reports.html", **_portal_context("reports"))
+
+
+@manager_bp.route("/portal/reports/<kind>", methods=["GET"])
+@manager_portal_required("export_reports")
+def portal_report_download(kind):
+    from app.services import ExportService
+    business = g.manager.business
+    if kind == "excel":
+        return send_file(ExportService.generate_excel_report(business), mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", as_attachment=True, download_name=f"{business.slug}-reporte.xlsx")
+    if kind == "pdf":
+        return send_file(ExportService.generate_pdf_report(business), mimetype="application/pdf", as_attachment=True, download_name=f"{business.slug}-reporte.pdf")
+    return render_template("manager/error.html", message="Formato de reporte no disponible.", **_portal_context("reports")), 404
+
+
+@manager_bp.route("/portal/cashiers", methods=["GET"])
+@manager_portal_required()
+def portal_cashiers():
+    if not ({"view_cashiers", "create_cashiers", "edit_cashiers", "toggle_cashiers", "reset_cashier_password"} & g.manager_permissions):
+        return redirect(url_for("manager.manager_account", denied="cashiers"))
+    cashiers = Staff.query.filter_by(business_id=g.manager.business_id, role="cashier").order_by(Staff.created_at.desc()).all()
+    return render_template("manager/cashiers.html", cashiers=cashiers, **_portal_context("cashiers"))
+
+
+@manager_bp.route("/portal/cashiers/create", methods=["POST"])
+@manager_portal_required("create_cashiers")
+def portal_create_cashier():
+    data = request.form
+    username, password = (data.get("username") or "").strip(), data.get("password") or ""
+    error = validate_password(password)
+    if not username or error:
+        flash(error or "El usuario es obligatorio.", "error")
+        return redirect(url_for("manager.portal_cashiers"))
+    cashier = Staff(business_id=g.manager.business_id, username=username, name=(data.get("name") or "").strip() or None,
+                    email=(data.get("email") or "").strip() or None, phone=(data.get("phone") or "").strip() or None,
+                    role="cashier", permissions="scanner_operate", mobile_access_enabled=False, web_access_enabled=False)
+    cashier.set_password(password)
+    try:
+        db.session.add(cashier); db.session.flush()
+        db.session.add(access_audit("staff_created", cashier, new=staff_access_state(cashier) | {"role": "cashier"}, actor_staff_id=g.manager.id))
+        db.session.commit(); flash("Cajero creado correctamente.", "success")
+    except IntegrityError:
+        db.session.rollback(); flash("El usuario ya existe en este negocio.", "error")
+    return redirect(url_for("manager.portal_cashiers"))
+
+
+@manager_bp.route("/portal/cashiers/<int:staff_id>/edit", methods=["POST"])
+@manager_portal_required("edit_cashiers")
+def portal_edit_cashier(staff_id):
+    cashier = Staff.query.filter_by(id=staff_id, business_id=g.manager.business_id, role="cashier").first_or_404()
+    cashier.name = (request.form.get("name") or "").strip() or None
+    email = (request.form.get("email") or "").strip() or None
+    if email and not valid_email(email):
+        flash("Correo electrónico inválido.", "error"); return redirect(url_for("manager.portal_cashiers"))
+    cashier.email, cashier.phone = email, (request.form.get("phone") or "").strip() or None
+    db.session.commit(); flash("Datos del cajero actualizados.", "success")
+    return redirect(url_for("manager.portal_cashiers"))
+
+
+@manager_bp.route("/portal/cashiers/<int:staff_id>/toggle", methods=["POST"])
+@manager_portal_required("toggle_cashiers")
+def portal_toggle_cashier(staff_id):
+    cashier = Staff.query.filter_by(id=staff_id, business_id=g.manager.business_id, role="cashier").first_or_404()
+    previous = staff_access_state(cashier); cashier.is_active = not cashier.is_active; revoke_staff_sessions(cashier)
+    db.session.add(access_audit("cashier_status_updated", cashier, previous, staff_access_state(cashier), actor_staff_id=g.manager.id))
+    db.session.commit(); flash("Estado del cajero actualizado.", "success")
+    return redirect(url_for("manager.portal_cashiers"))
+
+
+@manager_bp.route("/portal/cashiers/<int:staff_id>/reset-password", methods=["POST"])
+@manager_portal_required("reset_cashier_password")
+def portal_reset_cashier_password(staff_id):
+    cashier = Staff.query.filter_by(id=staff_id, business_id=g.manager.business_id, role="cashier").first_or_404()
+    password = request.form.get("password") or ""
+    if password != (request.form.get("password_confirmation") or "") or validate_password(password):
+        flash(validate_password(password) or "Las contraseñas no coinciden.", "error"); return redirect(url_for("manager.portal_cashiers"))
+    cashier.set_password(password); revoke_staff_sessions(cashier)
+    db.session.add(access_audit("password_reset", cashier, actor_staff_id=g.manager.id, new={"password_reset": True}))
+    db.session.commit(); flash("Contraseña restablecida.", "success")
+    return redirect(url_for("manager.portal_cashiers"))
+
+
+@manager_bp.route("/portal/account", methods=["GET"])
+@manager_portal_required()
+def manager_account():
+    return render_template("manager/account.html", denied=request.args.get("denied"), **_portal_context("account"))
