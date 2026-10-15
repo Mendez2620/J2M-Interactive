@@ -8,12 +8,14 @@ from flask import (
     send_file, session, url_for,
 )
 from sqlalchemy import func
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from app.email_service import MailDeliveryError
 from app.extensions import db
 from app.models import (
     Business, Customer, CustomerRecoveryAuthorization,
-    CustomerRecoveryChallenge,
+    CustomerRecoveryChallenge, CustomerRecoveryRateLimit,
 )
 from app.security import valid_email, wants_json
 from app.services import AppleWalletService, GoogleWalletService
@@ -82,6 +84,30 @@ def _generic_request_response(business):
     ), 200
 
 
+def _reserve_rate_limit(scope, business_scope, key_hash, limit, now, window_seconds):
+    """Atomically claim one persistent quota slot, including under concurrency."""
+    table = CustomerRecoveryRateLimit.__table__
+    dialect = db.session.get_bind().dialect.name
+    insert_factory = sqlite_insert if dialect == "sqlite" else postgresql_insert
+    reserved_until = now + timedelta(seconds=window_seconds)
+    for slot in range(limit):
+        statement = insert_factory(table).values(
+            scope=scope,
+            business_scope=business_scope,
+            key_hash=key_hash,
+            slot=slot,
+            reserved_until=reserved_until,
+            updated_at=now,
+        ).on_conflict_do_update(
+            index_elements=["scope", "business_scope", "key_hash", "slot"],
+            set_={"reserved_until": reserved_until, "updated_at": now},
+            where=table.c.reserved_until <= now,
+        )
+        if db.session.execute(statement).rowcount == 1:
+            return True
+    return False
+
+
 @recovery_bp.after_request
 def protect_recovery_responses(response):
     response.headers["Cache-Control"] = "no-store, private"
@@ -110,27 +136,26 @@ def request_recovery(business_slug):
     _clear_recovery_session(revoke=True)
     email = (request.get_json(silent=True) or request.form).get("email", "").strip().lower()
     now = _utcnow()
-    window_start = now - timedelta(seconds=current_app.config["RECOVERY_RATE_WINDOW"])
     retention_start = now - timedelta(seconds=current_app.config["RECOVERY_CHALLENGE_RETENTION"])
     CustomerRecoveryChallenge.query.filter(CustomerRecoveryChallenge.created_at < retention_start).delete(synchronize_session=False)
     email_hash = _hmac(email, "recovery-email")
     ip_hash = _hmac(request.remote_addr or "unknown", "recovery-ip")
-    email_count = CustomerRecoveryChallenge.query.filter(
-        CustomerRecoveryChallenge.business_id == business.id,
-        CustomerRecoveryChallenge.email_hash == email_hash,
-        CustomerRecoveryChallenge.created_at >= window_start,
-    ).count()
-    ip_count = CustomerRecoveryChallenge.query.filter(
-        CustomerRecoveryChallenge.ip_hash == ip_hash,
-        CustomerRecoveryChallenge.created_at >= window_start,
-    ).count()
-    allowed = (
-        business.is_active and valid_email(email)
-        and email_count < current_app.config["RECOVERY_REQUEST_LIMIT_EMAIL"]
-        and ip_count < current_app.config["RECOVERY_REQUEST_LIMIT_IP"]
-    )
+    allowed = business.is_active and valid_email(email)
+    if allowed:
+        allowed = _reserve_rate_limit(
+            "email", business.id, email_hash,
+            current_app.config["RECOVERY_REQUEST_LIMIT_EMAIL"], now,
+            current_app.config["RECOVERY_RATE_WINDOW"],
+        ) and _reserve_rate_limit(
+            "ip", 0, ip_hash,
+            current_app.config["RECOVERY_REQUEST_LIMIT_IP"], now,
+            current_app.config["RECOVERY_RATE_WINDOW"],
+        )
+        if allowed:
+            db.session.commit()
+        else:
+            db.session.rollback()
     if not allowed:
-        db.session.commit()
         return _generic_request_response(business)
     customers = []
     if allowed:

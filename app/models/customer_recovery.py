@@ -26,6 +26,17 @@ class CustomerRecoveryChallenge(db.Model):
     customer = db.relationship("Customer")
 
 
+class CustomerRecoveryRateLimit(db.Model):
+    __tablename__ = "customer_recovery_rate_limits"
+
+    scope = db.Column(db.String(16), primary_key=True)
+    business_scope = db.Column(db.Integer, primary_key=True)
+    key_hash = db.Column(db.String(64), primary_key=True)
+    slot = db.Column(db.Integer, primary_key=True)
+    reserved_until = db.Column(db.DateTime, nullable=False, index=True)
+    updated_at = db.Column(db.DateTime, nullable=False, default=utcnow)
+
+
 class CustomerRecoveryAuthorization(db.Model):
     __tablename__ = "customer_recovery_authorizations"
 

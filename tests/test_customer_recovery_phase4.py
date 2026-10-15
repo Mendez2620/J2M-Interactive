@@ -1,9 +1,14 @@
 import io
+import tempfile
 import unittest
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from pathlib import Path
+from unittest.mock import patch
 
 from app import create_app
+from app.config import TestingConfig
 from app.email_service import MailDeliveryError, SMTPRecoveryMailer
 from app.extensions import db
 from app.models import (
@@ -129,6 +134,66 @@ class CustomerRecoveryPhase4TestCase(unittest.TestCase):
         response = self.client.post("/recover/cafe-dos/request", json={"email": "other@example.test"})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(CustomerRecoveryChallenge.query.filter_by(customer_id=self.other_customer.id).count(), 0)
+
+    def _concurrent_recovery_app(self, directory, email_limit, ip_limit):
+        uri = f"sqlite:///{Path(directory, 'concurrent-recovery.sqlite').as_posix()}"
+        with patch.object(TestingConfig, "SQLALCHEMY_DATABASE_URI", uri):
+            app = create_app("testing")
+        app.config.update(
+            RECOVERY_REQUEST_LIMIT_EMAIL=email_limit,
+            RECOVERY_REQUEST_LIMIT_IP=ip_limit,
+        )
+        with app.app_context():
+            db.create_all()
+            business = Business(name="Concurrente", slug="concurrente", loyalty_type="points", is_active=True)
+            db.session.add(business); db.session.flush()
+            for index in range(8):
+                db.session.add(Customer(
+                    business_id=business.id, full_name=f"Cliente {index}",
+                    email=f"client{index}@example.test",
+                ))
+            db.session.commit()
+        return app
+
+    def test_concurrent_requests_cannot_exceed_email_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = self._concurrent_recovery_app(directory, email_limit=2, ip_limit=20)
+
+            def request_once(index):
+                with app.test_client() as client:
+                    return client.post(
+                        "/recover/concurrente/request",
+                        json={"email": "client0@example.test"},
+                        environ_base={"REMOTE_ADDR": f"192.0.2.{index + 1}"},
+                    ).get_json()
+
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                payloads = list(executor.map(request_once, range(8)))
+            self.assertTrue(all(payload == payloads[0] for payload in payloads))
+            self.assertEqual(len(app.extensions["recovery_mailer"].outbox), 2)
+            with app.app_context():
+                db.session.remove()
+                db.engine.dispose()
+
+    def test_concurrent_requests_cannot_exceed_ip_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = self._concurrent_recovery_app(directory, email_limit=3, ip_limit=2)
+
+            def request_once(index):
+                with app.test_client() as client:
+                    return client.post(
+                        "/recover/concurrente/request",
+                        json={"email": f"client{index}@example.test"},
+                        environ_base={"REMOTE_ADDR": "198.51.100.9"},
+                    ).get_json()
+
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                payloads = list(executor.map(request_once, range(8)))
+            self.assertTrue(all(payload == payloads[0] for payload in payloads))
+            self.assertEqual(len(app.extensions["recovery_mailer"].outbox), 2)
+            with app.app_context():
+                db.session.remove()
+                db.engine.dispose()
 
     def test_no_private_access_before_verification_or_across_businesses(self):
         page = self.client.get("/recover/cafe-uno")
