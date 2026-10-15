@@ -119,6 +119,16 @@ class PermissionsPhase2TestCase(unittest.TestCase):
         created = self.client.post(f"/manager/business/{self.business.id}/staff", headers=headers, json={"username": "newcash", "password": "NewCashier123", "role": "cashier"})
         self.assertEqual(created.status_code, 201)
         staff_id = created.get_json()["cashier"]["id"]
+        creation_audit = AccessAudit.query.filter_by(
+            affected_staff_id=staff_id, action="staff_created"
+        ).one()
+        self.assertEqual(creation_audit.actor_staff_id, self.manager.id)
+        self.assertEqual(creation_audit.business_id, self.business.id)
+        self.assertIn('"role": "cashier"', creation_audit.new_state)
+        self.assertIn('"is_active": true', creation_audit.new_state)
+        self.assertNotIn("NewCashier123", creation_audit.new_state)
+        self.assertNotIn("password", creation_audit.new_state)
+        self.assertNotIn("token", creation_audit.new_state)
         self.assertEqual(self.client.patch(f"/manager/business/{self.business.id}/staff/{staff_id}", headers=headers, json={"name": "Nuevo", "role": "manager"}).status_code, 400)
         self.assertEqual(self.client.post(f"/manager/business/{self.business.id}/staff/{staff_id}/toggle-status", headers=headers).status_code, 200)
         reset = self.client.post(f"/manager/business/{self.business.id}/staff/{staff_id}/reset-password", headers=headers, json={"password": "ChangedPass123", "password_confirmation": "ChangedPass123"})

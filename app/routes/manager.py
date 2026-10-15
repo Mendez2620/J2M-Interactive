@@ -54,6 +54,12 @@ def create_cashier(business_id):
     cashier.set_password(password)
     try:
         db.session.add(cashier)
+        db.session.flush()
+        db.session.add(access_audit(
+            "staff_created", cashier,
+            new=staff_access_state(cashier) | {"role": cashier.role},
+            actor_staff_id=g.staff.id,
+        ))
         db.session.commit()
     except IntegrityError:
         db.session.rollback()
