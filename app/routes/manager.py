@@ -1,5 +1,3 @@
-import time
-from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 
 from flask import Blueprint, current_app, flash, g, jsonify, redirect, render_template, request, send_file, session, url_for
@@ -13,9 +11,11 @@ from app.staff_auth import revoke_staff_sessions, staff_required
 from app.access_audit import access_audit, staff_access_state
 from app.manager_auth import create_manager_browser_session, manager_portal_required, revoke_current_manager_session
 from app.permissions import effective_permissions, has_permission
+from app.services.auth_rate_limit_service import AuthRateLimitUnavailable, clear_auth_attempts, reserve_auth_attempt
 
 manager_bp = Blueprint("manager", __name__, url_prefix="/manager")
-_portal_login_attempts = defaultdict(deque)
+# Legacy test hook; authentication throttling is persisted in auth_rate_limit_slots.
+_portal_login_attempts = {}
 
 
 @manager_bp.after_request
@@ -247,15 +247,14 @@ def manager_login():
         identity = (request.form.get("identity") or "").strip()
         password = request.form.get("password") or ""
         business_slug = (request.form.get("business_slug") or "").strip()
-        key = f"{request.remote_addr}:{identity.lower()}"
-        now = time.monotonic()
-        attempts = _portal_login_attempts[key]
-        window = current_app.config["AUTH_RATE_LIMIT_WINDOW"]
-        while attempts and attempts[0] < now - window:
-            attempts.popleft()
-        if len(attempts) >= current_app.config["AUTH_RATE_LIMIT_ATTEMPTS"]:
+        try:
+            reservation = reserve_auth_attempt("manager", f"{business_slug}:{identity}", request.remote_addr)
+        except AuthRateLimitUnavailable:
+            current_app.logger.exception("auth_rate_limit_unavailable component=manager_login")
+            error, status, reservation = "Inicio de sesión temporalmente no disponible.", 503, None
+        if status == 200 and reservation is None:
             error, status = "Demasiados intentos. Intenta más tarde.", 429
-        else:
+        elif status == 200:
             query = Staff.query.join(Staff.business).filter(or_(Staff.username == identity, Staff.email == identity))
             if business_slug:
                 query = query.filter(Business.slug == business_slug)
@@ -265,13 +264,11 @@ def manager_login():
                 not staff or staff.role != "manager" or not staff.is_active or not staff.business.is_active
                 or not staff.web_access_enabled or not staff.business.web_access_enabled
             ):
-                attempts.append(now)
                 error, status = "No fue posible iniciar sesión con esas credenciales.", 401
             elif len(candidates) > 1 and not business_slug:
-                attempts.append(now)
                 error, status = "Indica el identificador del negocio para continuar.", 400
             else:
-                attempts.clear()
+                clear_auth_attempts("manager", reservation)
                 create_manager_browser_session(staff)
                 return redirect(_portal_destination(staff))
     return render_template("manager/login.html", error=error), status

@@ -441,7 +441,7 @@
     </form>
   </div>
 </div>
-<script>
+<script nonce="{{ csp_nonce() }}">
   function openSettingsModal(){ document.getElementById('settingsModal').classList.remove('hidden'); showAddAdminTab(); }
   function closeSettingsModal(){ document.getElementById('settingsModal').classList.add('hidden'); document.getElementById('addAdminForm').reset(); document.getElementById('editAdminForm').reset(); }
   function showAddAdminTab(){ document.getElementById('addAdminForm').classList.remove('hidden'); document.getElementById('editAdminForm').classList.add('hidden'); document.getElementById('addAdminTabBtn').classList.add('border-slate-900'); document.getElementById('addAdminTabBtn').classList.remove('border-transparent'); document.getElementById('editAdminTabBtn').classList.remove('border-slate-900'); document.getElementById('editAdminTabBtn').classList.add('border-transparent'); }
@@ -457,7 +457,7 @@
 
 
 {% block scripts %}
-<script>
+<script nonce="{{ csp_nonce() }}">
   function openBusinessModal() {
     document.getElementById('businessModal').classList.remove('hidden');
   }

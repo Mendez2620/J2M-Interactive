@@ -1,8 +1,6 @@
 import hashlib
 import json
 import math
-import time
-from collections import defaultdict, deque
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -14,10 +12,10 @@ from app.models import Business, Customer, Staff, StaffSession, Transaction
 from app.services.loyalty_transaction_service import (
     LoyaltyTransactionError, normalized_points, process_loyalty_transaction,
 )
+from app.services.auth_rate_limit_service import AuthRateLimitUnavailable, clear_auth_attempts, reserve_auth_attempt
 from app.staff_auth import _hash_jti, decode_token, issue_token_pair, revoke_staff_sessions, staff_any_channel_required, staff_required
 
 scanner_bp = Blueprint("scanner", __name__)
-_login_attempts = defaultdict(deque)
 
 
 def _error(message, code):
@@ -78,13 +76,12 @@ def staff_login():
     channel = (data.get("channel") or "mobile").strip().lower()
     if channel not in {"web", "mobile"}:
         return _error("Canal inválido.", 400)
-    key = f"{request.remote_addr}:{identity.lower()}"
-    now = time.monotonic()
-    attempts = _login_attempts[key]
-    window = current_app.config["AUTH_RATE_LIMIT_WINDOW"]
-    while attempts and attempts[0] < now - window:
-        attempts.popleft()
-    if len(attempts) >= current_app.config["AUTH_RATE_LIMIT_ATTEMPTS"]:
+    try:
+        reservation = reserve_auth_attempt("scanner", f"{business_slug}:{identity}", request.remote_addr)
+    except AuthRateLimitUnavailable:
+        current_app.logger.exception("auth_rate_limit_unavailable component=scanner_login")
+        return _error("Inicio de sesión temporalmente no disponible.", 503)
+    if reservation is None:
         return _error("Demasiados intentos. Intenta más tarde.", 429)
     if not identity or not password:
         return _error("Usuario y contraseña son obligatorios.", 400)
@@ -93,17 +90,15 @@ def staff_login():
         query = query.filter(Business.slug == business_slug)
     candidates = query.all()
     if len(candidates) > 1 and not business_slug:
-        attempts.append(now)
         return _error("business_slug es obligatorio para identificar el negocio.", 400)
     staff = next((candidate for candidate in candidates if candidate.check_password(password)), None)
     if not staff:
-        attempts.append(now)
         return _error("Credenciales inválidas.", 401)
     if not staff.is_active or not staff.business or not staff.business.is_active:
         return _error("Cuenta o negocio inactivo.", 403)
     if not getattr(staff.business, f"{channel}_access_enabled") or not getattr(staff, f"{channel}_access_enabled"):
         return _error(f"Acceso {channel} deshabilitado.", 403)
-    attempts.clear()
+    clear_auth_attempts("scanner", reservation)
     access_token, refresh_token = issue_token_pair(staff, channel)
     return jsonify({"status": "success", "access_token": access_token, "refresh_token": refresh_token,
         "token_type": "Bearer", "expires_in": current_app.config["JWT_ACCESS_TOKEN_EXPIRES"],

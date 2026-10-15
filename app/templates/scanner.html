@@ -154,7 +154,7 @@
 {% endblock %}
 
 {% block scripts %}
-<script>
+<script nonce="{{ csp_nonce() }}">
   let html5QrCode = null;
   let isScanning = false;
   let currentCustomer = null;

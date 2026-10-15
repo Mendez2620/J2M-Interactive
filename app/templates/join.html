@@ -163,7 +163,7 @@
 
 {% block scripts %}
 {% if business.is_active %}
-<script>
+<script nonce="{{ csp_nonce() }}">
   document.getElementById('join-form').addEventListener('submit', async function(e) {
     e.preventDefault();
     const checkbox = document.getElementById('terms_accepted');

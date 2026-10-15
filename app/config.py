@@ -36,6 +36,8 @@ class Config:
     JWT_AUDIENCE = os.getenv("JWT_AUDIENCE", "j2m-staff")
     AUTH_RATE_LIMIT_ATTEMPTS = int(os.getenv("AUTH_RATE_LIMIT_ATTEMPTS", 5))
     AUTH_RATE_LIMIT_WINDOW = int(os.getenv("AUTH_RATE_LIMIT_WINDOW", 300))
+    TRUSTED_PROXY_COUNT = int(os.getenv("TRUSTED_PROXY_COUNT", 0))
+    LOG_REQUESTS = os.getenv("LOG_REQUESTS", "false").lower() == "true"
     MAX_TRANSACTION_AMOUNT = float(os.getenv("MAX_TRANSACTION_AMOUNT", 1000000))
     WALLET_TOKEN_MAX_AGE = int(os.getenv("WALLET_TOKEN_MAX_AGE", 900))
     RECOVERY_CODE_MAX_AGE = int(os.getenv("RECOVERY_CODE_MAX_AGE", 600))
@@ -72,6 +74,8 @@ class ProductionConfig(Config):
     DEBUG = False
     SESSION_COOKIE_SECURE = True
     PREFERRED_URL_SCHEME = "https"
+    RECOVERY_MAIL_BACKEND = os.getenv("RECOVERY_MAIL_BACKEND", "smtp")
+    LOG_REQUESTS = True
 
 
 class TestingConfig(Config):
@@ -82,6 +86,7 @@ class TestingConfig(Config):
     UPLOAD_FOLDER = os.path.join(os.getenv("TEMP", "."), "j2m-test-uploads")
     JWT_SECRET_KEY = "testing-only-jwt-secret-key-longer-than-32-bytes"
     RECOVERY_MAIL_BACKEND = "memory"
+    AUTH_RATE_LIMIT_ATTEMPTS = 10
 
 
 config_by_name = {
