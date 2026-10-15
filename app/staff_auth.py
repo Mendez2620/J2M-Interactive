@@ -8,6 +8,7 @@ from flask import current_app, g, jsonify, request
 
 from app.extensions import db
 from app.models import Staff, StaffSession
+from app.permissions import has_permission
 
 
 def _now():
@@ -112,8 +113,7 @@ def authenticate_request(channel, permission=None):
         return None, (jsonify({"status": "error", "message": "Canal inválido."}), 403)
     if not getattr(staff.business, f"{channel}_access_enabled") or not getattr(staff, f"{channel}_access_enabled"):
         return None, (jsonify({"status": "error", "message": f"Acceso {channel} deshabilitado."}), 403)
-    permissions = set(filter(None, (staff.permissions or "").split(",")))
-    if permission and permission not in permissions:
+    if permission and not has_permission(staff, permission):
         return None, (jsonify({"status": "error", "message": "Permiso insuficiente."}), 403)
     return staff, None
 

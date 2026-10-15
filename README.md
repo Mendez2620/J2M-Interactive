@@ -126,7 +126,7 @@ La aplicación estará disponible en:
 
 ## 🧪 Ejecución de Pruebas Unitarias
 
-El proyecto cuenta con una suite completa de **63 pruebas unitarias e integración**. El mismo comando se ejecuta automáticamente en GitHub Actions para pushes y pull requests:
+El proyecto cuenta con una suite completa de **72 pruebas unitarias e integración**. El mismo comando se ejecuta automáticamente en GitHub Actions para pushes y pull requests:
 
 ```bash
 python -m unittest discover tests -v
@@ -148,6 +148,12 @@ python -m unittest discover tests -v
 | `POST` | `/admin/users/edit/<id>` | Edición de administrador global (el nombre histórico del parámetro es `staff_id`) |
 | `POST` | `/admin/business/<id>/staff` | Creación de Gerentes y Cajeros |
 | `POST` | `/admin/staff/<id>/reset-password` | Restablecimiento no destructivo de contraseña de staff |
+| `GET/PUT` | `/admin/business/<business_id>/staff/<staff_id>/permissions` | Consulta y actualización administrativa de permisos |
+| `GET` | `/manager/business/<id>/customers` | Clientes mínimos paginados del tenant |
+| `GET/POST` | `/manager/business/<id>/staff` | Consulta o creación autorizada de cajeros |
+| `PATCH` | `/manager/business/<id>/staff/<staff_id>` | Edición básica autorizada de un cajero |
+| `POST` | `/manager/business/<id>/staff/<staff_id>/toggle-status` | Activación o suspensión autorizada de un cajero |
+| `POST` | `/manager/business/<id>/staff/<staff_id>/reset-password` | Restablecimiento autorizado y auditado de contraseña |
 | `GET` | `/scanner` | Terminal heredado disponible exclusivamente en desarrollo/debug |
 | `POST` | `/api/scanner/login` | Autentica staff; requiere `business_slug` cuando el usuario no es único globalmente |
 | `POST` | `/api/scanner/refresh` | Rota el refresh token; la reutilización revoca sesiones |
@@ -182,7 +188,9 @@ Respuestas: `400` entrada/acción inválida, `401` token ausente/inválido/revoc
 
 ### Canales y permisos
 
-Los campos `web_access_enabled` y `mobile_access_enabled` existen tanto en negocio como en empleado y comienzan deshabilitados en la migración. El superadministrador los controla desde **Usuarios / Staff** con formularios protegidos por sesión y CSRF. La política es denegar por defecto. Los gerentes migrados reciben solamente la capacidad básica `view_stats`; los cajeros reciben `scanner_operate`, pero ninguna capacidad es efectiva hasta habilitar el canal en ambos niveles. Exportaciones, transacciones y creación de cajeros requieren permisos explícitos adicionales que se administrarán en la Fase 2.
+Los campos `web_access_enabled` y `mobile_access_enabled` existen tanto en negocio como en empleado y comienzan deshabilitados en la migración. El superadministrador los controla desde **Usuarios / Staff** con sesión y CSRF. La política es denegar por defecto y los controles del negocio prevalecen sobre los individuales. El modal **Gestionar permisos** ofrece perfiles Básico, Operativo y Personalizado, separa permisos web/móviles, valida rol y canal mediante un catálogo central y revoca las sesiones cuando cambia el acceso.
+
+Los gerentes nuevos reciben solamente `view_stats`; los cajeros reciben `scanner_operate`, sin que estos permisos habiliten por sí solos ningún canal. El permiso heredado `manage_cashiers` conserva consulta, creación, edición y suspensión de cajeros, pero nunca concede restablecimiento de contraseñas ni acceso móvil. Cada operación de `/manager` vuelve a comprobar tenant, rol, canal y permiso en Flask. Los cambios administrativos de permisos, canales, estado y contraseña se registran en `access_audits`; los gerentes solo pueden generar auditoría de suspensión o contraseña sobre cajeros de su propio negocio.
 
 `/manager` deriva identidad y tenant exclusivamente del JWT y ya no confía en `staff_id`. No se ha creado todavía el dashboard visual completo del gerente.
 
@@ -194,11 +202,10 @@ El Web Service PassKit conserva `ApplePass` para registrar, retirar y descargar 
 
 ### Migración de seguridad
 
-La revisión incremental `c4f1a2b3d4e5` añade canales, permisos, versión de autenticación, sesiones revocables e idempotencia sin cambiar identificadores ni saldos. La revisión `d5e6f7a8b9c0` añade fingerprints canónicos y cambia la unicidad de `request_id` al ámbito de cada negocio. Bases existentes reciben canales deshabilitados y sus movimientos históricos se preservan. Se valida tanto una SQLite vacía como una heredada con datos. Los downgrades se bloquean antes de eliminar información; para revertir debe restaurarse un respaldo verificado.
+La revisión incremental `c4f1a2b3d4e5` añade canales, permisos, versión de autenticación, sesiones revocables e idempotencia sin cambiar identificadores ni saldos. La revisión `d5e6f7a8b9c0` añade fingerprints canónicos y cambia la unicidad de `request_id` al ámbito de cada negocio. La revisión `e6f7a8b9c0d1` añade el historial append-only `access_audits`; `f7a8b9c0d1e2` permite auditorías de canal a nivel negocio sin inventar un empleado afectado. Bases existentes conservan empleados, permisos heredados, clientes, saldos, transacciones y sesiones. Se valida tanto una SQLite vacía como una heredada con datos. Los downgrades se bloquean antes de eliminar información; para revertir debe restaurarse un respaldo verificado.
 
 ### Fases posteriores y riesgos conocidos
 
-- **Fase 2:** interfaz y política de permisos individuales avanzados.
 - **Fase 3:** panel web completo del gerente.
 - **Fase 4:** recuperación de identidad verificada, privacidad ampliada y ciclo de vida avanzado de Wallet.
 - **Fase 5:** bloqueo/concurrencia transaccional, ledger y auditoría especializada. La idempotencia actual evita repeticiones normales, pero no promete atomicidad distribuida.

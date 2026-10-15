@@ -10,9 +10,13 @@ from PIL import Image, UnidentifiedImageError
 from werkzeug.utils import secure_filename
 from app.extensions import db
 from app.models import Business, BusinessCategory, Customer, PlatformAdmin, Staff, Transaction
-from app.security import platform_admin_required, valid_email, validate_password
+from app.security import current_platform_admin, platform_admin_required, valid_email, validate_password
 from app.services import ExportService
 from app.staff_auth import revoke_staff_sessions
+from app.access_audit import access_audit, staff_access_state
+from app.permissions import (
+    detect_profile, permissions_for_profile, public_catalog, validate_permissions,
+)
 
 admin_bp = Blueprint("admin", __name__, url_prefix="/admin")
 
@@ -542,6 +546,14 @@ def create_staff(business_id: int):
     staff_member.set_password(password)
 
     db.session.add(staff_member)
+    db.session.flush()
+    created_state = staff_access_state(staff_member) | {
+        "username": staff_member.username, "role": staff_member.role,
+    }
+    db.session.add(access_audit(
+        "staff_created", staff_member, new=created_state,
+        platform_admin_id=current_platform_admin().id,
+    ))
     db.session.commit()
 
     if request.is_json or request.headers.get("Accept") == "application/json":
@@ -562,8 +574,13 @@ def toggle_staff_status(staff_id: int):
     if not staff:
         return jsonify({"status": "error", "message": "Usuario no encontrado"}), 404
 
+    previous = staff_access_state(staff)
     staff.is_active = not staff.is_active
     revoke_staff_sessions(staff)
+    db.session.add(access_audit(
+        "staff_status_updated", staff, previous, staff_access_state(staff),
+        platform_admin_id=current_platform_admin().id,
+    ))
     db.session.commit()
 
     if request.is_json or request.headers.get("Accept") == "application/json":
@@ -586,6 +603,11 @@ def delete_staff(staff_id: int):
         return jsonify({"status": "error", "message": "Usuario no encontrado"}), 404
 
     business_id = staff.business_id
+    previous = staff_access_state(staff) | {"username": staff.username, "role": staff.role}
+    db.session.add(access_audit(
+        "staff_deleted", staff, previous=previous,
+        platform_admin_id=current_platform_admin().id,
+    ))
     db.session.delete(staff)
     db.session.commit()
 
@@ -613,6 +635,10 @@ def reset_staff_password(staff_id: int):
         return jsonify({"status": "error", "message": password_error}), 400
     staff.set_password(password)
     revoke_staff_sessions(staff)
+    db.session.add(access_audit(
+        "password_reset", staff, platform_admin_id=current_platform_admin().id,
+        new={"password_reset": True},
+    ))
     db.session.commit()
     if request.is_json or request.headers.get("Accept") == "application/json":
         return jsonify({"status": "success", "message": "Contraseña actualizada correctamente.", "staff": staff.to_dict()}), 200
@@ -627,11 +653,23 @@ def toggle_business_access(business_id: int, channel: str):
     business = db.session.get(Business, business_id)
     if not business:
         return jsonify({"status": "error", "message": "Negocio no encontrado."}), 404
+    previous = {
+        "web_access_enabled": business.web_access_enabled,
+        "mobile_access_enabled": business.mobile_access_enabled,
+    }
     field = f"{channel}_access_enabled"
     setattr(business, field, not getattr(business, field))
     if not getattr(business, field):
         for member in business.staff_members:
             revoke_staff_sessions(member)
+    new_state = {
+        "web_access_enabled": business.web_access_enabled,
+        "mobile_access_enabled": business.mobile_access_enabled,
+    }
+    db.session.add(access_audit(
+        "business_channel_updated", previous=previous, new=new_state,
+        platform_admin_id=current_platform_admin().id, business_id=business.id,
+    ))
     db.session.commit()
     if request.is_json or request.headers.get("Accept") == "application/json":
         return jsonify({"status": "success", "channel": channel, "enabled": getattr(business, field)}), 200
@@ -646,13 +684,79 @@ def toggle_staff_access(staff_id: int, channel: str):
     staff = db.session.get(Staff, staff_id)
     if not staff:
         return jsonify({"status": "error", "message": "Usuario no encontrado."}), 404
+    previous = staff_access_state(staff)
     field = f"{channel}_access_enabled"
     setattr(staff, field, not getattr(staff, field))
     revoke_staff_sessions(staff)
+    db.session.add(access_audit(
+        "staff_channel_updated", staff, previous, staff_access_state(staff),
+        platform_admin_id=current_platform_admin().id,
+    ))
     db.session.commit()
     if request.is_json or request.headers.get("Accept") == "application/json":
         return jsonify({"status": "success", "channel": channel, "enabled": getattr(staff, field)}), 200
     return redirect(f"/admin/business/{staff.business_id}?tab=staff")
+
+
+@admin_bp.route("/business/<int:business_id>/staff/<int:staff_id>/permissions", methods=["GET"])
+@platform_admin_required
+def get_staff_permissions(business_id: int, staff_id: int):
+    staff = db.session.get(Staff, staff_id)
+    if not staff or staff.business_id != business_id:
+        return jsonify({"status": "error", "message": "Empleado no encontrado en este negocio."}), 404
+    return jsonify({
+        "status": "success",
+        "staff": staff.to_dict(),
+        "business": {"id": staff.business.id, "name": staff.business.name,
+                     "web_access_enabled": staff.business.web_access_enabled,
+                     "mobile_access_enabled": staff.business.mobile_access_enabled},
+        "profile": detect_profile(staff),
+        "catalog": public_catalog(staff.role),
+    }), 200
+
+
+@admin_bp.route("/business/<int:business_id>/staff/<int:staff_id>/permissions", methods=["PUT"])
+@platform_admin_required
+def update_staff_permissions(business_id: int, staff_id: int):
+    staff = db.session.get(Staff, staff_id)
+    if not staff or staff.business_id != business_id:
+        return jsonify({"status": "error", "message": "Empleado no encontrado en este negocio."}), 404
+    if staff.role not in {"manager", "cashier"}:
+        return jsonify({"status": "error", "message": "El rol no admite permisos configurables."}), 400
+    data = request.get_json(silent=True) or {}
+    if "role" in data or "business_id" in data or "id" in data:
+        return jsonify({"status": "error", "message": "No se permite modificar identidad, rol o negocio."}), 400
+    if not isinstance(data.get("web_access_enabled"), bool) or not isinstance(data.get("mobile_access_enabled"), bool):
+        return jsonify({"status": "error", "message": "Los estados de canal deben ser booleanos."}), 400
+    try:
+        validate_permissions(staff.role, data.get("permissions", []))
+        permissions = permissions_for_profile(
+            staff.role, data.get("profile", "custom"), data.get("permissions", [])
+        )
+    except ValueError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 400
+
+    previous = staff_access_state(staff)
+    new_state = {
+        "is_active": staff.is_active,
+        "web_access_enabled": data["web_access_enabled"],
+        "mobile_access_enabled": data["mobile_access_enabled"],
+        "permissions": sorted(permissions),
+    }
+    if previous != new_state:
+        staff.web_access_enabled = new_state["web_access_enabled"]
+        staff.mobile_access_enabled = new_state["mobile_access_enabled"]
+        staff.permissions = ",".join(new_state["permissions"])
+        revoke_staff_sessions(staff)
+        db.session.add(access_audit(
+            "permissions_updated", staff, previous, new_state,
+            platform_admin_id=current_platform_admin().id,
+        ))
+        db.session.commit()
+    return jsonify({
+        "status": "success", "message": "Permisos actualizados.",
+        "staff": staff.to_dict(), "profile": detect_profile(staff),
+    }), 200
 
 
 @admin_bp.route("/staff", methods=["GET"])
