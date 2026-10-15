@@ -1,4 +1,4 @@
-from flask import Blueprint, g, jsonify, request
+from flask import Blueprint, g, jsonify, request, send_file
 from sqlalchemy.exc import IntegrityError
 
 from app.extensions import db
@@ -58,9 +58,14 @@ def manager_export_excel(business_id):
     if denied:
         return denied
     from app.services import ExportService
-    return ExportService().generate_excel_report(business_id), 200, {
-        "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "Content-Disposition": f"attachment; filename=business_{business_id}_report.xlsx"}
+    business = g.staff.business
+    report = ExportService.generate_excel_report(business)
+    return send_file(
+        report,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        as_attachment=True,
+        download_name=f"{business.slug}-reporte.xlsx",
+    )
 
 
 @manager_bp.route("/business/<int:business_id>/export/pdf", methods=["GET"])
@@ -70,8 +75,14 @@ def manager_export_pdf(business_id):
     if denied:
         return denied
     from app.services import ExportService
-    return ExportService().generate_pdf_report(business_id), 200, {
-        "Content-Type": "application/pdf", "Content-Disposition": f"attachment; filename=business_{business_id}_report.pdf"}
+    business = g.staff.business
+    report = ExportService.generate_pdf_report(business)
+    return send_file(
+        report,
+        mimetype="application/pdf",
+        as_attachment=True,
+        download_name=f"{business.slug}-reporte.pdf",
+    )
 
 
 @manager_bp.route("/<int:business_id>/transactions", methods=["GET"])

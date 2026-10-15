@@ -126,7 +126,7 @@ La aplicación estará disponible en:
 
 ## 🧪 Ejecución de Pruebas Unitarias
 
-El proyecto cuenta con una suite completa de **59 pruebas unitarias e integración**. El mismo comando se ejecuta automáticamente en GitHub Actions para pushes y pull requests:
+El proyecto cuenta con una suite completa de **63 pruebas unitarias e integración**. El mismo comando se ejecuta automáticamente en GitHub Actions para pushes y pull requests:
 
 ```bash
 python -m unittest discover tests -v
@@ -174,9 +174,9 @@ La revisión inicial `9a85c3791398` funciona tanto como bootstrap de una base va
 
 ### Autenticación, autorización y contrato para Flutter
 
-El administrador global conserva una sesión Flask separada de los empleados. El staff utiliza JWT HS256 con firma, algoritmo fijo, emisor, audiencia, tipo, canal, expiración y versión de autenticación validados. `JWT_SECRET_KEY` debe ser independiente de `SECRET_KEY`; producción rechaza claves débiles, CORS abierto y cookies sin HTTPS. Los access tokens duran 15 minutos por defecto. Los refresh tokens duran 30 días, se guardan mediante el hash de su identificador, rotan al usarse y detectan reutilización. Cerrar sesión, desactivar una cuenta/negocio/canal o restablecer una contraseña invalida el acceso previo.
+El administrador global conserva una sesión Flask separada de los empleados. El staff utiliza JWT HS256 con firma, algoritmo fijo, emisor, audiencia, tipo, canal, expiración y versión de autenticación validados. `JWT_SECRET_KEY` debe ser independiente y distinta de `SECRET_KEY`; producción rechaza claves débiles, claves reutilizadas, CORS abierto y cookies sin HTTPS. Los access tokens duran 15 minutos por defecto. Los refresh tokens duran 30 días, se guardan mediante el hash de su identificador y se consumen con una actualización condicional atómica antes de rotar. La reutilización —incluidas dos rotaciones concurrentes— revoca las sesiones. Cerrar sesión, desactivar una cuenta/negocio/canal o restablecer una contraseña invalida el acceso previo.
 
-Flutter debe enviar `Authorization: Bearer <access_token>`. El login recibe `username` o `email`, `password`, `business_slug` y `channel` (`mobile` por defecto); el slug resuelve nombres repetidos entre negocios. El token queda ligado al canal solicitado. Nunca debe enviar `staff_id`, `business_id`, rol o permisos como autoridad. `lookup` acepta únicamente el token QR. `process` acepta el token QR, una acción compatible con el programa y un identificador idempotente único. Para puntos acumulados se envía `purchase_amount` y el servidor calcula el saldo; para sellos el servidor concede uno o descuenta exactamente el límite del negocio.
+Flutter debe enviar `Authorization: Bearer <access_token>`. El login recibe `username` o `email`, `password`, `business_slug` y `channel` (`mobile` por defecto); el slug resuelve nombres repetidos entre negocios. El token queda ligado al canal solicitado. Nunca debe enviar `staff_id`, `business_id`, rol o permisos como autoridad. `lookup` acepta únicamente el token QR. `process` acepta el token QR, una acción compatible con el programa y un identificador idempotente único. La clave se limita al negocio y queda asociada al fingerprint persistente de cliente, acción e importes canónicos: una repetición idéntica devuelve el movimiento original y una variante responde `409`. Para puntos acumulados se envía `purchase_amount` y el servidor calcula el saldo; para sellos el servidor concede uno o descuenta exactamente el límite del negocio.
 
 Respuestas: `400` entrada/acción inválida, `401` token ausente/inválido/revocado, `403` cuenta, negocio, canal, rol o permiso denegado, y `429` límite de login o cooldown. Los rechazos se producen antes del commit. El limitador actual vive en memoria del proceso; producción con múltiples workers debe sustituirlo por almacenamiento compartido (por ejemplo Redis) en la fase operativa.
 
@@ -188,11 +188,13 @@ Los campos `web_access_enabled` y `mobile_access_enabled` existen tanto en negoc
 
 ### Registro público y Wallet
 
-`POST /join/<slug>` solo crea clientes nuevos. Si teléfono o correo ya existen responde `409` sin modificar datos ni revelar el QR; la recuperación verificada queda pendiente. Los enlaces iniciales de Wallet usan un token firmado, ligado al cliente y válido 15 minutos. El Web Service PassKit conserva `ApplePass` y sus rutas oficiales para no romper el protocolo. Los modos mock de Apple/Google siguen disponibles.
+`POST /join/<slug>` solo crea clientes nuevos. Si teléfono o correo ya existen responde `409` sin modificar datos ni revelar el QR; la recuperación verificada queda pendiente. Los enlaces iniciales de Wallet usan un token autenticado y cifrado, ligado al cliente y válido 15 minutos. Deben servirse exclusivamente por HTTPS y excluirse de access logs; las respuestas usan `no-store` y `Referrer-Policy: no-referrer`, y la API no devuelve por separado el JWT interno de Google. Los modos mock de Apple/Google siguen disponibles.
+
+El Web Service PassKit conserva `ApplePass` para registrar, retirar y descargar pases. Para la lista de actualizaciones, Apple no envía un token de pase porque puede haber varios: el `deviceLibraryIdentifier` actúa como secreto compartido y solo se devuelven registros asociados exactamente a ese dispositivo y `passTypeIdentifier`. Se admite la ruta oficial `GET /devices/<device>/registrations/<pass-type>` y se conserva temporalmente el alias anterior. Producción requiere HTTPS. Véase [Adding a Web Service to Update Passes](https://developer.apple.com/documentation/WalletPasses/adding-a-web-service-to-update-passes).
 
 ### Migración de seguridad
 
-La revisión incremental `c4f1a2b3d4e5` añade canales, permisos, versión de autenticación, sesiones revocables e idempotencia sin cambiar identificadores ni saldos. Bases existentes reciben canales deshabilitados. Se valida tanto una SQLite vacía como una heredada con datos. Su downgrade se bloquea antes de eliminar información; para revertir debe restaurarse un respaldo verificado.
+La revisión incremental `c4f1a2b3d4e5` añade canales, permisos, versión de autenticación, sesiones revocables e idempotencia sin cambiar identificadores ni saldos. La revisión `d5e6f7a8b9c0` añade fingerprints canónicos y cambia la unicidad de `request_id` al ámbito de cada negocio. Bases existentes reciben canales deshabilitados y sus movimientos históricos se preservan. Se valida tanto una SQLite vacía como una heredada con datos. Los downgrades se bloquean antes de eliminar información; para revertir debe restaurarse un respaldo verificado.
 
 ### Fases posteriores y riesgos conocidos
 

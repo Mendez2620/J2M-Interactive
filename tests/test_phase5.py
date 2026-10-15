@@ -6,6 +6,7 @@ from datetime import date
 from app import create_app
 from app.extensions import db
 from app.models import Business, BusinessCategory, Customer, PlatformAdmin, Staff, Transaction
+from app.services import ExportService
 
 
 class Phase5TestCase(unittest.TestCase):
@@ -172,6 +173,8 @@ class Phase5TestCase(unittest.TestCase):
 
     def test_excel_export_endpoint(self):
         """Test GET /admin/business/<id>/export/excel returns a valid formatted .xlsx file."""
+        self.customer_pepe.full_name = "=2+2"
+        db.session.commit()
         res = self.client.get(f"/admin/business/{self.business_active.id}/export/excel")
         self.assertEqual(res.status_code, 200)
         self.assertEqual(
@@ -186,10 +189,14 @@ class Phase5TestCase(unittest.TestCase):
         self.assertIn("Historial Transacciones", wb.sheetnames)
 
         ws_c = wb["Clientes Registrados"]
-        self.assertEqual(ws_c["B5"].value, "Mateo Morales")
+        self.assertEqual(ws_c["B5"].value, "'=2+2")
 
     def test_pdf_export_endpoint(self):
         """Test GET /admin/business/<id>/export/pdf returns a valid .pdf file."""
+        self.customer_pepe.full_name = "<b>Cliente</b> & privado"
+        db.session.commit()
+        self.assertEqual(ExportService._pdf_text(self.customer_pepe.full_name),
+                         "&lt;b&gt;Cliente&lt;/b&gt; &amp; privado")
         res = self.client.get(f"/admin/business/{self.business_active.id}/export/pdf")
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.mimetype, "application/pdf")

@@ -117,7 +117,9 @@ class GoogleWalletTestCase(unittest.TestCase):
         self.assertEqual(data["customer_id"], self.customer_stamps.id)
         self.assertEqual(data["business_name"], "Café Central")
         self.assertTrue(data["save_url"].startswith("https://pay.google.com/gp/v/save/"))
-        self.assertIn("jwt", data)
+        self.assertNotIn("jwt", data)
+        self.assertEqual(response.headers["Cache-Control"], "no-store, private")
+        self.assertEqual(response.headers["Referrer-Policy"], "no-referrer")
 
     def test_google_wallet_endpoint_not_found(self):
         """Test GET /api/customers/<id>/wallet/google with non-existing customer."""

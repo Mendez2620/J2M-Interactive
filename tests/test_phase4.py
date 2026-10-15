@@ -111,11 +111,15 @@ class Phase4TestCase(unittest.TestCase):
         self.assertEqual(res_fail.status_code, 401)
 
         # 4. Get updated passes list
-        list_url = f"/api/apple/v1/devices/{device_id}/passes/{self.pass_type_id}"
+        list_url = f"/api/apple/v1/devices/{device_id}/registrations/{self.pass_type_id}"
         res_list = self.client.get(list_url)
         self.assertEqual(res_list.status_code, 200)
         data_list = res_list.get_json()
         self.assertIn(self.serial_number, data_list["serialNumbers"])
+        self.assertEqual(
+            self.client.get(f"/api/apple/v1/devices/unknown-device/registrations/{self.pass_type_id}").status_code,
+            204,
+        )
 
         # 5. Deliver pass to Apple device
         deliver_url = f"/api/apple/v1/passes/{self.pass_type_id}/{self.serial_number}"

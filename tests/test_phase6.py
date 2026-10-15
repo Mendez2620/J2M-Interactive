@@ -1,4 +1,6 @@
+import io
 import unittest
+import openpyxl
 from unittest.mock import patch
 from datetime import date, datetime, timedelta
 import json
@@ -58,7 +60,7 @@ class Phase6TestCase(unittest.TestCase):
             role='manager',
             web_access_enabled=True,
             mobile_access_enabled=True,
-            permissions='view_stats,view_transactions,scanner_operate',
+            permissions='view_stats,view_transactions,export_reports,scanner_operate',
         )
         self.manager_staff.set_password('ManagerPassword123!')
         db.session.add(self.manager_staff)
@@ -125,6 +127,26 @@ class Phase6TestCase(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         data = resp.get_json()
         self.assertIn(data['wallet_sync']['google_status'], ['mock_success', 'success'])
+
+    def test_manager_exports_use_authenticated_business(self):
+        excel = self.client.get(
+            f'/manager/business/{self.business1.id}/export/excel', headers=self.web_auth)
+        self.assertEqual(excel.status_code, 200)
+        self.assertEqual(excel.mimetype, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        self.assertIn('negocio-uno-reporte.xlsx', excel.headers['Content-Disposition'])
+        workbook = openpyxl.load_workbook(io.BytesIO(excel.data))
+        self.assertIn('Clientes Registrados', workbook.sheetnames)
+
+        pdf = self.client.get(
+            f'/manager/business/{self.business1.id}/export/pdf', headers=self.web_auth)
+        self.assertEqual(pdf.status_code, 200)
+        self.assertEqual(pdf.mimetype, 'application/pdf')
+        self.assertIn('negocio-uno-reporte.pdf', pdf.headers['Content-Disposition'])
+        self.assertTrue(pdf.data.startswith(b'%PDF'))
+
+        denied = self.client.get(
+            f'/manager/business/{self.business2.id}/export/pdf', headers=self.web_auth)
+        self.assertEqual(denied.status_code, 403)
 
     def test_anti_fraud_cooldown_enforced(self):
         # First transaction – should succeed

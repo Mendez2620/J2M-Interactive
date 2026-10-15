@@ -149,6 +149,8 @@ class AppleWalletTestCase(unittest.TestCase):
         self.assertEqual(response.mimetype, "application/vnd.apple.pkpass")
         self.assertIn("attachment", response.headers.get("Content-Disposition", ""))
         self.assertIn("cafe-central-pass.pkpass", response.headers.get("Content-Disposition", ""))
+        self.assertEqual(response.headers["Cache-Control"], "no-store, private")
+        self.assertEqual(response.headers["Referrer-Policy"], "no-referrer")
 
         # Verify body is a valid ZIP
         pkpass_bytes = io.BytesIO(response.data)

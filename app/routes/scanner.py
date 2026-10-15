@@ -1,3 +1,5 @@
+import hashlib
+import json
 import math
 import time
 from collections import defaultdict, deque
@@ -6,10 +8,11 @@ from datetime import datetime, timezone
 import jwt
 from flask import Blueprint, current_app, g, jsonify, render_template, request
 from sqlalchemy import or_
+from sqlalchemy.exc import IntegrityError
 
 from app.extensions import db
 from app.models import Business, Customer, Staff, StaffSession, Transaction
-from app.staff_auth import decode_token, issue_token_pair, revoke_staff_sessions, staff_any_channel_required, staff_required
+from app.staff_auth import _hash_jti, decode_token, issue_token_pair, revoke_staff_sessions, staff_any_channel_required, staff_required
 
 scanner_bp = Blueprint("scanner", __name__)
 _login_attempts = defaultdict(deque)
@@ -31,6 +34,25 @@ def _number(value, name, *, positive=False, integer=False):
     if abs(number) > current_app.config["MAX_TRANSACTION_AMOUNT"]:
         raise ValueError(f"{name} excede el límite permitido.")
     return int(number) if integer else number
+
+
+def _operation_fingerprint(customer_id, action, purchase_amount, points_amount, stamps_amount):
+    canonical = {
+        "action": action,
+        "customer_id": customer_id,
+        "points_amount": format(points_amount, ".12g"),
+        "purchase_amount": format(purchase_amount, ".12g"),
+        "stamps_amount": stamps_amount,
+    }
+    encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _replay_or_conflict(existing, fingerprint):
+    if existing.request_fingerprint and existing.request_fingerprint == fingerprint:
+        return jsonify({"status": "success", "idempotent_replay": True,
+                        "transaction": existing.to_dict()}), 200
+    return _error("Idempotency-Key ya fue utilizado para otra operación.", 409)
 
 
 @scanner_bp.route("/scanner", methods=["GET"])
@@ -92,23 +114,30 @@ def refresh_token():
     raw = (request.get_json(silent=True) or {}).get("refresh_token", "")
     try:
         payload = decode_token(raw, "refresh")
-        auth_session = db.session.get(StaffSession, payload["sid"])
         staff = db.session.get(Staff, int(payload["sub"]))
-        from app.staff_auth import _hash_jti
-        valid = auth_session and not auth_session.is_revoked and _hash_jti(payload["jti"]) == auth_session.refresh_jti_hash
     except (jwt.PyJWTError, TypeError, ValueError):
-        valid, auth_session, staff = False, None, None
-    if auth_session and auth_session.is_revoked and staff:
-        revoke_staff_sessions(staff)
-        db.session.commit()
-    if not valid or not staff or payload["ver"] != staff.auth_version:
+        return _error("Refresh token inválido o reutilizado.", 401)
+    if not staff or payload["ver"] != staff.auth_version:
         return _error("Refresh token inválido o reutilizado.", 401)
     channel = payload["chn"]
     if channel not in {"web", "mobile"}:
         return _error("Canal inválido.", 401)
-    if channel != auth_session.channel or not staff.is_active or not staff.business.is_active or not getattr(staff, f"{channel}_access_enabled") or not getattr(staff.business, f"{channel}_access_enabled"):
+    if not staff.is_active or not staff.business.is_active or not getattr(staff, f"{channel}_access_enabled") or not getattr(staff.business, f"{channel}_access_enabled"):
         return _error("Acceso inactivo.", 403)
-    auth_session.revoked_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    consumed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    consumed = StaffSession.query.filter(
+        StaffSession.id == payload["sid"],
+        StaffSession.staff_id == staff.id,
+        StaffSession.channel == channel,
+        StaffSession.refresh_jti_hash == _hash_jti(payload["jti"]),
+        StaffSession.revoked_at.is_(None),
+        StaffSession.expires_at > consumed_at,
+    ).update({StaffSession.revoked_at: consumed_at}, synchronize_session=False)
+    if consumed != 1:
+        db.session.rollback()
+        revoke_staff_sessions(staff)
+        db.session.commit()
+        return _error("Refresh token inválido o reutilizado.", 401)
     db.session.commit()
     access, refresh = issue_token_pair(staff, channel)
     return jsonify({"status": "success", "access_token": access, "refresh_token": refresh,
@@ -147,11 +176,6 @@ def process_transaction():
     action = data.get("action")
     if not request_id or len(request_id) > 64:
         return _error("Idempotency-Key obligatorio e inválido.", 400)
-    existing = Transaction.query.filter_by(request_id=request_id).first()
-    if existing:
-        if existing.business_id != g.staff.business_id:
-            return _error("Identificador de solicitud no disponible.", 409)
-        return jsonify({"status": "success", "idempotent_replay": True, "transaction": existing.to_dict()}), 200
     customer = Customer.query.filter_by(business_id=g.staff.business_id, qr_code_token=token).first()
     if not customer:
         return _error("Cliente no encontrado.", 404)
@@ -170,43 +194,71 @@ def process_transaction():
                 raise ValueError("La cantidad de sellos la determina el servidor.")
         if action == "earn_points" and data.get("amount") not in (None, 0, 0.0, "0", "0.0"):
             raise ValueError("Los puntos se calculan a partir de purchase_amount.")
-        if action.startswith("earn"):
-            last_tx = Transaction.query.filter_by(business_id=business.id, customer_id=customer.id, type="earn").order_by(Transaction.timestamp.desc()).first()
-            if last_tx:
-                delta = (datetime.now(timezone.utc).replace(tzinfo=None) - last_tx.timestamp.replace(tzinfo=None)).total_seconds() / 60
-                if delta < business.cooldown_minutes:
-                    return _error("Operación bloqueada por cooldown.", 429)
         if action == "earn_stamp":
-            customer.current_stamps += 1
-            tx = Transaction(business_id=business.id, customer_id=customer.id, staff_id=g.staff.id,
-                             type="earn", stamps_amount=1, purchase_amount=purchase, request_id=request_id)
+            tx_type, points_amount, stamps_amount = "earn", 0.0, 1
         elif action == "redeem_stamp":
-            needed = business.stamps_reward_limit
-            if customer.current_stamps < needed:
-                return _error("Sellos insuficientes.", 400)
-            customer.current_stamps -= needed
-            tx = Transaction(business_id=business.id, customer_id=customer.id, staff_id=g.staff.id,
-                             type="redeem", stamps_amount=needed, purchase_amount=purchase, request_id=request_id)
+            tx_type, points_amount, stamps_amount = "redeem", 0.0, business.stamps_reward_limit
         elif action == "earn_points":
             purchase = _number(data.get("purchase_amount"), "purchase_amount", positive=True)
-            points = purchase * business.points_per_currency
-            if not math.isfinite(points) or points <= 0:
+            points_amount = purchase * business.points_per_currency
+            if not math.isfinite(points_amount) or points_amount <= 0:
                 raise ValueError("Regla de puntos inválida.")
-            customer.current_points += points
-            tx = Transaction(business_id=business.id, customer_id=customer.id, staff_id=g.staff.id,
-                             type="earn", points_amount=points, purchase_amount=purchase, request_id=request_id)
+            tx_type, stamps_amount = "earn", 0
         else:
-            points = _number(data.get("amount"), "amount", positive=True)
-            if customer.current_points < points:
-                return _error("Puntos insuficientes.", 400)
-            customer.current_points -= points
-            tx = Transaction(business_id=business.id, customer_id=customer.id, staff_id=g.staff.id,
-                             type="redeem", points_amount=points, purchase_amount=purchase, request_id=request_id)
+            points_amount = _number(data.get("amount"), "amount", positive=True)
+            tx_type, stamps_amount = "redeem", 0
     except ValueError as exc:
         db.session.rollback()
         return _error(str(exc), 400)
-    db.session.add(tx)
-    db.session.commit()
+
+    fingerprint = _operation_fingerprint(
+        customer.id, action, purchase, points_amount, stamps_amount
+    )
+    existing = Transaction.query.filter_by(
+        business_id=business.id, request_id=request_id
+    ).first()
+    if existing:
+        return _replay_or_conflict(existing, fingerprint)
+
+    if action.startswith("earn"):
+        last_tx = Transaction.query.filter_by(
+            business_id=business.id, customer_id=customer.id, type="earn"
+        ).order_by(Transaction.timestamp.desc()).first()
+        if last_tx:
+            delta = (datetime.now(timezone.utc).replace(tzinfo=None) - last_tx.timestamp.replace(tzinfo=None)).total_seconds() / 60
+            if delta < business.cooldown_minutes:
+                return _error("Operación bloqueada por cooldown.", 429)
+
+    if action == "earn_stamp":
+        customer.current_stamps += stamps_amount
+    elif action == "redeem_stamp":
+        if customer.current_stamps < stamps_amount:
+            return _error("Sellos insuficientes.", 400)
+        customer.current_stamps -= stamps_amount
+    elif action == "earn_points":
+        customer.current_points += points_amount
+    else:
+        if customer.current_points < points_amount:
+            return _error("Puntos insuficientes.", 400)
+        customer.current_points -= points_amount
+
+    tx = Transaction(
+        business_id=business.id, customer_id=customer.id, staff_id=g.staff.id,
+        type=tx_type, points_amount=points_amount, stamps_amount=stamps_amount,
+        purchase_amount=purchase, request_id=request_id,
+        request_fingerprint=fingerprint,
+    )
+    try:
+        db.session.add(tx)
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        winner = Transaction.query.filter_by(
+            business_id=business.id, request_id=request_id
+        ).first()
+        if winner:
+            return _replay_or_conflict(winner, fingerprint)
+        return _error("Conflicto al registrar la operación.", 409)
     google_sync_result, apple_notified_count = None, 0
     try:
         from app.services import GoogleWalletService

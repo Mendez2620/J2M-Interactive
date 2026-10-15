@@ -1,4 +1,10 @@
+import base64
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 
 import jwt
@@ -7,6 +13,7 @@ from app import create_app
 from app.extensions import db
 from app.models import Business, Customer, PlatformAdmin, Staff, Transaction
 from app.wallet_access import issue_wallet_token
+from app.config import TestingConfig
 
 
 class SecurityPhase1TestCase(unittest.TestCase):
@@ -29,11 +36,13 @@ class SecurityPhase1TestCase(unittest.TestCase):
         self.manager = self._staff(self.business_a, "manager", "manager", "view_stats,view_transactions")
         self.customer_a = Customer(business_id=self.business_a.id, full_name="Cliente A", email="a@test.com",
                                    phone="111", current_stamps=2)
+        self.customer_a2 = Customer(business_id=self.business_a.id, full_name="Cliente A2", email="a2@test.com",
+                                    phone="112", current_stamps=0)
         self.customer_b = Customer(business_id=self.business_b.id, full_name="Cliente B", email="b@test.com",
                                    phone="222", current_points=100)
         admin = PlatformAdmin(name="Admin", email="admin@test.com", is_active=True)
         admin.set_password("AdminPassword123!")
-        db.session.add_all([self.customer_a, self.customer_b, admin])
+        db.session.add_all([self.customer_a, self.customer_a2, self.customer_b, admin])
         db.session.commit()
         with self.client.session_transaction() as session:
             session["platform_admin_id"] = admin.id
@@ -107,6 +116,38 @@ class SecurityPhase1TestCase(unittest.TestCase):
         reuse = self.client.post("/api/scanner/refresh", json={"refresh_token": tokens["refresh_token"]})
         self.assertEqual(reuse.status_code, 401)
 
+    def test_concurrent_refresh_only_one_consumes_token(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            uri = f"sqlite:///{(Path(directory) / 'refresh.sqlite').as_posix()}"
+            with patch.object(TestingConfig, "SQLALCHEMY_DATABASE_URI", uri):
+                concurrent_app = create_app("testing")
+            with concurrent_app.app_context():
+                db.create_all()
+                business = Business(name="Concurrent", slug="concurrent", is_active=True,
+                                    mobile_access_enabled=True)
+                db.session.add(business)
+                db.session.flush()
+                staff = Staff(business_id=business.id, username="concurrent", role="cashier",
+                              is_active=True, mobile_access_enabled=True, permissions="scanner_operate")
+                staff.set_password("StaffPassword123!")
+                db.session.add(staff)
+                db.session.commit()
+            login_client = concurrent_app.test_client()
+            login = login_client.post("/api/scanner/login", json={"username": "concurrent",
+                "password": "StaffPassword123!", "business_slug": "concurrent"})
+            refresh_token = login.get_json()["refresh_token"]
+            barrier = Barrier(2)
+
+            def rotate():
+                with concurrent_app.test_client() as client:
+                    barrier.wait(timeout=5)
+                    return client.post("/api/scanner/refresh", json={
+                        "refresh_token": refresh_token}).status_code
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                statuses = sorted(executor.map(lambda _index: rotate(), range(2)))
+            self.assertEqual(statuses, [200, 401])
+
     def test_account_business_and_channel_changes_are_checked_each_request(self):
         headers, _ = self._auth()
         self.cashier.is_active = False
@@ -168,10 +209,32 @@ class SecurityPhase1TestCase(unittest.TestCase):
         db.session.refresh(self.customer_a)
         self.assertEqual(self.customer_a.current_stamps, 3)
         self.assertEqual(Transaction.query.count(), 1)
+
+        changed_customer = self.client.post("/api/scanner/process", json={
+            "token": self.customer_a2.qr_code_token, "action": "earn_stamp",
+            "request_id": "same-request"}, headers=headers)
+        self.assertEqual(changed_customer.status_code, 409)
+        changed_action = self.client.post("/api/scanner/process", json={
+            "token": self.customer_a.qr_code_token, "action": "redeem_stamp", "amount": 3,
+            "request_id": "same-request"}, headers=headers)
+        self.assertEqual(changed_action.status_code, 409)
+        db.session.refresh(self.customer_a)
+        db.session.refresh(self.customer_a2)
+        self.assertEqual(self.customer_a.current_stamps, 3)
+        self.assertEqual(self.customer_a2.current_stamps, 0)
+        self.assertEqual(Transaction.query.count(), 1)
+
         other_headers, _ = self._auth(self.other_cashier)
         collision = self.client.post("/api/scanner/process", json={"token": self.customer_b.qr_code_token,
             "action": "earn_points", "purchase_amount": 10, "request_id": "same-request"}, headers=other_headers)
-        self.assertEqual(collision.status_code, 409)
+        self.assertEqual(collision.status_code, 200)
+        self.assertEqual(Transaction.query.count(), 2)
+        changed_amount = self.client.post("/api/scanner/process", json={"token": self.customer_b.qr_code_token,
+            "action": "earn_points", "purchase_amount": 11, "request_id": "same-request"}, headers=other_headers)
+        self.assertEqual(changed_amount.status_code, 409)
+        db.session.refresh(self.customer_b)
+        self.assertEqual(self.customer_b.current_points, 120)
+        self.assertEqual(Transaction.query.count(), 2)
 
     def test_manager_role_and_tenant_authorization(self):
         cashier_headers, _ = self._auth(self.cashier, channel="web")
@@ -193,8 +256,14 @@ class SecurityPhase1TestCase(unittest.TestCase):
     def test_wallet_requires_customer_scoped_temporary_token(self):
         self.assertEqual(self.client.get(f"/api/customers/{self.customer_a.id}/wallet/google").status_code, 403)
         token = issue_wallet_token(self.customer_a)
+        ciphertext = base64.urlsafe_b64decode(token.encode("ascii"))
+        self.assertNotIn(b'"customer_id"', ciphertext)
+        self.assertNotIn(b'"business_id"', ciphertext)
         self.assertEqual(self.client.get(f"/api/customers/{self.customer_b.id}/wallet/google",
                                          query_string={"token": token}).status_code, 403)
+        tampered = f"{token[:-1]}{'A' if token[-1] != 'A' else 'B'}"
+        self.assertEqual(self.client.get(f"/api/customers/{self.customer_a.id}/wallet/apple",
+                                         query_string={"token": tampered}).status_code, 403)
 
 
 if __name__ == "__main__":

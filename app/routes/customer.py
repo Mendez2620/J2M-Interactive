@@ -10,6 +10,14 @@ logger = logging.getLogger(__name__)
 customer_bp = Blueprint("customer", __name__, url_prefix="/api/customers")
 
 
+@customer_bp.after_request
+def protect_wallet_responses(response):
+    response.headers["Cache-Control"] = "no-store, private"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
+
 @customer_bp.route("/ping", methods=["GET"])
 def ping():
     return jsonify({"message": "Customer module ready"}), 200
@@ -51,14 +59,13 @@ def get_google_wallet_pass(customer_id: int):
 
     try:
         wallet_service = GoogleWalletService()
-        jwt_token, save_url = wallet_service.create_jwt_pass(customer)
+        _jwt_token, save_url = wallet_service.create_jwt_pass(customer)
 
         response_data = {
             "status": "success",
             "customer_id": customer.id,
             "business_name": customer.business.name,
             "save_url": save_url,
-            "jwt": jwt_token,
             "is_dev_mock_key": wallet_service.is_mock_key,
             "message": "Enlace de pase de Google Wallet generado correctamente.",
         }

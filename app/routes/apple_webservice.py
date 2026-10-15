@@ -96,6 +96,7 @@ def unregister_device(device_id: str, pass_type_id: str, serial_number: str):
     return "", 200
 
 
+@apple_ws_bp.route("/devices/<device_id>/registrations/<pass_type_id>", methods=["GET"])
 @apple_ws_bp.route("/devices/<device_id>/passes/<pass_type_id>", methods=["GET"])
 def get_updated_passes(device_id: str, pass_type_id: str):
     """
@@ -175,9 +176,14 @@ def notify_apple_wallet_devices(customer: Customer) -> int:
     apple_service = AppleWalletService()
     notified_count = 0
 
+    updated_at = datetime.now(timezone.utc)
     for dev in devices:
+        dev.updated_at = updated_at
         if dev.push_token:
             apple_service.send_push_notification(dev.push_token)
             notified_count += 1
+
+    if devices:
+        db.session.commit()
 
     return notified_count

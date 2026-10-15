@@ -1,17 +1,35 @@
+import base64
+import hashlib
+import json
+
+from cryptography.fernet import Fernet, InvalidToken
 from flask import current_app
-from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
+
+
+def _fernet():
+    secret = current_app.config["SECRET_KEY"].encode("utf-8")
+    key = base64.urlsafe_b64encode(hashlib.sha256(secret + b":wallet-issuance-v2").digest())
+    return Fernet(key)
 
 
 def issue_wallet_token(customer):
-    serializer = URLSafeTimedSerializer(current_app.config["SECRET_KEY"], salt="wallet-issuance-v1")
-    return serializer.dumps({"customer_id": customer.id, "business_id": customer.business_id, "purpose": "wallet"})
+    payload = json.dumps({
+        "customer_id": customer.id,
+        "business_id": customer.business_id,
+        "purpose": "wallet",
+    }, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return _fernet().encrypt(payload).decode("ascii")
 
 
 def validate_wallet_token(token, customer):
     try:
-        payload = URLSafeTimedSerializer(
-            current_app.config["SECRET_KEY"], salt="wallet-issuance-v1"
-        ).loads(token, max_age=current_app.config["WALLET_TOKEN_MAX_AGE"])
-    except (BadSignature, SignatureExpired):
+        payload = json.loads(_fernet().decrypt(
+            token.encode("ascii"), ttl=current_app.config["WALLET_TOKEN_MAX_AGE"]
+        ))
+    except (InvalidToken, UnicodeError, ValueError, json.JSONDecodeError):
         return False
-    return payload == {"customer_id": customer.id, "business_id": customer.business_id, "purpose": "wallet"}
+    return payload == {
+        "business_id": customer.business_id,
+        "customer_id": customer.id,
+        "purpose": "wallet",
+    }

@@ -1,3 +1,4 @@
+import hmac
 import os
 from flask import Flask
 from app.config import config_by_name
@@ -25,6 +26,8 @@ def create_app(config_name=None):
         jwt_secret = os.getenv("JWT_SECRET_KEY", app.config.get("JWT_SECRET_KEY") or "")
         if jwt_secret in {"default-jwt-secret-key", "change-jwt-secret-key-in-production"} or len(jwt_secret) < 32:
             raise RuntimeError("Producción requiere JWT_SECRET_KEY independiente y aleatoria de al menos 32 caracteres.")
+        if hmac.compare_digest(jwt_secret, secret):
+            raise RuntimeError("Producción requiere que JWT_SECRET_KEY sea distinta de SECRET_KEY.")
         app.config["JWT_SECRET_KEY"] = jwt_secret
         if app.config.get("CORS_ORIGINS") == "*":
             raise RuntimeError("Producción requiere CORS_ORIGINS explícito.")
