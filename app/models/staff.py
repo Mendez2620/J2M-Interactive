@@ -18,6 +18,10 @@ class Staff(db.Model):
     password_hash = db.Column(db.String(255), nullable=False)
     role = db.Column(db.String(20), default="cashier", nullable=False)  # 'admin', 'manager', 'cashier'
     is_active = db.Column(db.Boolean, default=True, nullable=False)
+    web_access_enabled = db.Column(db.Boolean, default=False, nullable=False)
+    mobile_access_enabled = db.Column(db.Boolean, default=False, nullable=False)
+    auth_version = db.Column(db.Integer, default=0, nullable=False)
+    permissions = db.Column(db.String(500), default="", nullable=False)
     created_at = db.Column(
         db.DateTime,
         default=lambda: datetime.now(timezone.utc),
@@ -34,6 +38,7 @@ class Staff(db.Model):
     transactions = db.relationship(
         "Transaction", back_populates="staff", lazy="dynamic"
     )
+    sessions = db.relationship("StaffSession", back_populates="staff", cascade="all, delete-orphan", passive_deletes=True)
 
     def set_password(self, password: str):
         """Hashes and sets the password."""
@@ -53,6 +58,9 @@ class Staff(db.Model):
             "phone": self.phone,
             "role": self.role,
             "is_active": self.is_active,
+            "web_access_enabled": self.web_access_enabled,
+            "mobile_access_enabled": self.mobile_access_enabled,
+            "permissions": sorted(filter(None, self.permissions.split(","))),
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 

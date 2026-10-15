@@ -20,6 +20,8 @@ class Transaction(db.Model):
     points_amount = db.Column(db.Float, default=0.0, nullable=False)
     stamps_amount = db.Column(db.Integer, default=0, nullable=False)
     purchase_amount = db.Column(db.Float, default=0.0, nullable=False)
+    request_id = db.Column(db.String(64), nullable=True)
+    request_fingerprint = db.Column(db.String(64), nullable=True)
     timestamp = db.Column(
         db.DateTime,
         default=lambda: datetime.now(timezone.utc),
@@ -32,6 +34,10 @@ class Transaction(db.Model):
     customer = db.relationship("Customer", back_populates="transactions")
     staff = db.relationship("Staff", back_populates="transactions")
 
+    __table_args__ = (
+        db.UniqueConstraint("business_id", "request_id", name="uq_transactions_business_request_id"),
+    )
+
     def to_dict(self):
         return {
             "id": self.id,
@@ -42,6 +48,7 @@ class Transaction(db.Model):
             "points_amount": self.points_amount,
             "stamps_amount": self.stamps_amount,
             "purchase_amount": self.purchase_amount,
+            "request_id": self.request_id,
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
         }
 

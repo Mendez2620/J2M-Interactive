@@ -1,3 +1,4 @@
+import hmac
 import os
 from flask import Flask
 from app.config import config_by_name
@@ -15,12 +16,23 @@ def create_app(config_name=None):
     app.config.from_object(config_class)
 
     if config_name == "production":
+        app.config["CORS_ORIGINS"] = os.getenv("CORS_ORIGINS", app.config.get("CORS_ORIGINS", "*"))
         secret = os.getenv("SECRET_KEY", app.config.get("SECRET_KEY") or "")
         app.config["SECRET_KEY"] = secret
         forbidden = {"default-dev-secret-key-j2m", "change-this-secret-key-in-production-j2m-loyalty"}
         if secret in forbidden or len(secret) < 32:
             raise RuntimeError("Producción requiere SECRET_KEY aleatoria de al menos 32 caracteres.")
         app.config["DEBUG"] = False
+        jwt_secret = os.getenv("JWT_SECRET_KEY", app.config.get("JWT_SECRET_KEY") or "")
+        if jwt_secret in {"default-jwt-secret-key", "change-jwt-secret-key-in-production"} or len(jwt_secret) < 32:
+            raise RuntimeError("Producción requiere JWT_SECRET_KEY independiente y aleatoria de al menos 32 caracteres.")
+        if hmac.compare_digest(jwt_secret, secret):
+            raise RuntimeError("Producción requiere que JWT_SECRET_KEY sea distinta de SECRET_KEY.")
+        app.config["JWT_SECRET_KEY"] = jwt_secret
+        if app.config.get("CORS_ORIGINS") == "*":
+            raise RuntimeError("Producción requiere CORS_ORIGINS explícito.")
+        from werkzeug.middleware.proxy_fix import ProxyFix
+        app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
     # Initialize extensions
     db.init_app(app)
@@ -47,6 +59,17 @@ def create_app(config_name=None):
     @app.errorhandler(413)
     def upload_too_large(_error):
         return {"status": "error", "message": "El archivo excede el tamaño permitido."}, 413
+
+    @app.after_request
+    def security_headers(response):
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        response.headers.setdefault("Permissions-Policy", "camera=(self), geolocation=()")
+        response.headers.setdefault("Content-Security-Policy", "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://cdnjs.cloudflare.com; script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://cdnjs.cloudflare.com https://unpkg.com")
+        if config_name == "production":
+            response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+        return response
 
     # Register CLI commands
     @app.cli.command('check-birthdays')

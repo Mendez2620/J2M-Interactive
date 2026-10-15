@@ -30,7 +30,14 @@ class Config:
     
     # JWT
     JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "default-jwt-secret-key")
-    JWT_ACCESS_TOKEN_EXPIRES = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRES", 86400))
+    JWT_ACCESS_TOKEN_EXPIRES = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRES", 900))
+    JWT_REFRESH_TOKEN_EXPIRES = int(os.getenv("JWT_REFRESH_TOKEN_EXPIRES", 2592000))
+    JWT_ISSUER = os.getenv("JWT_ISSUER", "j2m-interactive")
+    JWT_AUDIENCE = os.getenv("JWT_AUDIENCE", "j2m-staff")
+    AUTH_RATE_LIMIT_ATTEMPTS = int(os.getenv("AUTH_RATE_LIMIT_ATTEMPTS", 5))
+    AUTH_RATE_LIMIT_WINDOW = int(os.getenv("AUTH_RATE_LIMIT_WINDOW", 300))
+    MAX_TRANSACTION_AMOUNT = float(os.getenv("MAX_TRANSACTION_AMOUNT", 1000000))
+    WALLET_TOKEN_MAX_AGE = int(os.getenv("WALLET_TOKEN_MAX_AGE", 900))
     # Two 5 MB images plus multipart form overhead.
     MAX_CONTENT_LENGTH = int(os.getenv("MAX_CONTENT_LENGTH", 12 * 1024 * 1024))
     PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
@@ -49,6 +56,8 @@ class DevelopmentConfig(Config):
 class ProductionConfig(Config):
     """Production environment configuration."""
     DEBUG = False
+    SESSION_COOKIE_SECURE = True
+    PREFERRED_URL_SCHEME = "https"
 
 
 class TestingConfig(Config):
@@ -57,6 +66,7 @@ class TestingConfig(Config):
     SQLALCHEMY_DATABASE_URI = "sqlite:///:memory:"
     CSRF_ENABLED = False
     UPLOAD_FOLDER = os.path.join(os.getenv("TEMP", "."), "j2m-test-uploads")
+    JWT_SECRET_KEY = "testing-only-jwt-secret-key-longer-than-32-bytes"
 
 
 config_by_name = {

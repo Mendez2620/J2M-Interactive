@@ -96,6 +96,7 @@ def unregister_device(device_id: str, pass_type_id: str, serial_number: str):
     return "", 200
 
 
+@apple_ws_bp.route("/devices/<device_id>/registrations/<pass_type_id>", methods=["GET"])
 @apple_ws_bp.route("/devices/<device_id>/passes/<pass_type_id>", methods=["GET"])
 def get_updated_passes(device_id: str, pass_type_id: str):
     """
@@ -159,8 +160,10 @@ def log_apple_message():
     """
     data = request.get_json(silent=True) or {}
     logs = data.get("logs", [])
-    for msg in logs:
-        logger.info("[Apple Wallet Client Log] %s", msg)
+    if not isinstance(logs, list):
+        return jsonify({"error": "Invalid logs"}), 400
+    # Do not persist client-supplied content: it may contain pass tokens or PII.
+    logger.info("Apple Wallet client reported %d diagnostic message(s)", min(len(logs), 50))
     return "", 200
 
 
@@ -173,9 +176,14 @@ def notify_apple_wallet_devices(customer: Customer) -> int:
     apple_service = AppleWalletService()
     notified_count = 0
 
+    updated_at = datetime.now(timezone.utc)
     for dev in devices:
+        dev.updated_at = updated_at
         if dev.push_token:
             apple_service.send_push_notification(dev.push_token)
             notified_count += 1
+
+    if devices:
+        db.session.commit()
 
     return notified_count

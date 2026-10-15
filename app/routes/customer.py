@@ -3,10 +3,19 @@ from flask import Blueprint, jsonify, request, send_file
 from app.extensions import db
 from app.models import Customer
 from app.services import GoogleWalletService, AppleWalletService
+from app.wallet_access import validate_wallet_token
 
 logger = logging.getLogger(__name__)
 
 customer_bp = Blueprint("customer", __name__, url_prefix="/api/customers")
+
+
+@customer_bp.after_request
+def protect_wallet_responses(response):
+    response.headers["Cache-Control"] = "no-store, private"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
 
 
 @customer_bp.route("/ping", methods=["GET"])
@@ -24,6 +33,8 @@ def get_google_wallet_pass(customer_id: int):
     Returns:
         JSON with the Google Wallet Save URL and JWT token.
     """
+    if not request.args.get("token"):
+        return jsonify({"status": "error", "message": "Token de Wallet requerido."}), 403
     customer = db.session.get(Customer, customer_id)
     if not customer:
         return (
@@ -33,6 +44,9 @@ def get_google_wallet_pass(customer_id: int):
             }),
             404,
         )
+
+    if not validate_wallet_token(request.args.get("token", ""), customer):
+        return jsonify({"status": "error", "message": "Token de Wallet inválido o expirado."}), 403
 
     if not customer.business:
         return (
@@ -45,14 +59,13 @@ def get_google_wallet_pass(customer_id: int):
 
     try:
         wallet_service = GoogleWalletService()
-        jwt_token, save_url = wallet_service.create_jwt_pass(customer)
+        _jwt_token, save_url = wallet_service.create_jwt_pass(customer)
 
         response_data = {
             "status": "success",
             "customer_id": customer.id,
             "business_name": customer.business.name,
             "save_url": save_url,
-            "jwt": jwt_token,
             "is_dev_mock_key": wallet_service.is_mock_key,
             "message": "Enlace de pase de Google Wallet generado correctamente.",
         }
@@ -71,7 +84,7 @@ def get_google_wallet_pass(customer_id: int):
         return (
             jsonify({
                 "status": "error",
-                "message": f"Error al generar el pase de Google Wallet: {str(e)}"
+                "message": "No fue posible generar el pase de Google Wallet."
             }),
             500,
         )
@@ -87,6 +100,8 @@ def get_apple_wallet_pass(customer_id: int):
     Returns:
         Binary stream (.pkpass) with mimetype 'application/vnd.apple.pkpass'.
     """
+    if not request.args.get("token"):
+        return jsonify({"status": "error", "message": "Token de Wallet requerido."}), 403
     customer = db.session.get(Customer, customer_id)
     if not customer:
         return (
@@ -96,6 +111,9 @@ def get_apple_wallet_pass(customer_id: int):
             }),
             404,
         )
+
+    if not validate_wallet_token(request.args.get("token", ""), customer):
+        return jsonify({"status": "error", "message": "Token de Wallet inválido o expirado."}), 403
 
     if not customer.business:
         return (
@@ -123,7 +141,7 @@ def get_apple_wallet_pass(customer_id: int):
         return (
             jsonify({
                 "status": "error",
-                "message": f"Error al generar el pase de Apple Wallet: {str(e)}"
+                "message": "No fue posible generar el pase de Apple Wallet."
             }),
             500,
         )

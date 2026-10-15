@@ -15,22 +15,26 @@ ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_TABLES = {
     "alembic_version", "apple_devices", "business_categories", "businesses",
     "customers", "platform_admins", "staff", "transactions",
+    "staff_sessions",
 }
 
 
 class MigrationTestCase(unittest.TestCase):
-    def run_db_command(self, database_path, command):
+    def run_db_command(self, database_path, command, target=None):
         env = os.environ.copy()
         env["DATABASE_URL"] = f"sqlite:///{database_path.as_posix()}"
         env["FLASK_ENV"] = "development"
+        args = [sys.executable, "-m", "flask", "--app", "run.py", "db", command]
+        if target:
+            args.append(target)
         result = subprocess.run(
-            [sys.executable, "-m", "flask", "--app", "run.py", "db", command],
+            args,
             cwd=ROOT, env=env, capture_output=True, text=True,
         )
         return result
 
-    def upgrade(self, database_path):
-        result = self.run_db_command(database_path, "upgrade")
+    def upgrade(self, database_path, target=None):
+        result = self.run_db_command(database_path, "upgrade", target)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_upgrade_creates_complete_schema_on_empty_database(self):
@@ -42,6 +46,8 @@ class MigrationTestCase(unittest.TestCase):
                 self.assertTrue(EXPECTED_TABLES <= tables)
                 columns = {row[1] for row in connection.execute("PRAGMA table_info(businesses)")}
                 self.assertTrue({"logo_path", "cover_path"} <= columns)
+                tx_columns = {row[1] for row in connection.execute("PRAGMA table_info(transactions)")}
+                self.assertIn("request_fingerprint", tx_columns)
 
     def test_upgrade_preserves_existing_business_data(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
@@ -52,6 +58,13 @@ class MigrationTestCase(unittest.TestCase):
                 connection.execute(text("DROP TABLE platform_admins"))
                 connection.execute(text("ALTER TABLE businesses DROP COLUMN logo_path"))
                 connection.execute(text("ALTER TABLE businesses DROP COLUMN cover_path"))
+                connection.execute(text("ALTER TABLE businesses DROP COLUMN web_access_enabled"))
+                connection.execute(text("ALTER TABLE businesses DROP COLUMN mobile_access_enabled"))
+                connection.execute(text("ALTER TABLE staff DROP COLUMN web_access_enabled"))
+                connection.execute(text("ALTER TABLE staff DROP COLUMN mobile_access_enabled"))
+                connection.execute(text("ALTER TABLE staff DROP COLUMN auth_version"))
+                connection.execute(text("ALTER TABLE staff DROP COLUMN permissions"))
+                connection.execute(text("DROP TABLE staff_sessions"))
                 connection.execute(text("INSERT INTO businesses (id, name, slug, primary_color, secondary_color, loyalty_type, points_per_currency, stamps_reward_limit, cooldown_minutes, is_active, created_at) VALUES (1, 'Negocio existente', 'existente', '#000000', '#FFFFFF', 'stamps', 1.0, 10, 60, 1, '2026-01-01')"))
             engine.dispose()
             self.upgrade(path)
@@ -59,7 +72,8 @@ class MigrationTestCase(unittest.TestCase):
                 self.assertEqual(connection.execute("SELECT id, name, slug FROM businesses").fetchall(), [(1, "Negocio existente", "existente")])
                 columns = {row[1] for row in connection.execute("PRAGMA table_info(businesses)")}
                 self.assertTrue({"logo_path", "cover_path"} <= columns)
-                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "9a85c3791398")
+                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "d5e6f7a8b9c0")
+                self.assertEqual(connection.execute("SELECT web_access_enabled, mobile_access_enabled FROM businesses WHERE id = 1").fetchone(), (0, 0))
 
     def test_downgrade_is_blocked_before_destroying_fresh_schema(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
@@ -74,7 +88,37 @@ class MigrationTestCase(unittest.TestCase):
                 self.assertEqual(connection.execute("SELECT name FROM businesses WHERE id = 1").fetchone()[0], "Conservar")
                 columns = {row[1] for row in connection.execute("PRAGMA table_info(businesses)")}
                 self.assertTrue({"logo_path", "cover_path"} <= columns)
-                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "9a85c3791398")
+                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "d5e6f7a8b9c0")
+
+    def test_idempotency_migration_preserves_rows_and_scopes_keys_by_business(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            path = Path(directory) / "idempotency.sqlite"
+            self.upgrade(path, "c4f1a2b3d4e5")
+            with sqlite3.connect(path) as connection:
+                for business_id in (1, 2):
+                    connection.execute(
+                        "INSERT INTO businesses (id, name, slug, primary_color, secondary_color, loyalty_type, points_per_currency, stamps_reward_limit, cooldown_minutes, is_active, web_access_enabled, mobile_access_enabled, created_at) VALUES (?, ?, ?, '#000000', '#FFFFFF', 'stamps', 1.0, 10, 0, 1, 0, 0, '2026-01-01')",
+                        (business_id, f"Negocio {business_id}", f"negocio-{business_id}"),
+                    )
+                    connection.execute(
+                        "INSERT INTO customers (id, business_id, full_name, current_points, current_stamps, qr_code_token, created_at) VALUES (?, ?, ?, 0, 0, ?, '2026-01-01')",
+                        (business_id, business_id, f"Cliente {business_id}", f"token-{business_id}"),
+                    )
+                    connection.execute(
+                        "INSERT INTO transactions (id, business_id, customer_id, type, points_amount, stamps_amount, purchase_amount, request_id, timestamp) VALUES (?, ?, ?, 'earn', 0, 1, 0, ?, '2026-01-01')",
+                        (business_id, business_id, business_id, f"legacy-{business_id}"),
+                    )
+            self.upgrade(path)
+            with sqlite3.connect(path) as connection:
+                self.assertEqual(connection.execute("SELECT COUNT(*) FROM transactions").fetchone()[0], 2)
+                self.assertTrue(all(row[0] is None for row in connection.execute(
+                    "SELECT request_fingerprint FROM transactions").fetchall()))
+                connection.execute(
+                    "INSERT INTO transactions (business_id, customer_id, type, points_amount, stamps_amount, purchase_amount, request_id, request_fingerprint, timestamp) VALUES (1, 1, 'earn', 0, 1, 0, 'shared-key', 'a', '2026-01-02')"
+                )
+                connection.execute(
+                    "INSERT INTO transactions (business_id, customer_id, type, points_amount, stamps_amount, purchase_amount, request_id, request_fingerprint, timestamp) VALUES (2, 2, 'earn', 0, 1, 0, 'shared-key', 'b', '2026-01-02')"
+                )
 
 
 if __name__ == "__main__":

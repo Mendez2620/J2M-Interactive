@@ -9,6 +9,7 @@ from app import create_app
 from app.extensions import db
 from app.models import Business, Customer
 from app.services import AppleWalletService
+from app.wallet_access import issue_wallet_token
 from app.services.apple_wallet import MINIMAL_PNG_BYTES, hex_to_rgb
 
 
@@ -143,11 +144,13 @@ class AppleWalletTestCase(unittest.TestCase):
 
     def test_apple_wallet_endpoint_download(self):
         """Test GET /api/customers/<id>/wallet/apple returns a downloadable .pkpass file."""
-        response = self.client.get(f"/api/customers/{self.customer_stamps.id}/wallet/apple")
+        response = self.client.get(f"/api/customers/{self.customer_stamps.id}/wallet/apple", query_string={"token": issue_wallet_token(self.customer_stamps)})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.mimetype, "application/vnd.apple.pkpass")
         self.assertIn("attachment", response.headers.get("Content-Disposition", ""))
         self.assertIn("cafe-central-pass.pkpass", response.headers.get("Content-Disposition", ""))
+        self.assertEqual(response.headers["Cache-Control"], "no-store, private")
+        self.assertEqual(response.headers["Referrer-Policy"], "no-referrer")
 
         # Verify body is a valid ZIP
         pkpass_bytes = io.BytesIO(response.data)
@@ -156,7 +159,7 @@ class AppleWalletTestCase(unittest.TestCase):
     def test_apple_wallet_endpoint_not_found(self):
         """Test GET /api/customers/<id>/wallet/apple returns 404 for non-existent customer."""
         response = self.client.get("/api/customers/99999/wallet/apple")
-        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.status_code, 403)
         data = response.get_json()
         self.assertEqual(data["status"], "error")
 

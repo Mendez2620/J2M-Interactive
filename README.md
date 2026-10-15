@@ -20,7 +20,8 @@ Plataforma SaaS Multi-Tenant para la emisión, gestión y sincronización en tie
 - 📍 **Geofencing & Notificaciones de Proximidad**: Muestra la tarjeta automáticamente en la pantalla bloqueada del cliente cuando se aproxima a la sucursal física.
 - 🎂 **Registro Público con Cumpleaños (`/join/<slug>`)**: Onboarding responsivo para clientes con captura de fecha de nacimiento y botones directos de guardado en Wallet.
 - 📊 **Panel Super Admin (`/admin`)**: acceso por sesión y CSRF para administradores globales separados del staff de cada negocio; incluye KPIs, branding y gestión de usuarios.
-- 📷 **Web App de Escaneo Adaptativa (`/scanner`)**: Terminal móvil con lector de cámara QR (`html5-qrcode`), entrada manual / NFC, y botones de transacción adaptados al programa del negocio.
+- 🔐 **API operativa autenticada**: JWT de acceso corto, refresh rotatorio, revocación, aislamiento multinegocio, permisos explícitos y canales web/móvil independientes.
+- 📷 **Escáner web solo de desarrollo (`/scanner`)**: queda oculto y responde 404 fuera de debug; producción debe consumir la API desde la app Flutter.
 
 ---
 
@@ -117,7 +118,7 @@ El comando solicita nombre, correo, teléfono y contraseña sin incorporar secre
 python run.py
 ```
 La aplicación estará disponible en:
-- **Página de Escáner**: `http://127.0.0.1:5000/scanner`
+- **Escáner web de desarrollo**: `http://127.0.0.1:5000/scanner` (solo con debug)
 - **Login Super Admin**: `http://127.0.0.1:5000/admin/login`
 - **Health Check**: `http://127.0.0.1:5000/api/health`
 
@@ -125,7 +126,7 @@ La aplicación estará disponible en:
 
 ## 🧪 Ejecución de Pruebas Unitarias
 
-El proyecto cuenta con una suite completa de **47 pruebas unitarias e integración**. El mismo comando se ejecuta automáticamente en GitHub Actions para pushes y pull requests:
+El proyecto cuenta con una suite completa de **63 pruebas unitarias e integración**. El mismo comando se ejecuta automáticamente en GitHub Actions para pushes y pull requests:
 
 ```bash
 python -m unittest discover tests -v
@@ -147,11 +148,14 @@ python -m unittest discover tests -v
 | `POST` | `/admin/users/edit/<id>` | Edición de administrador global (el nombre histórico del parámetro es `staff_id`) |
 | `POST` | `/admin/business/<id>/staff` | Creación de Gerentes y Cajeros |
 | `POST` | `/admin/staff/<id>/reset-password` | Restablecimiento no destructivo de contraseña de staff |
-| `GET` | `/scanner` | Terminal web de escaneo QR adaptativa |
-| `POST` | `/api/scanner/lookup` | Búsqueda de cliente por QR token, ID o teléfono |
-| `POST` | `/api/scanner/process` | Procesa abono/canje y dispara sincronización en tiempo real |
-| `GET` | `/api/customers/<id>/wallet/google` | Obtiene URL directa para Google Wallet |
-| `GET` | `/api/customers/<id>/wallet/apple` | Descarga directa del pase nativo `.pkpass` |
+| `GET` | `/scanner` | Terminal heredado disponible exclusivamente en desarrollo/debug |
+| `POST` | `/api/scanner/login` | Autentica staff; requiere `business_slug` cuando el usuario no es único globalmente |
+| `POST` | `/api/scanner/refresh` | Rota el refresh token; la reutilización revoca sesiones |
+| `POST` | `/api/scanner/logout` | Revoca las sesiones del empleado autenticado |
+| `POST` | `/api/scanner/lookup` | Consulta por QR, con JWT y permiso `scanner_operate`; no admite ID/teléfono |
+| `POST` | `/api/scanner/process` | Operación autenticada e idempotente; requiere `Idempotency-Key` o `request_id` |
+| `GET` | `/api/customers/<id>/wallet/google?token=...` | Emisión con token temporal ligado al cliente |
+| `GET` | `/api/customers/<id>/wallet/apple?token=...` | Descarga `.pkpass` con token temporal ligado al cliente |
 | `POST` | `/api/apple/v1/devices/.../registrations/...` | Registro oficial de dispositivo Apple para push APNs |
 | `GET` | `/api/apple/v1/passes/<pass_type>/<serial>` | Entrega del `.pkpass` actualizado tras transacción |
 
@@ -168,8 +172,37 @@ Google Wallet usa el archivo local únicamente cuando `PUBLIC_BASE_URL` contiene
 
 La revisión inicial `9a85c3791398` funciona tanto como bootstrap de una base vacía como actualización de una base heredada. Por ello `flask db downgrade` está bloqueado deliberadamente en esa revisión: no existe información histórica suficiente para distinguir qué tablas pertenecían previamente a una instalación heredada. El bloqueo ocurre antes de eliminar columnas o tablas. Para revertir, restaura un backup verificado en lugar de ejecutar una eliminación destructiva.
 
-### Seguridad pendiente de las APIs operativas
-El login web administrativo sí usa sesiones seguras y comprobación de cuenta activa. En cambio, `/api/scanner/login` aún devuelve un token simulado y las rutas de manager confían en un `staff_id` enviado por el cliente; no deben considerarse mecanismos de producción. La siguiente prioridad es emitir JWT firmados con expiración/rotación, validar el token en cada operación y derivar `staff_id` y `business_id` exclusivamente de sus claims, incluyendo pruebas de aislamiento entre tenants.
+### Autenticación, autorización y contrato para Flutter
+
+El administrador global conserva una sesión Flask separada de los empleados. El staff utiliza JWT HS256 con firma, algoritmo fijo, emisor, audiencia, tipo, canal, expiración y versión de autenticación validados. `JWT_SECRET_KEY` debe ser independiente y distinta de `SECRET_KEY`; producción rechaza claves débiles, claves reutilizadas, CORS abierto y cookies sin HTTPS. Los access tokens duran 15 minutos por defecto. Los refresh tokens duran 30 días, se guardan mediante el hash de su identificador y se consumen con una actualización condicional atómica antes de rotar. La reutilización —incluidas dos rotaciones concurrentes— revoca las sesiones. Cerrar sesión, desactivar una cuenta/negocio/canal o restablecer una contraseña invalida el acceso previo.
+
+Flutter debe enviar `Authorization: Bearer <access_token>`. El login recibe `username` o `email`, `password`, `business_slug` y `channel` (`mobile` por defecto); el slug resuelve nombres repetidos entre negocios. El token queda ligado al canal solicitado. Nunca debe enviar `staff_id`, `business_id`, rol o permisos como autoridad. `lookup` acepta únicamente el token QR. `process` acepta el token QR, una acción compatible con el programa y un identificador idempotente único. La clave se limita al negocio y queda asociada al fingerprint persistente de cliente, acción e importes canónicos: una repetición idéntica devuelve el movimiento original y una variante responde `409`. Para puntos acumulados se envía `purchase_amount` y el servidor calcula el saldo; para sellos el servidor concede uno o descuenta exactamente el límite del negocio.
+
+Respuestas: `400` entrada/acción inválida, `401` token ausente/inválido/revocado, `403` cuenta, negocio, canal, rol o permiso denegado, y `429` límite de login o cooldown. Los rechazos se producen antes del commit. El limitador actual vive en memoria del proceso; producción con múltiples workers debe sustituirlo por almacenamiento compartido (por ejemplo Redis) en la fase operativa.
+
+### Canales y permisos
+
+Los campos `web_access_enabled` y `mobile_access_enabled` existen tanto en negocio como en empleado y comienzan deshabilitados en la migración. El superadministrador los controla desde **Usuarios / Staff** con formularios protegidos por sesión y CSRF. La política es denegar por defecto. Los gerentes migrados reciben solamente la capacidad básica `view_stats`; los cajeros reciben `scanner_operate`, pero ninguna capacidad es efectiva hasta habilitar el canal en ambos niveles. Exportaciones, transacciones y creación de cajeros requieren permisos explícitos adicionales que se administrarán en la Fase 2.
+
+`/manager` deriva identidad y tenant exclusivamente del JWT y ya no confía en `staff_id`. No se ha creado todavía el dashboard visual completo del gerente.
+
+### Registro público y Wallet
+
+`POST /join/<slug>` solo crea clientes nuevos. Si teléfono o correo ya existen responde `409` sin modificar datos ni revelar el QR; la recuperación verificada queda pendiente. Los enlaces iniciales de Wallet usan un token autenticado y cifrado, ligado al cliente y válido 15 minutos. Deben servirse exclusivamente por HTTPS y excluirse de access logs; las respuestas usan `no-store` y `Referrer-Policy: no-referrer`, y la API no devuelve por separado el JWT interno de Google. Los modos mock de Apple/Google siguen disponibles.
+
+El Web Service PassKit conserva `ApplePass` para registrar, retirar y descargar pases. Para la lista de actualizaciones, Apple no envía un token de pase porque puede haber varios: el `deviceLibraryIdentifier` actúa como secreto compartido y solo se devuelven registros asociados exactamente a ese dispositivo y `passTypeIdentifier`. Se admite la ruta oficial `GET /devices/<device>/registrations/<pass-type>` y se conserva temporalmente el alias anterior. Producción requiere HTTPS. Véase [Adding a Web Service to Update Passes](https://developer.apple.com/documentation/WalletPasses/adding-a-web-service-to-update-passes).
+
+### Migración de seguridad
+
+La revisión incremental `c4f1a2b3d4e5` añade canales, permisos, versión de autenticación, sesiones revocables e idempotencia sin cambiar identificadores ni saldos. La revisión `d5e6f7a8b9c0` añade fingerprints canónicos y cambia la unicidad de `request_id` al ámbito de cada negocio. Bases existentes reciben canales deshabilitados y sus movimientos históricos se preservan. Se valida tanto una SQLite vacía como una heredada con datos. Los downgrades se bloquean antes de eliminar información; para revertir debe restaurarse un respaldo verificado.
+
+### Fases posteriores y riesgos conocidos
+
+- **Fase 2:** interfaz y política de permisos individuales avanzados.
+- **Fase 3:** panel web completo del gerente.
+- **Fase 4:** recuperación de identidad verificada, privacidad ampliada y ciclo de vida avanzado de Wallet.
+- **Fase 5:** bloqueo/concurrencia transaccional, ledger y auditoría especializada. La idempotencia actual evita repeticiones normales, pero no promete atomicidad distribuida.
+- **Fase 6:** rate limiting compartido, monitoreo, rotación operativa de secretos, CSP sin `unsafe-inline` y endurecimiento del despliegue.
 
 ### Google Wallet
 1. En **Google Cloud Console**, habilita la **Google Wallet API**.

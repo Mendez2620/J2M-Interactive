@@ -1,5 +1,6 @@
 import io
 from datetime import datetime, timezone
+from xml.sax.saxutils import escape
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from reportlab.lib.pagesizes import letter
@@ -11,6 +12,17 @@ from app.models import Customer, Transaction
 
 class ExportService:
     """Service to export Business CRM metrics, customer tables, and transaction audit logs to Excel and PDF."""
+
+    @staticmethod
+    def _excel_text(value):
+        """Prevent spreadsheet formula injection in customer-controlled text."""
+        text = str(value or "—")
+        return f"'{text}" if text.startswith(("=", "+", "-", "@")) else text
+
+    @staticmethod
+    def _pdf_text(value):
+        """Escape ReportLab Paragraph markup from customer-controlled text."""
+        return escape(str(value or "—"))
 
     @staticmethod
     def generate_excel_report(business) -> io.BytesIO:
@@ -62,9 +74,9 @@ class ExportService:
         for row_num, c in enumerate(customers, 5):
             row_data = [
                 c.id,
-                c.full_name,
-                c.email or "—",
-                c.phone or "—",
+                ExportService._excel_text(c.full_name),
+                ExportService._excel_text(c.email),
+                ExportService._excel_text(c.phone),
                 c.birthdate.strftime("%Y-%m-%d") if c.birthdate else "—",
                 c.created_at.strftime("%Y-%m-%d %H:%M") if c.created_at else "—",
                 round(c.current_points, 1),
@@ -121,8 +133,8 @@ class ExportService:
             row_data = [
                 tx.id,
                 tx.timestamp.strftime("%Y-%m-%d %H:%M:%S") if tx.timestamp else "—",
-                customer_name,
-                staff_name,
+                ExportService._excel_text(customer_name),
+                ExportService._excel_text(staff_name),
                 type_label,
                 f"${tx.purchase_amount:.2f}",
                 round(tx.points_amount, 1),
@@ -204,11 +216,11 @@ class ExportService:
         elements = []
 
         # Title & Metadata
-        elements.append(Paragraph(f"Reporte Gerencial de Lealtad — {business.name}", title_style))
-        category_name = business.category.name if business.category else "General"
+        elements.append(Paragraph(f"Reporte Gerencial de Lealtad — {ExportService._pdf_text(business.name)}", title_style))
+        category_name = ExportService._pdf_text(business.category.name if business.category else "General")
         status_text = "Activo" if business.is_active else "Suspendido"
         meta_text = (
-            f"Categoría: <b>{category_name}</b> | Tipo: <b>{business.loyalty_type.upper()}</b> | "
+            f"Categoría: <b>{category_name}</b> | Tipo: <b>{ExportService._pdf_text(business.loyalty_type.upper())}</b> | "
             f"Estado: <b>{status_text}</b> | Fecha: <b>{datetime.now().strftime('%d/%m/%Y %H:%M')}</b>"
         )
         elements.append(Paragraph(meta_text, subtitle_style))
@@ -257,8 +269,8 @@ class ExportService:
         recent_customers = business.customers.order_by(Customer.created_at.desc()).limit(15).all()
         for c in recent_customers:
             cust_rows.append([
-                Paragraph(c.full_name, body_style),
-                Paragraph(c.email or c.phone or "—", body_style),
+                Paragraph(ExportService._pdf_text(c.full_name), body_style),
+                Paragraph(ExportService._pdf_text(c.email or c.phone), body_style),
                 Paragraph(c.birthdate.strftime("%d/%m/%Y") if c.birthdate else "—", body_style),
                 Paragraph(f"{c.current_points:.0f} pts", body_style),
                 Paragraph(f"{c.current_stamps} / {business.stamps_reward_limit}", body_style),
@@ -297,8 +309,8 @@ class ExportService:
             t_type = "Abono (+)" if t.type == "earn" else "Canje (-)"
             tx_rows.append([
                 Paragraph(t.timestamp.strftime("%d/%m/%Y %H:%M") if t.timestamp else "—", body_style),
-                Paragraph(c_name, body_style),
-                Paragraph(s_name, body_style),
+                Paragraph(ExportService._pdf_text(c_name), body_style),
+                Paragraph(ExportService._pdf_text(s_name), body_style),
                 Paragraph(t_type, body_style),
                 Paragraph(f"${t.purchase_amount:.2f}", body_style),
             ])
