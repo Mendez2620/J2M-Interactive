@@ -116,7 +116,19 @@ class ManagerPortalPhase3TestCase(unittest.TestCase):
         self.login(stamp_manager)
         stamp_html = self.client.get("/manager/portal").get_data(as_text=True)
         self.assertIn("6 sellos", stamp_html); self.assertIn("Recompensas disponibles", stamp_html)
-        self.assertIn("No hay movimientos recientes", stamp_html)
+        self.assertNotIn("Últimos movimientos", stamp_html)
+        self.assertNotIn("Sellos Cliente", stamp_html)
+
+    def test_stats_only_dashboard_does_not_expose_transaction_details(self):
+        stats_manager = self.staff(self.business, "stats-only", "manager", "view_stats")
+        db.session.commit()
+        self.login(stats_manager)
+        html = self.client.get("/manager/portal").get_data(as_text=True)
+        self.assertIn("Movimientos del período", html)
+        self.assertIn("40.00", html)
+        self.assertNotIn("Últimos movimientos", html)
+        self.assertNotIn("Cliente Privado", html)
+        self.assertNotIn("private@example.test", html)
 
     def test_customers_transactions_pagination_and_exports(self):
         for index in range(30): db.session.add(Customer(business_id=self.business.id, full_name=f"Cliente {index:02d}"))
@@ -146,6 +158,35 @@ class ManagerPortalPhase3TestCase(unittest.TestCase):
         self.manager.permissions = "view_cashiers"; db.session.commit()
         self.assertEqual(self.client.post("/manager/portal/cashiers/create", data={"username": "denied", "password": "DeniedPass123", "csrf_token": "cashier-csrf"}).status_code, 302)
         self.assertIsNone(Staff.query.filter_by(username="denied").first())
+
+    def test_cashier_page_separates_view_create_and_action_permissions(self):
+        self.cashier.email = "cashier-secret@example.test"
+        self.cashier.phone = "+52 555 0101"
+        db.session.commit()
+        cases = {
+            "create_cashiers": ("Nuevo cajero", ("@cashier", "cashier-secret@example.test")),
+            "edit_cashiers": ("Editar", ("Activo", "othercash")),
+            "toggle_cashiers": ("Suspender", ("cashier-secret@example.test", "othercash")),
+            "reset_cashier_password": ("Contraseña", ("cashier-secret@example.test", "othercash")),
+        }
+        for permission, (visible, hidden) in cases.items():
+            with self.subTest(permission=permission):
+                manager = self.staff(self.business, f"only-{permission}", "manager", permission)
+                db.session.commit()
+                response = self.login(manager)
+                self.assertIn("/manager/portal/cashiers", response.headers["Location"])
+                html = self.client.get("/manager/portal/cashiers").get_data(as_text=True)
+                self.assertIn(visible, html)
+                for value in hidden:
+                    self.assertNotIn(value, html)
+                self.assertIn(">Cajeros</a>", html)
+
+        viewer = self.staff(self.business, "cashier-viewer", "manager", "view_cashiers")
+        db.session.commit(); self.login(viewer)
+        html = self.client.get("/manager/portal/cashiers").get_data(as_text=True)
+        self.assertIn("@cashier", html)
+        self.assertIn("cashier-secret@example.test", html)
+        self.assertNotIn("othercash", html)
 
     def test_super_admin_session_does_not_authorize_portal_and_jwt_api_still_works(self):
         with self.client.session_transaction() as browser: browser["platform_admin_id"] = self.admin_id

@@ -230,6 +230,9 @@ def _portal_destination(staff):
         ("export_reports", "manager.portal_reports"),
         ("view_cashiers", "manager.portal_cashiers"),
         ("create_cashiers", "manager.portal_cashiers"),
+        ("edit_cashiers", "manager.portal_cashiers"),
+        ("toggle_cashiers", "manager.portal_cashiers"),
+        ("reset_cashier_password", "manager.portal_cashiers"),
     ):
         if permission in permissions:
             return url_for(endpoint)
@@ -292,7 +295,9 @@ def manager_portal():
     since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=period)
     business = g.manager.business
     tx_query = Transaction.query.filter(Transaction.business_id == business.id, Transaction.timestamp >= since)
-    transactions = tx_query.order_by(Transaction.timestamp.desc()).limit(8).all()
+    transactions = []
+    if "view_transactions" in g.manager_permissions:
+        transactions = tx_query.order_by(Transaction.timestamp.desc()).limit(8).all()
     totals = db.session.query(
         func.count(Transaction.id), func.coalesce(func.sum(Transaction.points_amount), 0),
         func.coalesce(func.sum(Transaction.stamps_amount), 0), func.coalesce(func.sum(Transaction.purchase_amount), 0),
@@ -371,9 +376,24 @@ def portal_report_download(kind):
 @manager_bp.route("/portal/cashiers", methods=["GET"])
 @manager_portal_required()
 def portal_cashiers():
-    if not ({"view_cashiers", "create_cashiers", "edit_cashiers", "toggle_cashiers", "reset_cashier_password"} & g.manager_permissions):
+    cashier_permissions = {"view_cashiers", "create_cashiers", "edit_cashiers", "toggle_cashiers", "reset_cashier_password"}
+    if not (cashier_permissions & g.manager_permissions):
         return redirect(url_for("manager.manager_account", denied="cashiers"))
-    cashiers = Staff.query.filter_by(business_id=g.manager.business_id, role="cashier").order_by(Staff.created_at.desc()).all()
+    fields = {"id"}
+    if "view_cashiers" in g.manager_permissions:
+        fields.update({"username", "name", "email", "phone", "is_active"})
+    else:
+        if {"edit_cashiers", "toggle_cashiers", "reset_cashier_password"} & g.manager_permissions:
+            fields.update({"username", "name"})
+        if "edit_cashiers" in g.manager_permissions:
+            fields.update({"email", "phone"})
+        if "toggle_cashiers" in g.manager_permissions:
+            fields.add("is_active")
+    cashiers = []
+    if fields != {"id"}:
+        columns = [getattr(Staff, field) for field in sorted(fields)]
+        rows = db.session.query(*columns).filter(Staff.business_id == g.manager.business_id, Staff.role == "cashier").order_by(Staff.created_at.desc()).all()
+        cashiers = [dict(row._mapping) for row in rows]
     return render_template("manager/cashiers.html", cashiers=cashiers, **_portal_context("cashiers"))
 
 
