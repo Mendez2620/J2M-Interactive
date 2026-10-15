@@ -92,6 +92,36 @@ class TransactionIntegrityPhase5TestCase(unittest.TestCase):
         self.assertEqual(LoyaltyLedgerEntry.query.filter(LoyaltyLedgerEntry.transaction_id.isnot(None)).count(), 1)
         self.assertTrue(reconcile_customer_balance(customer)["consistent"])
 
+    def test_point_redemption_rejects_values_rounded_to_zero(self):
+        initial = db.session.get(Customer, self.points_customer_id).current_points
+        for index, amount in enumerate((0.0000001, 0.0000004)):
+            status, _ = self._request({
+                "token": self.points_token, "action": "redeem_points",
+                "amount": amount, "request_id": f"tiny-{index}",
+            }, self.points_headers)
+            self.assertEqual(status, 400)
+
+        customer = db.session.get(Customer, self.points_customer_id)
+        db.session.refresh(customer)
+        self.assertEqual(customer.current_points, initial)
+        self.assertEqual(Transaction.query.count(), 0)
+        self.assertEqual(LoyaltyLedgerEntry.query.count(), 0)
+
+        payload = {
+            "token": self.points_token, "action": "redeem_points",
+            "amount": 0.000001, "request_id": "minimum-point-redemption",
+        }
+        self.assertEqual(self._request(payload, self.points_headers)[0], 200)
+        replay_status, replay = self._request(payload, self.points_headers)
+        self.assertEqual(replay_status, 200)
+        self.assertTrue(replay["idempotent_replay"])
+        customer = db.session.get(Customer, self.points_customer_id)
+        db.session.refresh(customer)
+        self.assertAlmostEqual(customer.current_points, initial - 0.000001, places=6)
+        self.assertEqual(Transaction.query.count(), 1)
+        self.assertEqual(LoyaltyLedgerEntry.query.filter(LoyaltyLedgerEntry.transaction_id.isnot(None)).count(), 1)
+        self.assertTrue(reconcile_customer_balance(customer)["consistent"])
+
     def test_simultaneous_stamp_earnings_are_not_lost(self):
         base = {"token": self.stamps_token, "action": "earn_stamp"}
         results = self._parallel([

@@ -210,6 +210,8 @@ def process_transaction():
             tx_type, stamps_amount = "earn", 0
         else:
             points_amount = normalized_points(_number(data.get("amount"), "amount", positive=True))
+            if points_amount <= 0:
+                raise ValueError("amount inválido.")
             tx_type, stamps_amount = "redeem", 0
     except ValueError as exc:
         db.session.rollback()
