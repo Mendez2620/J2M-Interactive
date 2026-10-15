@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Recuperar tarjeta · {{ business.name }}{% endblock %}
+{% block head %}<style>.brand-button{background:{{ business.primary_color }};color:{{ business.secondary_color }}}</style>{% endblock %}
+{% block content %}
+<main class="min-h-screen grid place-items-center px-4 py-8" style="background:linear-gradient(135deg,{{ business.primary_color }}18,#fff)">
+  <section class="w-full max-w-md rounded-3xl bg-white border border-slate-100 shadow-xl p-6 sm:p-8" aria-live="polite">
+    <header class="text-center mb-6">
+      {% if business.logo_path or business.logo_url %}<img class="mx-auto h-20 w-auto rounded-2xl object-contain" src="{{ url_for('static', filename=business.logo_path) if business.logo_path else business.logo_url }}" alt="Logo de {{ business.name }}">{% else %}<div class="mx-auto h-16 w-16 rounded-2xl grid place-items-center text-white text-xl font-bold" style="background:{{ business.primary_color }}">{{ business.name[:2].upper() }}</div>{% endif %}
+      <h1 class="mt-4 text-2xl font-extrabold">Recupera tu tarjeta</h1>
+      <p class="text-sm text-slate-500 mt-1">{{ business.name }}</p>
+    </header>
+
+    {% if notice %}<div class="mb-4 rounded-xl bg-blue-50 p-3 text-sm text-blue-800">{{ notice }}</div>{% endif %}
+    {% if error %}<div class="mb-4 rounded-xl bg-rose-50 p-3 text-sm text-rose-800">{{ error }}</div>{% endif %}
+
+    {% if not business.is_active %}
+      <p class="rounded-xl bg-amber-50 p-4 text-sm text-amber-900">La recuperación no está disponible temporalmente. Solicita asistencia directamente al negocio.</p>
+    {% elif customer %}
+      <div class="text-center space-y-5">
+        <div class="text-emerald-600 text-4xl"><i class="fa-solid fa-circle-check"></i></div>
+        <div><h2 class="font-bold text-xl">Hola, {{ customer.full_name }}</h2><p class="text-sm text-slate-500">Tu tarjeta existente está lista.</p></div>
+        <div class="rounded-2xl bg-slate-50 p-5"><small class="uppercase tracking-wide text-slate-500">{{ 'Puntos actuales' if business.loyalty_type == 'points' else 'Sellos actuales' }}</small><strong class="block text-3xl mt-1">{{ ('%.0f'|format(customer.current_points)) if business.loyalty_type == 'points' else customer.current_stamps }}</strong></div>
+        <a href="{{ url_for('recovery.recovery_apple_wallet', business_slug=business.slug) }}" class="block rounded-xl bg-black text-white p-3 font-semibold"><i class="fa-brands fa-apple mr-2"></i>Agregar a Apple Wallet</a>
+        <a href="{{ url_for('recovery.recovery_google_wallet', business_slug=business.slug) }}" class="block rounded-xl bg-slate-900 text-white p-3 font-semibold"><i class="fa-brands fa-google-wallet mr-2"></i>Guardar en Google Wallet</a>
+        {% if google_mock %}<p class="text-xs text-amber-700">Google Wallet está en modo de desarrollo; la emisión real requiere credenciales configuradas.</p>{% endif %}
+        <form method="POST" action="{{ url_for('recovery.end_recovery', business_slug=business.slug) }}"><button class="text-sm text-slate-500 underline">Terminar recuperación</button></form>
+      </div>
+    {% elif challenge_pending %}
+      <form method="POST" action="{{ url_for('recovery.verify_recovery', business_slug=business.slug) }}" class="space-y-4">
+        <div><label for="code" class="block text-sm font-semibold mb-1">Código de ocho dígitos</label><input id="code" name="code" inputmode="numeric" pattern="[0-9]{8}" maxlength="8" required autocomplete="one-time-code" class="w-full rounded-xl border p-3 tracking-[.35em] text-center" aria-describedby="code-help"><p id="code-help" class="text-xs text-slate-500 mt-2">El código caduca en 10 minutos y solo puede utilizarse una vez.</p></div>
+        <button class="brand-button w-full rounded-xl p-3 font-bold" data-submit>Verificar código</button>
+      </form>
+      <a href="{{ url_for('recovery.recover', business_slug=business.slug) }}" class="block text-center text-sm mt-4 text-slate-500 underline">Solicitar otro código</a>
+    {% else %}
+      <form method="POST" action="{{ url_for('recovery.request_recovery', business_slug=business.slug) }}" class="space-y-4">
+        <div><label for="email" class="block text-sm font-semibold mb-1">Correo registrado</label><input id="email" name="email" type="email" required autocomplete="email" class="w-full rounded-xl border p-3" placeholder="correo@ejemplo.com"><p class="text-xs text-slate-500 mt-2">Si la cuenta es elegible, enviaremos un código al correo registrado.</p></div>
+        <button class="brand-button w-full rounded-xl p-3 font-bold" data-submit>Enviar instrucciones</button>
+      </form>
+      <p class="text-xs text-slate-500 mt-5">¿Tu tarjeta no tiene correo? Solicita asistencia al negocio. La recuperación por teléfono o SMS aún no está disponible.</p>
+    {% endif %}
+    <a href="{{ url_for('business.join_business', slug=business.slug) }}" class="block text-center text-sm mt-6 text-indigo-700 underline">Volver al registro</a>
+  </section>
+</main>
+{% endblock %}
+{% block scripts %}<script>document.querySelectorAll('form').forEach(form=>form.addEventListener('submit',()=>{const button=form.querySelector('[data-submit]');if(button){button.disabled=true;button.textContent='Procesando…'}}));</script>{% endblock %}

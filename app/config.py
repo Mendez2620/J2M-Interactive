@@ -38,6 +38,20 @@ class Config:
     AUTH_RATE_LIMIT_WINDOW = int(os.getenv("AUTH_RATE_LIMIT_WINDOW", 300))
     MAX_TRANSACTION_AMOUNT = float(os.getenv("MAX_TRANSACTION_AMOUNT", 1000000))
     WALLET_TOKEN_MAX_AGE = int(os.getenv("WALLET_TOKEN_MAX_AGE", 900))
+    RECOVERY_CODE_MAX_AGE = int(os.getenv("RECOVERY_CODE_MAX_AGE", 600))
+    RECOVERY_SESSION_MAX_AGE = int(os.getenv("RECOVERY_SESSION_MAX_AGE", 900))
+    RECOVERY_MAX_ATTEMPTS = int(os.getenv("RECOVERY_MAX_ATTEMPTS", 5))
+    RECOVERY_REQUEST_LIMIT_EMAIL = int(os.getenv("RECOVERY_REQUEST_LIMIT_EMAIL", 3))
+    RECOVERY_REQUEST_LIMIT_IP = int(os.getenv("RECOVERY_REQUEST_LIMIT_IP", 10))
+    RECOVERY_RATE_WINDOW = int(os.getenv("RECOVERY_RATE_WINDOW", 900))
+    RECOVERY_CHALLENGE_RETENTION = int(os.getenv("RECOVERY_CHALLENGE_RETENTION", 86400))
+    RECOVERY_MAIL_BACKEND = os.getenv("RECOVERY_MAIL_BACKEND", "smtp")
+    SMTP_HOST = os.getenv("SMTP_HOST")
+    SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
+    SMTP_USERNAME = os.getenv("SMTP_USERNAME")
+    SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
+    SMTP_FROM = os.getenv("SMTP_FROM")
+    SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "true").lower() == "true"
     # Two 5 MB images plus multipart form overhead.
     MAX_CONTENT_LENGTH = int(os.getenv("MAX_CONTENT_LENGTH", 12 * 1024 * 1024))
     PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
@@ -67,6 +81,7 @@ class TestingConfig(Config):
     CSRF_ENABLED = False
     UPLOAD_FOLDER = os.path.join(os.getenv("TEMP", "."), "j2m-test-uploads")
     JWT_SECRET_KEY = "testing-only-jwt-secret-key-longer-than-32-bytes"
+    RECOVERY_MAIL_BACKEND = "memory"
 
 
 config_by_name = {

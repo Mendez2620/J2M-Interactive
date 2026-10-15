@@ -17,6 +17,8 @@ EXPECTED_TABLES = {
     "customers", "platform_admins", "staff", "transactions",
     "staff_sessions",
     "access_audits",
+    "customer_recovery_challenges", "customer_recovery_authorizations",
+    "customer_recovery_rate_limits",
 }
 
 
@@ -73,7 +75,7 @@ class MigrationTestCase(unittest.TestCase):
                 self.assertEqual(connection.execute("SELECT id, name, slug FROM businesses").fetchall(), [(1, "Negocio existente", "existente")])
                 columns = {row[1] for row in connection.execute("PRAGMA table_info(businesses)")}
                 self.assertTrue({"logo_path", "cover_path"} <= columns)
-                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "f7a8b9c0d1e2")
+                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "b9c0d1e2f3a4")
                 self.assertEqual(connection.execute("SELECT web_access_enabled, mobile_access_enabled FROM businesses WHERE id = 1").fetchone(), (0, 0))
 
     def test_downgrade_is_blocked_before_destroying_fresh_schema(self):
@@ -89,7 +91,7 @@ class MigrationTestCase(unittest.TestCase):
                 self.assertEqual(connection.execute("SELECT name FROM businesses WHERE id = 1").fetchone()[0], "Conservar")
                 columns = {row[1] for row in connection.execute("PRAGMA table_info(businesses)")}
                 self.assertTrue({"logo_path", "cover_path"} <= columns)
-                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "f7a8b9c0d1e2")
+                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "b9c0d1e2f3a4")
 
     def test_idempotency_migration_preserves_rows_and_scopes_keys_by_business(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
@@ -138,7 +140,31 @@ class MigrationTestCase(unittest.TestCase):
                 self.assertEqual(connection.execute("SELECT username, auth_version, permissions FROM staff WHERE id = 1").fetchone(), ("gerente", 3, "view_stats,manage_cashiers"))
                 audit_columns = {row[1]: row[3] for row in connection.execute("PRAGMA table_info(access_audits)")}
                 self.assertEqual(audit_columns["affected_staff_id"], 0)
-                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "f7a8b9c0d1e2")
+                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "b9c0d1e2f3a4")
+
+    def test_customer_recovery_migration_preserves_customer_wallet_identity_and_transactions(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            path = Path(directory) / "recovery.sqlite"
+            self.upgrade(path, "f7a8b9c0d1e2")
+            with sqlite3.connect(path) as connection:
+                connection.execute(
+                    "INSERT INTO businesses (id, name, slug, primary_color, secondary_color, loyalty_type, points_per_currency, stamps_reward_limit, cooldown_minutes, is_active, web_access_enabled, mobile_access_enabled, created_at) VALUES (1, 'Conservar', 'conservar', '#000000', '#FFFFFF', 'points', 1.0, 10, 0, 1, 1, 1, '2026-01-01')"
+                )
+                connection.execute(
+                    "INSERT INTO customers (id, business_id, full_name, email, current_points, current_stamps, qr_code_token, created_at) VALUES (1, 1, 'Cliente', 'cliente@example.test', 37, 0, 'qr-inmutable', '2026-01-01')"
+                )
+                connection.execute(
+                    "INSERT INTO transactions (id, business_id, customer_id, type, points_amount, stamps_amount, purchase_amount, request_id, request_fingerprint, timestamp) VALUES (1, 1, 1, 'earn', 37, 0, 37, 'preservar', 'fingerprint', '2026-01-01')"
+                )
+            self.upgrade(path)
+            with sqlite3.connect(path) as connection:
+                self.assertEqual(connection.execute("SELECT id, current_points, qr_code_token FROM customers").fetchone(), (1, 37.0, "qr-inmutable"))
+                self.assertEqual(connection.execute("SELECT customer_id, points_amount FROM transactions").fetchone(), (1, 37.0))
+                tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                self.assertTrue({
+                    "customer_recovery_challenges", "customer_recovery_authorizations",
+                    "customer_recovery_rate_limits",
+                } <= tables)
 
 
 if __name__ == "__main__":
