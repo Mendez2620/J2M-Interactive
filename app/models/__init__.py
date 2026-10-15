@@ -12,6 +12,7 @@ from app.models.customer_recovery import (
     CustomerRecoveryAuthorization, CustomerRecoveryChallenge,
     CustomerRecoveryRateLimit,
 )
+from app.models.loyalty_ledger import LoyaltyLedgerEntry
 
 __all__ = [
     "db",
@@ -27,4 +28,5 @@ __all__ = [
     "CustomerRecoveryAuthorization",
     "CustomerRecoveryChallenge",
     "CustomerRecoveryRateLimit",
+    "LoyaltyLedgerEntry",
 ]

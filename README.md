@@ -222,7 +222,7 @@ El Web Service PassKit conserva `ApplePass` para registrar, retirar y descargar 
 
 ### Recuperación de clientes por correo
 
-La recuperación crea desafíos persistentes de diez minutos con códigos de ocho dígitos almacenados únicamente mediante HMAC. Cada desafío admite cinco intentos, es de un solo uso y su consumo se realiza con una actualización condicional atómica. Los límites por correo y huella HMAC de IP también se consultan en base de datos. La autorización posterior dura 15 minutos, se guarda mediante hash y queda ligada al cliente y negocio dentro de una cookie Flask `HttpOnly`; nunca se coloca en URLs o almacenamiento web.
+La recuperación crea desafíos persistentes de diez minutos con códigos de ocho dígitos almacenados únicamente mediante HMAC. Cada desafío admite cinco intentos, es de un solo uso y su consumo se realiza con una actualización condicional atómica. Los límites por correo y huella HMAC de IP reservan cupos persistentes mediante operaciones condicionales atómicas. La autorización posterior dura 15 minutos, se guarda mediante hash y queda ligada al cliente y negocio dentro de una cookie Flask `HttpOnly`; nunca se coloca en URLs o almacenamiento web.
 
 Producción requiere SMTP configurado mediante `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM` y `SMTP_USE_TLS`. Si falta la configuración o falla la entrega, no se crea acceso y la respuesta pública sigue siendo genérica. Para desarrollo puede utilizarse Mailpit, MailHog u otro receptor SMTP local, por ejemplo puerto 1025 con TLS desactivado. Las pruebas usan exclusivamente el transportador en memoria y no exponen su bandeja mediante HTTP.
 
@@ -232,11 +232,13 @@ Los clientes sin correo deben solicitar asistencia; recuperar por SMS requiere u
 
 La revisión incremental `c4f1a2b3d4e5` añade canales, permisos, versión de autenticación, sesiones revocables e idempotencia sin cambiar identificadores ni saldos. La revisión `d5e6f7a8b9c0` añade fingerprints canónicos y cambia la unicidad de `request_id` al ámbito de cada negocio. La revisión `e6f7a8b9c0d1` añade el historial append-only `access_audits`; `f7a8b9c0d1e2` permite auditorías de canal a nivel negocio sin inventar un empleado afectado. Bases existentes conservan empleados, permisos heredados, clientes, saldos, transacciones y sesiones. Se valida tanto una SQLite vacía como una heredada con datos. Los downgrades se bloquean antes de eliminar información; para revertir debe restaurarse un respaldo verificado.
 
+La revisión `c0d1e2f3a4b5` incorpora el ledger de lealtad y el estado de cooldown atómico. Antes de actualizar producción debe realizarse un respaldo verificado y ejecutar `flask db upgrade`. La migración no modifica saldos, QR ni transacciones históricas: deriva únicamente `last_earn_at` de acumulaciones existentes y deja el ledger vacío. La primera operación nueva de cada cliente registra una línea base con su saldo real en ese momento; desde allí la reconciliación puede verificar la secuencia sin inventar movimientos anteriores. Los puntos nuevos se redondean a seis decimales con `ROUND_HALF_UP`; los saldos históricos no se recalculan.
+
 ### Fases posteriores y riesgos conocidos
 
 - **Fase 3:** panel web completo del gerente.
 - **Fase 4:** recuperación de identidad verificada, privacidad ampliada y ciclo de vida avanzado de Wallet.
-- **Fase 5:** bloqueo/concurrencia transaccional, ledger y auditoría especializada. La idempotencia actual evita repeticiones normales, pero no promete atomicidad distribuida.
+- **Fase 5:** integridad transaccional y ledger de lealtad verificable.
 - **Fase 6:** rate limiting compartido, monitoreo, rotación operativa de secretos, CSP sin `unsafe-inline` y endurecimiento del despliegue.
 
 ### Google Wallet
