@@ -17,6 +17,7 @@ class Customer(db.Model):
     birthdate = db.Column(db.Date, nullable=True)
     current_points = db.Column(db.Float, default=0.0, nullable=False)
     current_stamps = db.Column(db.Integer, default=0, nullable=False)
+    last_earn_at = db.Column(db.DateTime, nullable=True, index=True)
     qr_code_token = db.Column(
         db.String(64),
         unique=True,

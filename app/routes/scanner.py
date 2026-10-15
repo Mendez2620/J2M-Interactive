@@ -4,14 +4,16 @@ import math
 import time
 from collections import defaultdict, deque
 from datetime import datetime, timezone
+from decimal import Decimal
 
 import jwt
 from flask import Blueprint, current_app, g, jsonify, render_template, request
 from sqlalchemy import or_
-from sqlalchemy.exc import IntegrityError
-
 from app.extensions import db
 from app.models import Business, Customer, Staff, StaffSession, Transaction
+from app.services.loyalty_transaction_service import (
+    LoyaltyTransactionError, normalized_points, process_loyalty_transaction,
+)
 from app.staff_auth import _hash_jti, decode_token, issue_token_pair, revoke_staff_sessions, staff_any_channel_required, staff_required
 
 scanner_bp = Blueprint("scanner", __name__)
@@ -200,12 +202,16 @@ def process_transaction():
             tx_type, points_amount, stamps_amount = "redeem", 0.0, business.stamps_reward_limit
         elif action == "earn_points":
             purchase = _number(data.get("purchase_amount"), "purchase_amount", positive=True)
-            points_amount = purchase * business.points_per_currency
+            points_amount = normalized_points(
+                Decimal(str(purchase)) * Decimal(str(business.points_per_currency))
+            )
             if not math.isfinite(points_amount) or points_amount <= 0:
                 raise ValueError("Regla de puntos inválida.")
             tx_type, stamps_amount = "earn", 0
         else:
-            points_amount = _number(data.get("amount"), "amount", positive=True)
+            points_amount = normalized_points(_number(data.get("amount"), "amount", positive=True))
+            if points_amount <= 0:
+                raise ValueError("amount inválido.")
             tx_type, stamps_amount = "redeem", 0
     except ValueError as exc:
         db.session.rollback()
@@ -214,51 +220,18 @@ def process_transaction():
     fingerprint = _operation_fingerprint(
         customer.id, action, purchase, points_amount, stamps_amount
     )
-    existing = Transaction.query.filter_by(
-        business_id=business.id, request_id=request_id
-    ).first()
-    if existing:
-        return _replay_or_conflict(existing, fingerprint)
-
-    if action.startswith("earn"):
-        last_tx = Transaction.query.filter_by(
-            business_id=business.id, customer_id=customer.id, type="earn"
-        ).order_by(Transaction.timestamp.desc()).first()
-        if last_tx:
-            delta = (datetime.now(timezone.utc).replace(tzinfo=None) - last_tx.timestamp.replace(tzinfo=None)).total_seconds() / 60
-            if delta < business.cooldown_minutes:
-                return _error("Operación bloqueada por cooldown.", 429)
-
-    if action == "earn_stamp":
-        customer.current_stamps += stamps_amount
-    elif action == "redeem_stamp":
-        if customer.current_stamps < stamps_amount:
-            return _error("Sellos insuficientes.", 400)
-        customer.current_stamps -= stamps_amount
-    elif action == "earn_points":
-        customer.current_points += points_amount
-    else:
-        if customer.current_points < points_amount:
-            return _error("Puntos insuficientes.", 400)
-        customer.current_points -= points_amount
-
-    tx = Transaction(
-        business_id=business.id, customer_id=customer.id, staff_id=g.staff.id,
-        type=tx_type, points_amount=points_amount, stamps_amount=stamps_amount,
-        purchase_amount=purchase, request_id=request_id,
-        request_fingerprint=fingerprint,
-    )
     try:
-        db.session.add(tx)
-        db.session.commit()
-    except IntegrityError:
-        db.session.rollback()
-        winner = Transaction.query.filter_by(
-            business_id=business.id, request_id=request_id
-        ).first()
-        if winner:
-            return _replay_or_conflict(winner, fingerprint)
-        return _error("Conflicto al registrar la operación.", 409)
+        result = process_loyalty_transaction(
+            business=business, customer_id=customer.id, staff_id=g.staff.id,
+            action=action, tx_type=tx_type, points_amount=points_amount,
+            stamps_amount=stamps_amount, purchase_amount=purchase,
+            request_id=request_id, fingerprint=fingerprint,
+        )
+    except LoyaltyTransactionError as exc:
+        return _error(exc.message, exc.status_code)
+    if result.replay:
+        return _replay_or_conflict(result.transaction, fingerprint)
+    tx, customer = result.transaction, result.customer
     google_sync_result, apple_notified_count = None, 0
     try:
         from app.services import GoogleWalletService
@@ -269,9 +242,12 @@ def process_transaction():
         current_app.logger.exception("Wallet sync failed after transaction %s", tx.id)
     reward_notified = False
     if action.startswith("earn") and business.loyalty_type == "stamps" and customer.current_stamps >= business.stamps_reward_limit:
-        from app.services.reward_notification_service import RewardNotificationService
-        RewardNotificationService().send_reward_ready(customer, business)
-        reward_notified = True
+        try:
+            from app.services.reward_notification_service import RewardNotificationService
+            RewardNotificationService().send_reward_ready(customer, business)
+            reward_notified = True
+        except Exception:
+            current_app.logger.exception("Reward notification failed after transaction %s", tx.id)
     return jsonify({"status": "success", "customer": {"id": customer.id,
         "current_points": customer.current_points, "current_stamps": customer.current_stamps},
         "transaction": tx.to_dict(), "wallet_sync": {
