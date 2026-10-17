@@ -14,7 +14,7 @@
   <header class="p-4 bg-slate-900 border-b border-slate-800 flex items-center justify-between sticky top-0 z-20">
     <div class="flex items-center space-x-2.5">
       <div class="w-8 h-8 rounded-lg bg-emerald-500 flex items-center justify-center text-slate-950 font-black text-sm">
-        <i class="fa-solid fa-qrcode"></i>
+        {{ icon('qr') }}
       </div>
       <div>
         <h1 class="text-sm font-bold text-white leading-none">Terminal de Escaneo</h1>
@@ -53,12 +53,12 @@
       <div class="flex space-x-2">
         <button id="toggle-camera-btn" onclick="toggleCamera()"
                 class="flex-1 py-2.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-xl text-xs font-bold text-white flex items-center justify-center space-x-1.5 transition">
-          <i class="fa-solid fa-camera"></i>
+          {{ icon('camera') }}
           <span id="camera-btn-text">Pausar Cámara</span>
         </button>
         <button onclick="toggleManualInput()"
                 class="flex-1 py-2.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-xl text-xs font-bold text-slate-300 flex items-center justify-center space-x-1.5 transition">
-          <i class="fa-solid fa-keyboard"></i>
+          {{ icon('keyboard') }}
           <span>Ingreso Manual / NFC</span>
         </button>
       </div>
@@ -99,12 +99,12 @@
         <div class="grid grid-cols-2 gap-3">
           <button onclick="processTransaction('earn_stamp', 1)"
                   class="py-3 px-4 rounded-2xl bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white font-bold text-sm flex flex-col items-center justify-center shadow-lg shadow-emerald-600/20 transition transform active:scale-95">
-            <i class="fa-solid fa-stamp text-xl mb-1"></i>
+            {{ icon('stamp','icon-lg') }}
             <span>+1 Sello</span>
           </button>
           <button onclick="processTransaction('redeem_stamp', 1)"
                   class="py-3 px-4 rounded-2xl bg-rose-600 hover:bg-rose-500 active:bg-rose-700 text-white font-bold text-sm flex flex-col items-center justify-center shadow-lg shadow-rose-600/20 transition transform active:scale-95">
-            <i class="fa-solid fa-gift text-xl mb-1"></i>
+            {{ icon('gift','icon-lg') }}
             <span>Canjear Premio</span>
           </button>
         </div>
@@ -129,12 +129,12 @@
         <div class="grid grid-cols-2 gap-3">
           <button onclick="processPointsEarning()"
                   class="py-3 px-3 rounded-2xl bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 text-white font-bold text-xs flex items-center justify-center space-x-1.5 shadow-lg shadow-indigo-600/20 transition">
-            <i class="fa-solid fa-plus-circle"></i>
+            {{ icon('plus') }}
             <span>Abonar Puntos</span>
           </button>
           <button onclick="processPointsRedeem()"
                   class="py-3 px-3 rounded-2xl bg-amber-600 hover:bg-amber-500 active:bg-amber-700 text-white font-bold text-xs flex items-center justify-center space-x-1.5 shadow-lg shadow-amber-600/20 transition">
-            <i class="fa-solid fa-hand-holding-dollar"></i>
+            {{ icon('coins') }}
             <span>Canjear Puntos</span>
           </button>
         </div>
@@ -249,7 +249,7 @@
     if (business.loyalty_type === 'stamps') {
       stampsSec.classList.remove('hidden');
       pointsSec.classList.add('hidden');
-      balanceDisplay.textContent = `${customer.current_stamps} / ${business.stamps_reward_limit} 🏷️`;
+      balanceDisplay.textContent = `${customer.current_stamps} / ${business.stamps_reward_limit} sellos`;
     } else {
       pointsSec.classList.remove('hidden');
       stampsSec.classList.add('hidden');

@@ -3,25 +3,32 @@
 {% block title %}Únete a {{ business.name }} | Tarjeta Digital de Lealtad{% endblock %}
 
 {% block content %}
-<div class="min-h-screen flex items-center justify-center py-8 px-4 sm:px-6 lg:px-8 bg-cover bg-center"
-     style="{% if business.cover_path %}background-image: linear-gradient(rgba(255,255,255,.82), rgba(255,255,255,.94)), url('{{ url_for('static', filename=business.cover_path) }}');{% else %}background: linear-gradient(135deg, {{ business.primary_color }}15 0%, #ffffff 100%);{% endif %}">
-  <div class="max-w-md w-full space-y-6 bg-white p-6 sm:p-8 rounded-3xl shadow-xl border border-slate-100">
+{% set theme_class = {'elegant': 'rounded-lg', 'minimal': 'rounded-none shadow-none', 'modern': 'rounded-3xl'}[business.visual_theme or 'modern'] %}
+{% set font_class = {'classic': 'font-serif', 'geometric': 'font-mono', 'modern': 'font-sans'}[business.font_style or 'modern'] %}
+{% set size_class = {'compact': 'text-sm', 'large': 'text-lg', 'standard': 'text-base'}[business.text_size or 'standard'] %}
+<div class="min-h-screen py-8 px-4 sm:px-6 bg-slate-50 {{ font_class }} {{ size_class }}">
+  <div class="mx-auto max-w-2xl overflow-hidden bg-white {{ theme_class }} shadow-xl border border-slate-200">
+    <div class="relative h-40 sm:h-52 overflow-hidden" style="background: linear-gradient(135deg, {{ business.primary_color }} 0%, {{ business.secondary_color }} 150%);">
+      {% if business.cover_path %}
+        <img src="{{ url_for('static', filename=business.cover_path) }}" alt="Portada de {{ business.name }}" class="absolute inset-0 h-full w-full object-cover">
+        <div class="absolute inset-0 bg-slate-950/30"></div>
+      {% endif %}
+      <div class="absolute inset-x-0 bottom-0 flex items-end gap-4 p-5" style="color: {{ '#FFFFFF' if business.cover_path else contrast_text_color(business.primary_color) }};">
+        {% if business.logo_path or business.logo_url %}
+          <img class="h-20 w-20 rounded-2xl object-contain p-2 bg-white border border-white/80 shadow-lg"
+               src="{{ url_for('static', filename=business.logo_path) if business.logo_path else business.logo_url }}" alt="Logotipo de {{ business.name }}">
+        {% else %}
+          <div class="h-16 w-16 shrink-0 rounded-2xl flex items-center justify-center bg-white/95 text-xl font-bold shadow-lg" style="color: {{ business.primary_color }};">
+            {{ business.name[:2].upper() }}
+          </div>
+        {% endif %}
+        <div><h1 class="text-2xl sm:text-3xl font-extrabold drop-shadow">{{ business.name }}</h1><p class="text-sm font-semibold text-white/90">Tu programa de lealtad</p></div>
+      </div>
+    </div>
+    <div class="space-y-6 p-6 sm:p-8">
     
     <!-- Business Header & Branding -->
     <div class="text-center">
-      {% if business.logo_path or business.logo_url %}
-        <img class="mx-auto h-20 w-auto rounded-2xl shadow-sm object-contain p-2 bg-white border border-slate-100" 
-             src="{{ url_for('static', filename=business.logo_path) if business.logo_path else business.logo_url }}" alt="{{ business.name }}">
-      {% else %}
-        <div class="mx-auto h-16 w-16 rounded-2xl flex items-center justify-center text-white text-2xl font-bold shadow-md"
-             style="background-color: {{ business.primary_color }};">
-          {{ business.name[:2].upper() }}
-        </div>
-      {% endif %}
-      
-      <h2 class="mt-4 text-2xl font-extrabold tracking-tight text-slate-900">
-        {{ business.name }}
-      </h2>
       <p class="mt-1 text-sm font-medium text-slate-500">
         {% if not business.is_active %}
           <span class="text-rose-500 font-semibold">Servicio temporalmente suspendido</span>
@@ -37,7 +44,7 @@
     <!-- Inactive Account Notice -->
     <div class="bg-rose-50 border border-rose-200 rounded-2xl p-5 text-center space-y-2">
       <div class="w-10 h-10 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center mx-auto text-lg">
-        <i class="fa-solid fa-triangle-exclamation"></i>
+        {{ icon('shield') }}
       </div>
       <h3 class="text-sm font-bold text-rose-900">Programa No Disponible</h3>
       <p class="text-xs text-rose-700 leading-relaxed">
@@ -54,7 +61,7 @@
           </label>
           <div class="relative rounded-xl shadow-sm">
             <div class="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
-              <i class="fa-solid fa-user"></i>
+              {{ icon('user') }}
             </div>
             <input type="text" id="full_name" name="full_name" required placeholder="Ej. Juan Pérez"
                    class="block w-full pl-10 pr-3 py-3 border border-slate-200 rounded-xl text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent text-sm">
@@ -67,7 +74,7 @@
           </label>
           <div class="relative rounded-xl shadow-sm">
             <div class="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
-              <i class="fa-solid fa-envelope"></i>
+              {{ icon('mail') }}
             </div>
             <input type="email" id="email" name="email" required placeholder="correo@ejemplo.com"
                    class="block w-full pl-10 pr-3 py-3 border border-slate-200 rounded-xl text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent text-sm">
@@ -78,22 +85,27 @@
           <label for="phone" class="block text-xs font-bold uppercase tracking-wider text-slate-600 mb-1">
             Teléfono Móvil
           </label>
-          <div class="relative rounded-xl shadow-sm">
-            <div class="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
-              <i class="fa-solid fa-phone"></i>
-            </div>
-            <input type="tel" id="phone" name="phone" placeholder="+52 55 1234 5678"
-                   class="block w-full pl-10 pr-3 py-3 border border-slate-200 rounded-xl text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent text-sm">
+          <div class="grid grid-cols-[8.5rem_1fr] gap-2">
+            <select id="phone_country" name="phone_country" aria-label="País y código telefónico" class="field">
+              <option value="+52" selected>México +52</option>
+              <option value="+1">EE. UU./Canadá +1</option>
+              <option value="+57">Colombia +57</option>
+              <option value="+54">Argentina +54</option>
+              <option value="+34">España +34</option>
+            </select>
+            <input type="tel" id="phone" name="phone" inputmode="tel" autocomplete="tel-national" placeholder="55 1234 5678"
+                   class="field">
           </div>
+          <p class="mt-1 text-xs text-slate-500">Selecciona el país e ingresa únicamente tu número local.</p>
         </div>
 
         <div>
           <label for="birthdate" class="block text-xs font-bold uppercase tracking-wider text-slate-600 mb-1">
-            Fecha de Nacimiento (Cumpleaños) <i class="fa-solid fa-cake-candles text-amber-500 ml-1"></i>
+            Fecha de nacimiento <span class="font-normal text-slate-400">(opcional)</span>
           </label>
           <div class="relative rounded-xl shadow-sm">
             <div class="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
-              <i class="fa-solid fa-calendar-day"></i>
+              {{ icon('calendar') }}
             </div>
             <input type="date" id="birthdate" name="birthdate"
                    class="block w-full pl-10 pr-3 py-3 border border-slate-200 rounded-xl text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent text-sm">
@@ -117,9 +129,9 @@
 
         <button type="submit" id="submit-btn"
                 class="w-full flex justify-center items-center py-3.5 px-4 border border-transparent rounded-xl shadow-md text-sm font-bold text-white transition duration-150 transform hover:-translate-y-0.5 active:translate-y-0"
-                style="background-color: {{ business.primary_color }};">
+                style="background-color: {{ business.primary_color }}; color: {{ contrast_text_color(business.primary_color) }};">
           <span>Obtener mi Tarjeta de Lealtad</span>
-          <i class="fa-solid fa-arrow-right ml-2"></i>
+          {{ icon('arrow-right') }}
         </button>
         <a href="{{ url_for('recovery.recover', business_slug=business.slug) }}" class="block text-center text-sm font-semibold text-indigo-700 underline">¿Ya tienes una tarjeta? Recupérala aquí</a>
       </form>
@@ -128,7 +140,7 @@
     <!-- Success & Wallet Download View -->
     <div id="wallet-success-section" class="hidden space-y-6 text-center animate-fade-in">
       <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-emerald-100 text-emerald-600 text-2xl mb-2">
-        <i class="fa-solid fa-circle-check"></i>
+        {{ icon('check') }}
       </div>
       <div>
         <h3 class="text-xl font-extrabold text-slate-900">¡Tarjeta Creada con Éxito!</h3>
@@ -142,14 +154,14 @@
         <!-- Google Wallet Button -->
         <a id="google-wallet-btn" href="#" target="_blank"
            class="flex items-center justify-center w-full px-5 py-3.5 rounded-2xl bg-black text-white font-semibold shadow-lg hover:bg-slate-900 transition space-x-3">
-          <i class="fa-brands fa-google-wallet text-2xl text-blue-400"></i>
+          {{ icon('wallet','icon-lg text-blue-400') }}
           <span class="text-sm">Guardar en Google Wallet</span>
         </a>
 
         <!-- Apple Wallet Button -->
         <a id="apple-wallet-btn" href="#"
            class="flex items-center justify-center w-full px-5 py-3.5 rounded-2xl bg-slate-950 text-white font-semibold shadow-lg hover:bg-slate-900 transition space-x-3 border border-slate-800">
-          <i class="fa-brands fa-apple text-2xl text-white"></i>
+          {{ icon('wallet','icon-lg text-white') }}
           <span class="text-sm">Agregar a Apple Wallet (.pkpass)</span>
         </a>
       </div>
@@ -157,6 +169,7 @@
     </div>
     {% endif %}
 
+    </div>
   </div>
 </div>
 {% endblock %}
@@ -174,7 +187,7 @@
 
     const submitBtn = document.getElementById('submit-btn');
     submitBtn.disabled = true;
-    submitBtn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin mr-2"></i> Generando tarjeta...';
+    submitBtn.textContent = 'Generando tarjeta…';
 
     const formData = new FormData(this);
     const payload = Object.fromEntries(formData.entries());
@@ -200,12 +213,12 @@
       } else {
         alert(data.message || 'Ocurrió un error al registrarte. Intenta nuevamente.');
         submitBtn.disabled = false;
-        submitBtn.innerHTML = '<span>Obtener mi Tarjeta de Lealtad</span><i class="fa-solid fa-arrow-right ml-2"></i>';
+        submitBtn.textContent = 'Obtener mi Tarjeta de Lealtad';
       }
     } catch (err) {
       alert('Error de conexión con el servidor. Revisa tu red.');
       submitBtn.disabled = false;
-      submitBtn.innerHTML = '<span>Obtener mi Tarjeta de Lealtad</span><i class="fa-solid fa-arrow-right ml-2"></i>';
+      submitBtn.textContent = 'Obtener mi Tarjeta de Lealtad';
     }
   });
 </script>

@@ -4,6 +4,7 @@ from app.extensions import db
 from app.models import Business, Customer
 from app.services import GoogleWalletService
 from app.wallet_access import issue_wallet_token
+from app.phone_numbers import normalize_phone
 
 business_bp = Blueprint("business", __name__)
 
@@ -58,7 +59,16 @@ def join_business(slug: str):
     data = request.get_json(silent=True) or request.form.to_dict()
     full_name = (data.get("full_name") or "").strip()
     email = (data.get("email") or "").strip() or None
-    phone = (data.get("phone") or "").strip() or None
+    customer = Customer.query.filter_by(business_id=business.id, email=email).first() if email else None
+    if customer:
+        return jsonify({
+            "status": "error",
+            "message": "Ya existe una cuenta con esos datos. Utiliza el proceso de recuperación verificada.",
+        }), 409
+    try:
+        phone = normalize_phone(data.get("phone"), data.get("phone_country") or "+52")
+    except ValueError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 400
     birthdate_str = data.get("birthdate")
 
     if not full_name:
@@ -73,9 +83,7 @@ def join_business(slug: str):
 
     # Look up if customer already exists for this business by email or phone
     customer = None
-    if email:
-        customer = Customer.query.filter_by(business_id=business.id, email=email).first()
-    if not customer and phone:
+    if phone:
         customer = Customer.query.filter_by(business_id=business.id, phone=phone).first()
 
     if customer:
