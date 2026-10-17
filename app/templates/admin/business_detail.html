@@ -356,7 +356,7 @@
                   {% endfor %}
                 </td>
                 <td class="py-3 px-4 text-right space-x-1">
-                  <button type="button" data-manage-permissions data-business-id="{{ business.id }}" data-staff-id="{{ s.id }}" data-username="{{ s.username }}" data-active="{{ 'true' if s.is_active else 'false' }}" class="btn btn-secondary text-xs" title="Gestionar usuario">{{ icon('settings','icon-sm') }} Gestionar usuario</button>
+                  <button type="button" data-manage-permissions data-business-id="{{ business.id }}" data-staff-id="{{ s.id }}" data-username="{{ s.username }}" data-active="{{ 'true' if s.is_active else 'false' }}" class="btn btn-secondary text-xs" title="Gestionar permisos y usuario">{{ icon('settings','icon-sm') }} Gestionar usuario</button>
                 </td>
               </tr>
               {% else %}
