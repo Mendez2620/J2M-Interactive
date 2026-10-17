@@ -61,9 +61,11 @@ def create_app(config_name=None):
     register_routes(app)
 
     from app.security import csrf_token, validate_csrf, wants_json
+    from app.iconography import icon
 
     app.jinja_env.globals["csrf_token"] = csrf_token
     app.jinja_env.globals["csp_nonce"] = lambda: getattr(g, "csp_nonce", "")
+    app.jinja_env.globals["icon"] = icon
 
     @app.before_request
     def protect_admin_forms():
@@ -102,12 +104,12 @@ def create_app(config_name=None):
         nonce = getattr(g, "csp_nonce", "")
         if config_name == "production":
             csp = (f"default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; "
-                   f"img-src 'self' data: https:; font-src 'self' https://cdnjs.cloudflare.com; "
-                   f"style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; "
+                   f"img-src 'self' data: blob: https:; font-src 'self'; "
+                   f"style-src 'self' 'unsafe-inline'; "
                    f"script-src 'self' 'nonce-{nonce}' https://unpkg.com; script-src-attr 'none'; "
                    f"connect-src 'self'")
         else:
-            csp = "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; script-src 'self' 'unsafe-inline' https://unpkg.com"
+            csp = "default-src 'self'; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' https://unpkg.com"
         response.headers.setdefault("Content-Security-Policy", csp)
         response.headers.setdefault("X-Request-ID", getattr(g, "request_id", ""))
         if request.path.startswith(("/admin", "/manager", "/recover", "/api/scanner")):

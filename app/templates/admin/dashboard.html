@@ -23,20 +23,19 @@
       <div class="flex items-center space-x-3">
         {% if config.DEBUG %}<a href="/scanner" target="_blank"
            class="inline-flex items-center space-x-1.5 px-3 py-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 shadow-sm transition">
-          <i class="fa-solid fa-qrcode text-slate-500"></i>
+          {{ icon('qr','icon text-slate-500') }}
           <span>Abrir Escáner</span>
         </a>{% endif %}
         <button onclick="openBusinessModal()"
                 class="inline-flex items-center space-x-1.5 px-3.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-xs font-semibold text-white shadow-sm transition">
-          <i class="fa-solid fa-plus text-xs"></i>
+          {{ icon('plus','icon-sm') }}
           <span>Nuevo Negocio</span>
         </button>
         <!-- Ajustes button -->
         <button id="settingsBtn" class="inline-flex items-center space-x-1.5 px-3.5 py-1.5 rounded-lg bg-slate-200 hover:bg-slate-300 text-xs font-semibold text-slate-800 shadow-sm transition" onclick="openSettingsModal()">
-          <i class="fa-solid fa-gear"></i>
-          <span>Ajustes ⚙️</span>
+          {{ icon('settings') }} <span>Configuración</span>
         </button>
-        <form method="POST" action="/admin/logout"><button class="text-xs font-semibold text-slate-500 hover:text-slate-900" title="Cerrar sesión"><i class="fa-solid fa-right-from-bracket"></i></button></form>
+        <form method="POST" action="/admin/logout"><button class="btn btn-secondary text-xs" title="Cerrar sesión">{{ icon('logout') }} Cerrar sesión</button></form>
       </div>
     </div>
   </header>
@@ -69,7 +68,7 @@
         <!-- Search Input -->
         <div class="relative flex-1 w-full">
           <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400">
-            <i class="fa-solid fa-magnifying-glass text-xs"></i>
+            {{ icon('search','icon-sm') }}
           </div>
           <input type="text" name="q" value="{{ current_search or '' }}" placeholder="Buscar negocio por nombre..."
                  class="block w-full pl-9 pr-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg text-slate-900 placeholder-slate-400 focus:outline-none focus:bg-white focus:ring-2 focus:ring-slate-900 focus:border-slate-900 transition">
@@ -131,7 +130,7 @@
                     <div class="text-xs text-slate-400 mt-0.5 flex items-center space-x-2">
                       <span class="font-mono">/join/{{ b.slug }}</span>
                       <a href="/join/{{ b.slug }}" target="_blank" class="text-slate-500 hover:text-slate-800" title="Ver página pública">
-                        <i class="fa-solid fa-arrow-up-right-from-square text-[10px]"></i>
+                        {{ icon('external-link','icon-sm') }}
                       </a>
                     </div>
                   </div>
@@ -149,11 +148,11 @@
               <td class="py-4 px-4">
                 {% if b.loyalty_type == 'stamps' %}
                   <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-amber-50 text-amber-800 border border-amber-200">
-                    <i class="fa-solid fa-stamp mr-1 text-[10px]"></i> Sellos ({{ b.stamps_reward_limit }})
+                    {{ icon('stamp','icon-sm') }} Sellos ({{ b.stamps_reward_limit }})
                   </span>
                 {% else %}
                   <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-50 text-blue-800 border border-blue-200">
-                    <i class="fa-solid fa-coins mr-1 text-[10px]"></i> Puntos (${{ b.points_per_currency }}/pt)
+                    {{ icon('coins','icon-sm') }} {{ b.points_per_currency }} puntos por $1 MXN
                   </span>
                 {% endif %}
               </td>
@@ -182,7 +181,7 @@
                 <a href="/admin/business/{{ b.id }}"
                    class="inline-flex items-center space-x-1 px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-medium shadow-2xs transition">
                   <span>Gestionar Negocio</span>
-                  <i class="fa-solid fa-chevron-right text-[10px]"></i>
+                  {{ icon('chevron-right','icon-sm') }}
                 </a>
               </td>
             </tr>
@@ -191,7 +190,7 @@
               <td colspan="6" class="py-12 text-center text-slate-400">
                 <div class="max-w-sm mx-auto space-y-2">
                   <div class="w-10 h-10 rounded-full bg-slate-100 text-slate-400 flex items-center justify-center mx-auto text-base">
-                    <i class="fa-solid fa-store-slash"></i>
+                    {{ icon('store') }}
                   </div>
                   <p class="text-sm font-semibold text-slate-700">No se encontraron negocios</p>
                   <p class="text-xs text-slate-400">Prueba con otros términos de búsqueda o registra un nuevo negocio.</p>
@@ -213,11 +212,11 @@
           {% if pagination.has_prev %}
           <a href="{{ url_for('admin.dashboard', page=pagination.prev_num, q=current_search, category_id=current_category) }}"
              class="px-2.5 py-1.5 text-xs font-medium rounded border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 transition">
-            <i class="fa-solid fa-angle-left mr-1"></i> Anterior
+            {{ icon('chevron-left') }} Anterior
           </a>
           {% else %}
           <span class="px-2.5 py-1.5 text-xs font-medium rounded border border-slate-200 bg-slate-100 text-slate-400 cursor-not-allowed">
-            <i class="fa-solid fa-angle-left mr-1"></i> Anterior
+            {{ icon('chevron-left') }} Anterior
           </span>
           {% endif %}
 
@@ -239,11 +238,11 @@
           {% if pagination.has_next %}
           <a href="{{ url_for('admin.dashboard', page=pagination.next_num, q=current_search, category_id=current_category) }}"
              class="px-2.5 py-1.5 text-xs font-medium rounded border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 transition">
-            Siguiente <i class="fa-solid fa-angle-right ml-1"></i>
+            Siguiente {{ icon('chevron-right') }}
           </a>
           {% else %}
           <span class="px-2.5 py-1.5 text-xs font-medium rounded border border-slate-200 bg-slate-100 text-slate-400 cursor-not-allowed">
-            Siguiente <i class="fa-solid fa-angle-right ml-1"></i>
+            Siguiente {{ icon('chevron-right') }}
           </span>
           {% endif %}
         </div>
@@ -262,7 +261,7 @@
           <p class="text-xs text-slate-500">Configura los datos base del restaurante, bar o comercio</p>
         </div>
         <button onclick="closeBusinessModal()" class="text-slate-400 hover:text-slate-700 text-lg p-1">
-          <i class="fa-solid fa-xmark"></i>
+          {{ icon('x') }}
         </button>
       </div>
 
@@ -379,7 +378,7 @@
         <p class="text-xs text-slate-500">Agregar o editar usuarios administradores.</p>
       </div>
       <button onclick="closeSettingsModal()" class="text-slate-400 hover:text-slate-700 text-lg p-1">
-        <i class="fa-solid fa-xmark"></i>
+        {{ icon('x') }}
       </button>
     </div>
     <!-- Tabs -->
@@ -490,7 +489,7 @@
     e.preventDefault();
     const btn = document.getElementById('saveBusinessBtn');
     btn.disabled = true;
-    btn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin mr-1"></i> Creando...';
+    btn.textContent = 'Creando…';
 
     const payload = new FormData(this);
 

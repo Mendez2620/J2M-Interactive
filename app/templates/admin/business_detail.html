@@ -9,7 +9,7 @@
     <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
       <div class="flex items-center space-x-3">
         <a href="/admin" class="w-9 h-9 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 flex items-center justify-center text-slate-600 transition shadow-xs text-xs" title="Volver al Directorio">
-          <i class="fa-solid fa-arrow-left"></i>
+          {{ icon('arrow-left') }}
         </a>
         <div class="flex items-center space-x-2.5">
           <span class="w-3.5 h-3.5 rounded-full border border-slate-300 shadow-2xs" style="background-color: {{ business.primary_color }};"></span>
@@ -24,7 +24,7 @@
             <div class="flex items-center space-x-2 mt-0.5 text-xs text-slate-400">
               <span class="font-mono">/join/{{ business.slug }}</span>
               <a href="/join/{{ business.slug }}" target="_blank" class="text-slate-500 hover:text-slate-800" title="Ver landing">
-                <i class="fa-solid fa-arrow-up-right-from-square text-[10px]"></i>
+                {{ icon('external-link','icon-sm') }}
               </a>
             </div>
           </div>
@@ -36,16 +36,16 @@
         <form method="POST" action="/admin/business/{{ business.id }}/toggle-status">
           <button type="submit"
                   class="px-3 py-1.5 rounded-lg text-xs font-semibold border transition flex items-center space-x-1.5 {{ 'bg-rose-50 hover:bg-rose-100 text-rose-700 border-rose-200' if business.is_active else 'bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border-emerald-200' }}">
-            <i class="fa-solid {{ 'fa-pause' if business.is_active else 'fa-play' }} text-[10px]"></i>
+            {{ icon('pause' if business.is_active else 'play','icon-sm') }}
             <span>{{ 'Suspender Cuenta' if business.is_active else 'Activar Cuenta' }}</span>
           </button>
         </form>
         {% if config.DEBUG %}<a href="/scanner" target="_blank"
            class="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold flex items-center space-x-1.5 shadow-xs transition">
-          <i class="fa-solid fa-qrcode text-[10px]"></i>
+          {{ icon('qr','icon-sm') }}
           <span>Escáner</span>
         </a>{% endif %}
-        <form method="POST" action="/admin/logout"><button class="px-2 py-1.5 text-slate-500 hover:text-slate-900" title="Cerrar sesión"><i class="fa-solid fa-right-from-bracket"></i></button></form>
+        <form method="POST" action="/admin/logout"><button class="btn btn-secondary text-xs" title="Cerrar sesión">{{ icon('logout') }} Cerrar sesión</button></form>
       </div>
     </div>
   </header>
@@ -79,19 +79,19 @@
         <nav class="-mb-px flex space-x-6 overflow-x-auto" aria-label="Tabs">
           <button type="button" onclick="switchTab('info')" id="tabBtn-info"
                   class="tab-btn py-4 px-1 border-b-2 font-semibold text-sm whitespace-nowrap transition border-slate-900 text-slate-900">
-            <i class="fa-solid fa-wallet mr-1.5 text-xs"></i> Información &amp; Wallet
+            {{ icon('wallet') }} Información y Wallet
           </button>
           <button type="button" onclick="switchTab('loyalty')" id="tabBtn-loyalty"
                   class="tab-btn py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap transition border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300">
-            <i class="fa-solid fa-sliders mr-1.5 text-xs"></i> Reglas de Lealtad
+            {{ icon('sliders') }} Reglas de lealtad
           </button>
           <button type="button" onclick="switchTab('staff')" id="tabBtn-staff"
                   class="tab-btn py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap transition border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300">
-            <i class="fa-solid fa-users-gear mr-1.5 text-xs"></i> Usuarios / Staff ({{ staff_members|length }})
+            {{ icon('users') }} Usuarios ({{ staff_members|length }})
           </button>
           <button type="button" onclick="switchTab('customers')" id="tabBtn-customers"
                   class="tab-btn py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap transition border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300">
-            <i class="fa-solid fa-file-export mr-1.5 text-xs"></i> Clientes &amp; Exportación
+            {{ icon('file') }} Clientes y exportación
           </button>
         </nav>
       </div>
@@ -268,7 +268,7 @@
           </div>
           <button type="button" onclick="openStaffModal()"
                   class="inline-flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold transition self-start sm:self-auto shadow-xs">
-            <i class="fa-solid fa-user-plus text-xs"></i>
+            {{ icon('user-plus','icon-sm') }}
             <span>Nuevo Usuario</span>
           </button>
         </div>
@@ -318,7 +318,7 @@
                 </td>
                 <td class="py-3 px-4 text-right space-x-1">
                   <button type="button" data-manage-permissions data-business-id="{{ business.id }}" data-staff-id="{{ s.id }}" class="px-2.5 py-1 text-xs rounded border border-indigo-200 bg-indigo-50 hover:bg-indigo-100 text-indigo-800" title="Gestionar permisos">Gestionar permisos</button>
-                  <button type="button" data-reset-password data-staff-id="{{ s.id }}" data-username="{{ s.username }}" class="px-2.5 py-1 text-xs rounded border border-amber-200 bg-amber-50 hover:bg-amber-100 text-amber-800" title="Restablecer contraseña"><i class="fa-solid fa-key text-[10px]"></i></button>
+                  <button type="button" data-reset-password data-staff-id="{{ s.id }}" data-username="{{ s.username }}" class="px-2.5 py-1 text-xs rounded border border-amber-200 bg-amber-50 hover:bg-amber-100 text-amber-800" title="Restablecer contraseña">{{ icon('key','icon-sm') }} <span>Contraseña</span></button>
                   <!-- Toggle status form -->
                   <form method="POST" action="/admin/staff/{{ s.id }}/toggle-status" class="inline-block">
                     <button type="submit"
@@ -332,7 +332,7 @@
                     <button type="submit"
                             class="px-2.5 py-1 text-xs rounded border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 transition"
                             title="Eliminar usuario">
-                      <i class="fa-solid fa-trash text-[10px]"></i>
+                      {{ icon('trash','icon-sm') }} <span>Eliminar</span>
                     </button>
                   </form>
                 </td>
@@ -359,12 +359,12 @@
           <div class="flex items-center space-x-2">
             <a href="/admin/business/{{ business.id }}/export/excel"
                class="inline-flex items-center space-x-1.5 px-3 py-1.5 rounded-lg border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 text-xs font-semibold shadow-xs transition">
-              <i class="fa-solid fa-file-excel text-emerald-600"></i>
+              {{ icon('excel','icon text-emerald-600') }}
               <span>Exportar a Excel</span>
             </a>
             <a href="/admin/business/{{ business.id }}/export/pdf"
                class="inline-flex items-center space-x-1.5 px-3 py-1.5 rounded-lg border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-800 text-xs font-semibold shadow-xs transition">
-              <i class="fa-solid fa-file-pdf text-rose-600"></i>
+              {{ icon('pdf','icon text-rose-600') }}
               <span>Exportar a PDF</span>
             </a>
           </div>
@@ -393,7 +393,7 @@
                 <td class="py-3 px-4 text-xs text-slate-600">
                   {% if c.birthdate %}
                     <span class="inline-flex items-center text-slate-700">
-                      <i class="fa-solid fa-cake-candles text-amber-500 mr-1.5 text-xs"></i>
+                      {{ icon('calendar','icon-sm text-amber-500') }}
                       {{ c.birthdate.strftime('%d/%m/%Y') }}
                     </span>
                   {% else %}
@@ -440,7 +440,7 @@
           <p class="text-xs text-slate-500">{{ business.name }}</p>
         </div>
         <button onclick="closeStaffModal()" class="text-slate-400 hover:text-slate-700 text-lg p-1">
-          <i class="fa-solid fa-xmark"></i>
+          {{ icon('x') }}
         </button>
       </div>
 
@@ -515,7 +515,7 @@
     <div class="bg-white rounded-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto p-6 shadow-2xl">
       <div class="flex justify-between gap-4 border-b border-slate-100 pb-4">
         <div><h3 id="permissionsTitle" class="text-lg font-bold text-slate-900">Gestionar permisos</h3><p id="permissionsIdentity" class="text-sm text-slate-500"></p></div>
-        <button type="button" data-close-permissions class="text-slate-400 hover:text-slate-700" aria-label="Cerrar"><i class="fa-solid fa-xmark"></i></button>
+        <button type="button" data-close-permissions class="text-slate-400 hover:text-slate-700" aria-label="Cerrar">{{ icon('x') }}</button>
       </div>
       <form id="permissionsForm" class="space-y-5 pt-5">
         <div id="permissionsSummary" class="grid sm:grid-cols-3 gap-3 text-xs"></div>
