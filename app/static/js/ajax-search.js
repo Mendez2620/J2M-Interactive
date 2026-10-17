@@ -1,21 +1,28 @@
 (() => {
-  document.querySelectorAll('[data-copy-text]').forEach((button) => button.addEventListener('click', async () => {
+  document.addEventListener('click', async (event) => {
+    const button = event.target.closest('[data-copy-text]');
+    if (!button) return;
     const original = button.textContent;
     try {
+      if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable');
       await navigator.clipboard.writeText(button.dataset.copyText);
       button.textContent = 'Enlace copiado';
     } catch (_error) {
-      const fallback = document.createElement('input');
+      let fallback = button.parentElement.querySelector('[data-copy-fallback]');
+      if (!fallback) {
+        fallback = document.createElement('input');
+        fallback.dataset.copyFallback = 'true';
+        fallback.readOnly = true;
+        fallback.className = 'field mt-2';
+        fallback.setAttribute('aria-label', 'Enlace para copiar manualmente');
+        button.insertAdjacentElement('afterend', fallback);
+      }
       fallback.value = button.dataset.copyText;
-      fallback.readOnly = true;
-      fallback.className = 'field mt-2';
-      fallback.setAttribute('aria-label', 'Enlace para copiar manualmente');
-      button.insertAdjacentElement('afterend', fallback);
       fallback.select();
       button.textContent = 'Copia el enlace mostrado';
     }
     window.setTimeout(() => { button.textContent = original; }, 1800);
-  }));
+  });
   document.querySelectorAll('form[data-ajax-search]').forEach((form) => {
     const selector = form.dataset.ajaxTarget;
     const target = document.querySelector(selector);
@@ -34,6 +41,7 @@
         const replacement = copy.querySelector(selector);
         if (!replacement) throw new Error('target missing');
         target.replaceChildren(...Array.from(replacement.childNodes, (node) => document.importNode(node, true)));
+        window.initializeCsrfForms?.(target);
         if (push) history.pushState({ajaxSearch: true}, '', url);
       } catch (error) {
         if (error.name !== 'AbortError') {

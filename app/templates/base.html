@@ -12,7 +12,7 @@
   {% block content %}{% endblock %}
   {% block scripts %}{% endblock %}
   <script nonce="{{ csp_nonce() }}">
-    document.querySelectorAll('form[method="POST"]').forEach((form) => {
+    window.initializeCsrfForms = (root = document) => root.querySelectorAll('form[method="POST"]').forEach((form) => {
       if (!form.querySelector('input[name="csrf_token"]')) {
         const input = document.createElement('input');
         input.type = 'hidden'; input.name = 'csrf_token';
@@ -20,6 +20,7 @@
         form.appendChild(input);
       }
     });
+    window.initializeCsrfForms();
   </script>
   <script src="{{ url_for('static', filename='js/legacy-actions.js') }}"></script>
   <script src="{{ url_for('static', filename='js/ajax-search.js') }}"></script>

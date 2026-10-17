@@ -1,5 +1,6 @@
 import unittest
 from datetime import datetime, timedelta
+from urllib.parse import parse_qs, urlparse
 
 from app import create_app
 from app.extensions import db
@@ -52,6 +53,9 @@ class UXImprovementsPhase65TestCase(unittest.TestCase):
         with open("app/static/js/ajax-search.js", encoding="utf-8") as script:
             ajax_source = script.read()
         self.assertIn('a[href*="page="]', ajax_source)
+        self.assertIn("event.target.closest('[data-copy-text]')", ajax_source)
+        self.assertIn("window.initializeCsrfForms?.(target)", ajax_source)
+        self.assertIn("[data-copy-fallback]", ajax_source)
         self.assertNotIn("target.innerHTML", ajax_source)
 
     def test_staff_management_uses_one_action_and_no_nested_forms(self):
@@ -87,6 +91,121 @@ class UXImprovementsPhase65TestCase(unittest.TestCase):
         selected = self.client.post("/manager/login", data={"account_id": first.id})
         self.assertEqual(selected.status_code, 302)
         with self.client.session_transaction() as browser: self.assertEqual(browser["manager_staff_id"], first.id)
+
+    def test_ambiguous_login_selection_is_bound_to_auth_version_and_expiry(self):
+        first = self.manager(self.business, "first-versioned", "versioned@example.test")
+        self.manager(self.other, "second-versioned", "versioned@example.test")
+        choose = self.client.post("/manager/login", data={"email": "versioned@example.test", "password": "ManagerPassword123!"})
+        self.assertEqual(choose.status_code, 200)
+        with self.client.session_transaction() as browser:
+            pending = browser["manager_account_choice"]
+            self.assertEqual({"staff_id", "auth_version"}, set(pending["accounts"][0]))
+            self.assertNotIn("password", pending)
+            self.assertNotIn("token", pending)
+        first.auth_version += 1
+        db.session.commit()
+        rejected = self.client.post("/manager/login", data={"account_id": first.id})
+        self.assertEqual(rejected.status_code, 401)
+        with self.client.session_transaction() as browser:
+            self.assertNotIn("manager_staff_id", browser)
+            self.assertNotIn("manager_account_choice", browser)
+
+        self.client.post("/manager/login", data={"email": "versioned@example.test", "password": "ManagerPassword123!"})
+        with self.client.session_transaction() as browser:
+            expired = dict(browser["manager_account_choice"])
+            expired["expires_at"] = 0
+            browser["manager_account_choice"] = expired
+        self.assertEqual(self.client.post("/manager/login", data={"account_id": first.id}).status_code, 401)
+
+    def test_password_reset_revokes_pending_ambiguous_login(self):
+        first = self.manager(self.business, "first-reset", "reset-choice@example.test")
+        self.manager(self.other, "second-reset", "reset-choice@example.test")
+        self.assertEqual(self.client.post("/manager/login", data={
+            "email": "reset-choice@example.test", "password": "ManagerPassword123!",
+        }).status_code, 200)
+        self.admin_login()
+        reset = self.client.post(f"/admin/staff/{first.id}/reset-password", json={
+            "password": "ReplacementPassword456!", "password_confirmation": "ReplacementPassword456!",
+        })
+        self.assertEqual(reset.status_code, 200)
+        self.assertEqual(self.client.post("/manager/login", data={"account_id": first.id}).status_code, 401)
+        with self.client.session_transaction() as browser:
+            self.assertNotIn("manager_staff_id", browser)
+            self.assertNotIn("manager_account_choice", browser)
+
+    def test_ambiguous_login_revalidates_status_business_and_discards_old_choice(self):
+        first = self.manager(self.business, "first-state", "state@example.test")
+        second = self.manager(self.other, "second-state", "state@example.test")
+        self.client.post("/manager/login", data={"email": "state@example.test", "password": "ManagerPassword123!"})
+        second.is_active = False
+        db.session.commit()
+        self.assertEqual(self.client.post("/manager/login", data={"account_id": second.id}).status_code, 401)
+
+        second.is_active = True
+        db.session.commit()
+        self.client.post("/manager/login", data={"email": "state@example.test", "password": "ManagerPassword123!"})
+        self.other.web_access_enabled = False
+        db.session.commit()
+        self.assertEqual(self.client.post("/manager/login", data={"account_id": second.id}).status_code, 401)
+
+        self.other.web_access_enabled = True
+        db.session.commit()
+        self.client.post("/manager/login", data={"email": "state@example.test", "password": "ManagerPassword123!"})
+        self.assertEqual(self.client.post("/manager/login", data={"account_id": 999999}).status_code, 401)
+        self.client.post("/manager/login", data={"email": "state@example.test", "password": "ManagerPassword123!"})
+        first.role = "cashier"
+        db.session.commit()
+        self.assertEqual(self.client.post("/manager/login", data={"account_id": first.id}).status_code, 401)
+        first.role = "manager"
+        db.session.commit()
+        self.client.post("/manager/login", data={"email": "state@example.test", "password": "ManagerPassword123!"})
+        self.client.post("/manager/login", data={"email": "nobody@example.test", "password": "WrongPassword123!"})
+        self.assertEqual(self.client.post("/manager/login", data={"account_id": first.id}).status_code, 401)
+
+    def test_ajax_rows_render_csrf_token_and_toggle_with_protection_enabled(self):
+        self.admin_login()
+        with self.client.session_transaction() as browser:
+            browser["csrf_token"] = "ajax-csrf"
+        self.app.config["CSRF_ENABLED"] = True
+        response = self.client.get("/admin?q=Marca", headers={"X-Requested-With": "XMLHttpRequest"})
+        html = response.get_data(as_text=True)
+        self.assertIn('name="csrf_token" value="ajax-csrf"', html)
+        toggle = self.client.post(
+            f"/admin/business/{self.business.id}/toggle-status",
+            data={"csrf_token": "ajax-csrf"},
+        )
+        self.assertEqual(toggle.status_code, 302)
+        db.session.refresh(self.business)
+        self.assertFalse(self.business.is_active)
+
+    def test_manager_transaction_pagination_preserves_encoded_filters(self):
+        manager = self.manager(self.business, "filters", "filters@example.test")
+        customer = Customer(business_id=self.business.id, full_name="Filtro")
+        db.session.add(customer)
+        db.session.flush()
+        for index in range(26):
+            db.session.add(Transaction(
+                business_id=self.business.id, customer_id=customer.id, staff_id=manager.id,
+                type="earn", points_amount=1, timestamp=datetime(2026, 10, 1, 12, 0) + timedelta(minutes=index),
+            ))
+        db.session.commit()
+        self.client.post("/manager/login", data={"email": manager.email, "password": "ManagerPassword123!"})
+        html = self.client.get("/manager/portal/transactions?type=earn&from=2026-10-01&to=2026-10-02&q=a%26b").get_data(as_text=True)
+        marker = 'href="'
+        link = html[html.index(marker, html.index("Siguiente") - 400) + len(marker):]
+        link = link[:link.index('"')].replace("&amp;", "&")
+        params = parse_qs(urlparse(link).query)
+        self.assertEqual(params, {"page": ["2"], "q": ["a&b"], "type": ["earn"], "from": ["2026-10-01"], "to": ["2026-10-02"]})
+
+    def test_reset_modal_closes_permissions_and_manages_focus(self):
+        self.admin_login()
+        self.manager(self.business, "modal-user", "modal@example.test")
+        html = self.client.get(f"/admin/business/{self.business.id}?tab=staff").get_data(as_text=True)
+        self.assertIn("document.getElementById('permissionsModal').classList.add('hidden')", html)
+        self.assertIn("document.getElementById('resetPasswordInput').focus()", html)
+        self.assertIn("resetPasswordReturnFocus.focus()", html)
+        self.assertIn('name="password_confirmation"', html)
+        self.assertIn('role="dialog" aria-modal="true" aria-labelledby="resetPasswordTitle"', html)
 
     def test_manager_ajax_results_remain_tenant_scoped(self):
         manager = self.manager(self.business, "tenant-manager", "tenant@example.test")

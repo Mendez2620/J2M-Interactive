@@ -6,7 +6,7 @@
 <div class="min-h-screen bg-slate-50 text-slate-800 flex flex-col font-sans">
   <!-- Minimalist Corporate Top Navigation -->
   <header class="bg-white border-b border-slate-200 sticky top-0 z-30">
-    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-2 sm:h-16 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2">
       <div class="flex items-center space-x-3">
         <a href="/admin" class="w-9 h-9 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 flex items-center justify-center text-slate-600 transition shadow-xs text-xs" title="Volver al Directorio">
           {{ icon('arrow-left') }}
@@ -33,7 +33,7 @@
       </div>
 
       <!-- Action Quick Bar (Toggle Status, Direct Scanner) -->
-      <div class="flex items-center space-x-2.5">
+      <div class="flex items-center justify-center sm:justify-end gap-2 flex-wrap">
         <form method="POST" action="/admin/business/{{ business.id }}/toggle-status">
           <button type="submit"
                   class="px-3 py-1.5 rounded-lg text-xs font-semibold border transition flex items-center space-x-1.5 {{ 'bg-rose-50 hover:bg-rose-100 text-rose-700 border-rose-200' if business.is_active else 'bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border-emerald-200' }}">
@@ -522,12 +522,12 @@
     </div>
   </div>
 
-  <div id="resetPasswordModal" class="fixed inset-0 bg-slate-900/50 z-50 hidden flex items-center justify-center p-4">
+  <div id="resetPasswordModal" class="fixed inset-0 bg-slate-900/50 z-50 hidden flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="resetPasswordTitle">
     <div class="bg-white rounded-2xl max-w-md w-full p-6 shadow-xl">
-      <h3 class="text-base font-bold">Restablecer contraseña</h3><p id="resetUserLabel" class="text-xs text-slate-500 mb-4"></p>
+      <h3 id="resetPasswordTitle" class="text-base font-bold">Restablecer contraseña</h3><p id="resetUserLabel" class="text-xs text-slate-500 mb-4"></p>
       <form id="resetPasswordForm" method="POST" class="space-y-4">
-        <input type="password" name="password" minlength="12" required placeholder="Nueva contraseña" class="w-full border rounded-lg px-3 py-2">
-        <input type="password" name="password_confirmation" minlength="12" required placeholder="Confirmar contraseña" class="w-full border rounded-lg px-3 py-2">
+        <label class="block text-sm font-semibold">Nueva contraseña<input id="resetPasswordInput" type="password" name="password" minlength="12" required autocomplete="new-password" class="mt-1 w-full border rounded-lg px-3 py-2"></label>
+        <label class="block text-sm font-semibold">Confirmar contraseña<input type="password" name="password_confirmation" minlength="12" required autocomplete="new-password" class="mt-1 w-full border rounded-lg px-3 py-2"></label>
         <div class="flex gap-2 justify-end"><button type="button" onclick="closeResetModal()" class="px-3 py-2 border rounded-lg">Cancelar</button><button class="px-3 py-2 bg-slate-900 text-white rounded-lg">Actualizar</button></div>
       </form>
     </div>
@@ -605,8 +605,23 @@
   function closeStaffModal() {
     document.getElementById('staffModal').classList.add('hidden');
   }
-  function openResetModal(id, username){const form=document.getElementById('resetPasswordForm');form.action=`/admin/staff/${encodeURIComponent(id)}/reset-password`;document.getElementById('resetUserLabel').textContent=`Usuario: ${username}`;document.getElementById('resetPasswordModal').classList.remove('hidden');}
-  function closeResetModal(){document.getElementById('resetPasswordModal').classList.add('hidden');document.getElementById('resetPasswordForm').reset();}
+  let resetPasswordReturnFocus = null;
+  let permissionsReturnFocus = null;
+  function openResetModal(id, username){
+    resetPasswordReturnFocus = permissionsReturnFocus || document.activeElement;
+    document.getElementById('permissionsModal').classList.add('hidden');
+    const form=document.getElementById('resetPasswordForm');
+    form.action=`/admin/staff/${encodeURIComponent(id)}/reset-password`;
+    document.getElementById('resetUserLabel').textContent=`Usuario: ${username}`;
+    document.getElementById('resetPasswordModal').classList.remove('hidden');
+    document.getElementById('resetPasswordInput').focus();
+  }
+  function closeResetModal(){
+    document.getElementById('resetPasswordModal').classList.add('hidden');
+    document.getElementById('resetPasswordForm').reset();
+    if (resetPasswordReturnFocus?.isConnected) resetPasswordReturnFocus.focus();
+    resetPasswordReturnFocus = null;
+  }
   function previewUpload(input,id){const img=document.getElementById(id);if(input.files&&input.files[0]){img.src=URL.createObjectURL(input.files[0]);img.classList.remove('hidden');}}
 
   document.addEventListener('DOMContentLoaded', function() {
@@ -633,6 +648,7 @@
       });
     }
     async function openPermissions(button) {
+      permissionsReturnFocus = button;
       permissionsEndpoint = `/admin/business/${encodeURIComponent(button.dataset.businessId)}/staff/${encodeURIComponent(button.dataset.staffId)}/permissions`;
       permissionsModal.classList.remove('hidden'); permissionsMessage.classList.add('hidden');
       document.getElementById('modalResetPassword').onclick = () => openResetModal(button.dataset.staffId, button.dataset.username);
@@ -649,7 +665,11 @@
     }
     document.querySelectorAll('[data-manage-permissions]').forEach(button => button.addEventListener('click', () => openPermissions(button)));
     document.querySelectorAll('[data-close-permissions]').forEach(button => button.addEventListener('click', () => permissionsModal.classList.add('hidden')));
-    document.addEventListener('keydown', (event) => { if (event.key === 'Escape') permissionsModal.classList.add('hidden'); });
+    document.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape') return;
+      if (!document.getElementById('resetPasswordModal').classList.contains('hidden')) closeResetModal();
+      else permissionsModal.classList.add('hidden');
+    });
     document.getElementById('permissionProfile').addEventListener('change', (event) => {
       if (!loadedPermissions || event.target.value === 'custom') return;
       const profiles = {basic: ['view_stats'], operational: ['view_stats','view_transactions','view_customers','export_reports','view_cashiers','create_cashiers','edit_cashiers','toggle_cashiers']};

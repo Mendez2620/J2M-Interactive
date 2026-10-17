@@ -247,10 +247,16 @@ def manager_login():
     if request.method == "POST":
         pending = session.get("manager_account_choice") or {}
         account_id = request.form.get("account_id", type=int)
-        if account_id and pending.get("expires_at", 0) >= datetime.now(timezone.utc).timestamp() and account_id in pending.get("staff_ids", []):
+        pending_accounts = {
+            item.get("staff_id"): item.get("auth_version")
+            for item in pending.get("accounts", [])
+            if isinstance(item, dict)
+        }
+        if account_id and pending.get("expires_at", 0) >= datetime.now(timezone.utc).timestamp() and account_id in pending_accounts:
             staff = db.session.get(Staff, account_id)
             if (staff and staff.role == "manager" and staff.is_active and staff.business.is_active
-                    and staff.web_access_enabled and staff.business.web_access_enabled):
+                    and staff.web_access_enabled and staff.business.web_access_enabled
+                    and staff.auth_version == pending_accounts[account_id]):
                 session.pop("manager_account_choice", None)
                 create_manager_browser_session(staff)
                 return redirect(_portal_destination(staff))
@@ -258,6 +264,8 @@ def manager_login():
             error, status = "No fue posible iniciar sesión con esas credenciales.", 401
             return render_template("manager/login.html", error=error, account_choices=None), status
 
+        # Any credential submission supersedes an earlier account choice.
+        session.pop("manager_account_choice", None)
         # ``identity`` remains a compatibility input for older web clients; the
         # current portal deliberately requests email only.
         identity = (request.form.get("email") or request.form.get("identity") or "").strip().lower()
@@ -285,7 +293,10 @@ def manager_login():
             elif len(eligible) > 1 and not business_slug:
                 clear_auth_attempts("manager", reservation)
                 session["manager_account_choice"] = {
-                    "staff_ids": [item.id for item in eligible],
+                    "accounts": [
+                        {"staff_id": item.id, "auth_version": item.auth_version}
+                        for item in eligible
+                    ],
                     "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=5)).timestamp(),
                 }
                 account_choices = eligible
@@ -331,20 +342,20 @@ def manager_portal():
     timestamps = [row[0] for row in tx_query.with_entities(Transaction.timestamp).all()]
     if period == 1:
         first_bucket = since.replace(minute=0, second=0, microsecond=0)
-        chart_labels = []
-        chart_values = []
-        for offset in range(25):
-            bucket = first_bucket + timedelta(hours=offset)
-            chart_labels.append(bucket.strftime("%H:00"))
-            chart_values.append(sum(1 for value in timestamps if bucket <= value < bucket + timedelta(hours=1)))
+        chart_labels = [(first_bucket + timedelta(hours=offset)).strftime("%H:00") for offset in range(25)]
+        chart_values = [0] * len(chart_labels)
+        for value in timestamps:
+            bucket_index = int((value - first_bucket).total_seconds() // 3600)
+            if 0 <= bucket_index < len(chart_values):
+                chart_values[bucket_index] += 1
     else:
         first_bucket = since.date()
-        chart_labels = []
-        chart_values = []
-        for offset in range(period + 1):
-            bucket = first_bucket + timedelta(days=offset)
-            chart_labels.append(bucket.strftime("%d/%m"))
-            chart_values.append(sum(1 for value in timestamps if value.date() == bucket))
+        chart_labels = [(first_bucket + timedelta(days=offset)).strftime("%d/%m") for offset in range(period + 1)]
+        chart_values = [0] * len(chart_labels)
+        for value in timestamps:
+            bucket_index = (value.date() - first_bucket).days
+            if 0 <= bucket_index < len(chart_values):
+                chart_values[bucket_index] += 1
     metrics = {
         "customers": business.customers.count(), "transactions": totals[0],
         "current_points": db.session.query(func.coalesce(func.sum(Customer.current_points), 0)).filter_by(business_id=business.id).scalar(),
