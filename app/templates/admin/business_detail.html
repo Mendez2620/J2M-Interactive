@@ -547,8 +547,8 @@
         </div>
         <div><label class="block text-xs font-semibold uppercase text-slate-600 mb-1">Perfil</label><select id="permissionProfile" class="w-full border rounded-lg px-3 py-2"><option value="basic">Básico</option><option value="operational">Operativo</option><option value="custom">Personalizado</option></select></div>
         <div id="permissionGroups" class="grid sm:grid-cols-2 gap-4"></div>
-        <section class="rounded-xl border border-slate-200 p-4"><h4 class="font-bold text-sm">Seguridad</h4><p class="text-xs text-slate-500 mb-3">Los cambios de contraseña, canales y estado revocan las sesiones cuando corresponde.</p><div class="flex flex-wrap gap-2"><button id="modalResetPassword" type="button" class="btn btn-secondary text-xs">{{ icon('key','icon-sm') }} Restablecer contraseña</button><form id="modalToggleForm" method="POST"><button id="modalToggleButton" class="btn btn-secondary text-xs"></button></form></div></section>
-        <section class="rounded-xl border border-rose-200 bg-rose-50 p-4"><h4 class="font-bold text-sm text-rose-900">Zona de peligro</h4><p class="text-xs text-rose-700 mb-3">Los usuarios con movimientos históricos no se eliminan; deben desactivarse para conservar la trazabilidad.</p><form id="modalDeleteForm" method="POST" data-confirm-delete><button class="btn btn-danger text-xs">{{ icon('trash','icon-sm') }} Eliminar usuario sin historial</button></form></section>
+        <section class="rounded-xl border border-slate-200 p-4"><h4 class="font-bold text-sm">Seguridad</h4><p class="text-xs text-slate-500 mb-3">Los cambios de contraseña, canales y estado revocan las sesiones cuando corresponde.</p><div class="flex flex-wrap gap-2"><button id="modalResetPassword" type="button" class="btn btn-secondary text-xs">{{ icon('key','icon-sm') }} Restablecer contraseña</button><button id="modalToggleButton" type="button" class="btn btn-secondary text-xs"></button></div></section>
+        <section class="rounded-xl border border-rose-200 bg-rose-50 p-4"><h4 class="font-bold text-sm text-rose-900">Zona de peligro</h4><p class="text-xs text-rose-700 mb-3">Los usuarios con movimientos históricos no se eliminan; deben desactivarse para conservar la trazabilidad.</p><button id="modalDeleteButton" type="button" class="btn btn-danger text-xs">{{ icon('trash','icon-sm') }} Eliminar usuario sin historial</button></section>
         <p id="permissionsMessage" class="hidden text-sm rounded-lg p-3" role="status"></p>
         <div class="flex justify-end gap-3 border-t pt-4"><button type="button" data-close-permissions class="px-4 py-2 border rounded-lg text-sm">Cancelar</button><button id="savePermissions" type="submit" class="px-4 py-2 bg-slate-900 text-white rounded-lg text-sm font-semibold">Guardar cambios</button></div>
       </form>
@@ -636,9 +636,8 @@
       permissionsEndpoint = `/admin/business/${encodeURIComponent(button.dataset.businessId)}/staff/${encodeURIComponent(button.dataset.staffId)}/permissions`;
       permissionsModal.classList.remove('hidden'); permissionsMessage.classList.add('hidden');
       document.getElementById('modalResetPassword').onclick = () => openResetModal(button.dataset.staffId, button.dataset.username);
-      document.getElementById('modalToggleForm').action = `/admin/staff/${encodeURIComponent(button.dataset.staffId)}/toggle-status`;
-      document.getElementById('modalToggleButton').textContent = button.dataset.active === 'true' ? 'Desactivar usuario' : 'Activar usuario';
-      const deleteForm = document.getElementById('modalDeleteForm'); deleteForm.action = `/admin/staff/${encodeURIComponent(button.dataset.staffId)}/delete`; deleteForm.dataset.username = button.dataset.username;
+      const toggleButton = document.getElementById('modalToggleButton'); toggleButton.textContent = button.dataset.active === 'true' ? 'Desactivar usuario' : 'Activar usuario'; toggleButton.dataset.action = `/admin/staff/${encodeURIComponent(button.dataset.staffId)}/toggle-status`;
+      const deleteButton = document.getElementById('modalDeleteButton'); deleteButton.dataset.action = `/admin/staff/${encodeURIComponent(button.dataset.staffId)}/delete`; deleteButton.dataset.username = button.dataset.username;
       try {
         const response = await fetch(permissionsEndpoint, {headers: {'Accept': 'application/json'}}); const data = await response.json(); if (!response.ok) throw new Error(data.message || 'No fue posible cargar los permisos.');
         loadedPermissions = data; document.getElementById('permissionsIdentity').textContent = `${data.staff.name} · ${data.staff.role} · ${data.business.name}`;
@@ -661,6 +660,17 @@
         document.getElementById('permissionProfile').value = 'custom';
       }
     });
+    async function submitStaffAction(button, confirmation) {
+      if (confirmation && !window.confirm(confirmation)) return;
+      button.disabled = true;
+      try {
+        const response = await fetch(button.dataset.action, {method: 'POST', headers: {'Accept':'application/json','X-CSRFToken':document.querySelector('meta[name="csrf-token"]').content}});
+        const data = await response.json(); if (!response.ok) throw new Error(data.message || 'No fue posible completar la acción.');
+        window.location.reload();
+      } catch (error) { showPermissionsMessage(error.message, false); button.disabled = false; }
+    }
+    document.getElementById('modalToggleButton').addEventListener('click', (event) => submitStaffAction(event.currentTarget, '¿Confirmas el cambio de estado de este usuario?'));
+    document.getElementById('modalDeleteButton').addEventListener('click', (event) => submitStaffAction(event.currentTarget, `¿Eliminar al usuario ${event.currentTarget.dataset.username}? Esta acción solo se permite si no tiene historial.`));
     permissionsForm.addEventListener('submit', async (event) => {
       event.preventDefault(); const save = document.getElementById('savePermissions'); save.disabled = true; permissionsMessage.classList.add('hidden');
       const payload = {profile: document.getElementById('permissionProfile').value, web_access_enabled: document.getElementById('permissionWebAccess').checked, mobile_access_enabled: document.getElementById('permissionMobileAccess').checked, permissions: [...document.querySelectorAll('input[name="permission"]:checked')].map(input => input.value)};

@@ -49,6 +49,19 @@ class UXImprovementsPhase65TestCase(unittest.TestCase):
         self.assertIn("data-copy-text", html)
         self.assertNotIn("cdnjs.cloudflare.com", html)
         self.assertEqual(self.client.get("/static/icons.svg").status_code, 200)
+        with open("app/static/js/ajax-search.js", encoding="utf-8") as script:
+            ajax_source = script.read()
+        self.assertIn('a[href*="page="]', ajax_source)
+        self.assertNotIn("target.innerHTML", ajax_source)
+
+    def test_staff_management_uses_one_action_and_no_nested_forms(self):
+        self.admin_login()
+        staff = self.manager(self.business, "staff-ui", "staff-ui@example.test")
+        html = self.client.get(f"/admin/business/{self.business.id}?tab=staff").get_data(as_text=True)
+        self.assertIn("Gestionar usuario", html)
+        self.assertIn('id="modalToggleButton"', html)
+        self.assertIn('id="modalDeleteButton"', html)
+        self.assertNotIn('id="modalToggleForm"', html)
 
     def test_customization_defaults_persistence_and_validation(self):
         self.admin_login()

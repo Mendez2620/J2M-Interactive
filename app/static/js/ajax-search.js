@@ -55,7 +55,7 @@
     }));
     form.querySelectorAll('select, input[type="date"]').forEach((input) => input.addEventListener('change', submit));
     target.addEventListener('click', (event) => {
-      const link = event.target.closest('a[href]');
+      const link = event.target.closest('a[href*="page="]');
       if (!link || new URL(link.href).origin !== location.origin) return;
       event.preventDefault(); load(link.href);
     });
