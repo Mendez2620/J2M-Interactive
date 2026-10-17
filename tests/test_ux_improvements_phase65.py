@@ -207,6 +207,17 @@ class UXImprovementsPhase65TestCase(unittest.TestCase):
         self.assertIn('name="password_confirmation"', html)
         self.assertIn('role="dialog" aria-modal="true" aria-labelledby="resetPasswordTitle"', html)
 
+    def test_permissions_modal_focus_is_trapped_and_restored(self):
+        self.admin_login()
+        self.manager(self.business, "focus-user", "focus@example.test")
+        html = self.client.get(f"/admin/business/{self.business.id}?tab=staff").get_data(as_text=True)
+        self.assertIn("permissionsModal.querySelector('[data-close-permissions]').focus()", html)
+        self.assertIn("button.addEventListener('click', closePermissions)", html)
+        self.assertIn("if (permissionsReturnFocus?.isConnected) permissionsReturnFocus.focus()", html)
+        self.assertIn("event.key !== 'Tab'", html)
+        self.assertIn("event.shiftKey && document.activeElement === first", html)
+        self.assertIn("document.activeElement === last", html)
+
     def test_manager_ajax_results_remain_tenant_scoped(self):
         manager = self.manager(self.business, "tenant-manager", "tenant@example.test")
         db.session.add_all([Customer(business_id=self.business.id, full_name="Propio"), Customer(business_id=self.other.id, full_name="Ajeno")]); db.session.commit()

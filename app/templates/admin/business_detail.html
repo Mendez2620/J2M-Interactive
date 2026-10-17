@@ -631,6 +631,16 @@
     let permissionsEndpoint = null;
     let loadedPermissions = null;
 
+    function permissionsFocusableElements() {
+      return [...permissionsModal.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])')]
+        .filter(element => element.offsetParent !== null);
+    }
+    function closePermissions() {
+      permissionsModal.classList.add('hidden');
+      if (permissionsReturnFocus?.isConnected) permissionsReturnFocus.focus();
+      permissionsReturnFocus = null;
+    }
+
     function showPermissionsMessage(message, ok) {
       permissionsMessage.textContent = message;
       permissionsMessage.className = `text-sm rounded-lg p-3 ${ok ? 'bg-emerald-50 text-emerald-800' : 'bg-rose-50 text-rose-800'}`;
@@ -651,6 +661,7 @@
       permissionsReturnFocus = button;
       permissionsEndpoint = `/admin/business/${encodeURIComponent(button.dataset.businessId)}/staff/${encodeURIComponent(button.dataset.staffId)}/permissions`;
       permissionsModal.classList.remove('hidden'); permissionsMessage.classList.add('hidden');
+      permissionsModal.querySelector('[data-close-permissions]').focus();
       document.getElementById('modalResetPassword').onclick = () => openResetModal(button.dataset.staffId, button.dataset.username);
       const toggleButton = document.getElementById('modalToggleButton'); toggleButton.textContent = button.dataset.active === 'true' ? 'Desactivar usuario' : 'Activar usuario'; toggleButton.dataset.action = `/admin/staff/${encodeURIComponent(button.dataset.staffId)}/toggle-status`;
       const deleteButton = document.getElementById('modalDeleteButton'); deleteButton.dataset.action = `/admin/staff/${encodeURIComponent(button.dataset.staffId)}/delete`; deleteButton.dataset.username = button.dataset.username;
@@ -664,11 +675,20 @@
       } catch (error) { showPermissionsMessage(error.message, false); }
     }
     document.querySelectorAll('[data-manage-permissions]').forEach(button => button.addEventListener('click', () => openPermissions(button)));
-    document.querySelectorAll('[data-close-permissions]').forEach(button => button.addEventListener('click', () => permissionsModal.classList.add('hidden')));
+    document.querySelectorAll('[data-close-permissions]').forEach(button => button.addEventListener('click', closePermissions));
     document.addEventListener('keydown', (event) => {
-      if (event.key !== 'Escape') return;
-      if (!document.getElementById('resetPasswordModal').classList.contains('hidden')) closeResetModal();
-      else permissionsModal.classList.add('hidden');
+      if (event.key === 'Escape') {
+        if (!document.getElementById('resetPasswordModal').classList.contains('hidden')) closeResetModal();
+        else if (!permissionsModal.classList.contains('hidden')) closePermissions();
+        return;
+      }
+      if (event.key !== 'Tab' || permissionsModal.classList.contains('hidden')) return;
+      const focusable = permissionsFocusableElements();
+      if (!focusable.length) return;
+      const first = focusable[0]; const last = focusable[focusable.length - 1];
+      if (!permissionsModal.contains(document.activeElement)) { event.preventDefault(); first.focus(); }
+      else if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
     });
     document.getElementById('permissionProfile').addEventListener('change', (event) => {
       if (!loadedPermissions || event.target.value === 'custom') return;
