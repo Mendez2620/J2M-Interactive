@@ -64,7 +64,7 @@
 
     <!-- Filter & Search Toolbar -->
     <div class="bg-white p-4 rounded-xl border border-slate-200 shadow-xs">
-      <form method="GET" action="/admin" class="flex flex-col sm:flex-row gap-3 items-center">
+      <form method="GET" action="/admin" data-ajax-search data-ajax-target="#business-results" class="flex flex-col sm:flex-row gap-3 items-center">
         <!-- Search Input -->
         <div class="relative flex-1 w-full">
           <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400">
@@ -103,7 +103,7 @@
     </div>
 
     <!-- Businesses Main Table -->
-    <div class="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
+    <div id="business-results" class="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden transition-opacity" aria-live="polite">
       <div class="overflow-x-auto">
         <table class="min-w-full divide-y divide-slate-200 text-left text-sm">
           <thead class="bg-slate-50 text-slate-600 text-xs font-semibold uppercase tracking-wider">
@@ -129,9 +129,10 @@
                     </a>
                     <div class="text-xs text-slate-400 mt-0.5 flex items-center space-x-2">
                       <span class="font-mono">/join/{{ b.slug }}</span>
-                      <a href="/join/{{ b.slug }}" target="_blank" class="text-slate-500 hover:text-slate-800" title="Ver página pública">
+                      <a href="{{ public_join_url(b.slug) }}" target="_blank" rel="noopener" class="text-slate-500 hover:text-slate-800" title="Abrir página pública">
                         {{ icon('external-link','icon-sm') }}
                       </a>
+                      <button type="button" data-copy-text="{{ public_join_url(b.slug) }}" class="text-slate-500 hover:text-slate-800" title="Copiar enlace público">Copiar</button>
                     </div>
                   </div>
                 </div>

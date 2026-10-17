@@ -243,8 +243,24 @@ def _portal_destination(staff):
 def manager_login():
     error = None
     status = 200
+    account_choices = None
     if request.method == "POST":
-        identity = (request.form.get("identity") or "").strip()
+        pending = session.get("manager_account_choice") or {}
+        account_id = request.form.get("account_id", type=int)
+        if account_id and pending.get("expires_at", 0) >= datetime.now(timezone.utc).timestamp() and account_id in pending.get("staff_ids", []):
+            staff = db.session.get(Staff, account_id)
+            if (staff and staff.role == "manager" and staff.is_active and staff.business.is_active
+                    and staff.web_access_enabled and staff.business.web_access_enabled):
+                session.pop("manager_account_choice", None)
+                create_manager_browser_session(staff)
+                return redirect(_portal_destination(staff))
+            session.pop("manager_account_choice", None)
+            error, status = "No fue posible iniciar sesión con esas credenciales.", 401
+            return render_template("manager/login.html", error=error, account_choices=None), status
+
+        # ``identity`` remains a compatibility input for older web clients; the
+        # current portal deliberately requests email only.
+        identity = (request.form.get("email") or request.form.get("identity") or "").strip().lower()
         password = request.form.get("password") or ""
         business_slug = (request.form.get("business_slug") or "").strip()
         try:
@@ -255,23 +271,30 @@ def manager_login():
         if status == 200 and reservation is None:
             error, status = "Demasiados intentos. Intenta más tarde.", 429
         elif status == 200:
-            query = Staff.query.join(Staff.business).filter(or_(Staff.username == identity, Staff.email == identity))
+            query = Staff.query.join(Staff.business).filter(
+                or_(func.lower(Staff.email) == identity, Staff.username == identity)
+            )
             if business_slug:
                 query = query.filter(Business.slug == business_slug)
             candidates = query.all() if identity and password else []
-            staff = next((item for item in candidates if item.check_password(password)), None)
-            if (
-                not staff or staff.role != "manager" or not staff.is_active or not staff.business.is_active
-                or not staff.web_access_enabled or not staff.business.web_access_enabled
-            ):
+            matches = [item for item in candidates if item.check_password(password)]
+            eligible = [item for item in matches if item.role == "manager" and item.is_active
+                        and item.business.is_active and item.web_access_enabled and item.business.web_access_enabled]
+            if not eligible:
                 error, status = "No fue posible iniciar sesión con esas credenciales.", 401
-            elif len(candidates) > 1 and not business_slug:
-                error, status = "Indica el identificador del negocio para continuar.", 400
+            elif len(eligible) > 1 and not business_slug:
+                clear_auth_attempts("manager", reservation)
+                session["manager_account_choice"] = {
+                    "staff_ids": [item.id for item in eligible],
+                    "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=5)).timestamp(),
+                }
+                account_choices = eligible
             else:
                 clear_auth_attempts("manager", reservation)
+                staff = eligible[0]
                 create_manager_browser_session(staff)
                 return redirect(_portal_destination(staff))
-    return render_template("manager/login.html", error=error), status
+    return render_template("manager/login.html", error=error, account_choices=account_choices), status
 
 
 @manager_bp.route("/logout", methods=["POST"])
@@ -288,8 +311,10 @@ def _portal_context(active):
 @manager_bp.route("/portal", methods=["GET"])
 @manager_portal_required("view_stats")
 def manager_portal():
-    period = 7 if request.args.get("period") == "7" else 30
-    since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=period)
+    requested_period = request.args.get("period", "7")
+    period = int(requested_period) if requested_period in {"1", "7", "30"} else 7
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    since = now - timedelta(days=period)
     business = g.manager.business
     tx_query = Transaction.query.filter(Transaction.business_id == business.id, Transaction.timestamp >= since)
     transactions = []
@@ -303,7 +328,23 @@ def manager_portal():
     redeemed_points = db.session.query(func.coalesce(func.sum(Transaction.points_amount), 0)).filter_by(business_id=business.id, type="redeem").filter(Transaction.timestamp >= since).scalar()
     earned_stamps = db.session.query(func.coalesce(func.sum(Transaction.stamps_amount), 0)).filter_by(business_id=business.id, type="earn").filter(Transaction.timestamp >= since).scalar()
     redeemed_stamps = db.session.query(func.coalesce(func.sum(Transaction.stamps_amount), 0)).filter_by(business_id=business.id, type="redeem").filter(Transaction.timestamp >= since).scalar()
-    recent_rows = tx_query.with_entities(func.date(Transaction.timestamp), func.count(Transaction.id)).group_by(func.date(Transaction.timestamp)).order_by(func.date(Transaction.timestamp)).all()
+    timestamps = [row[0] for row in tx_query.with_entities(Transaction.timestamp).all()]
+    if period == 1:
+        first_bucket = since.replace(minute=0, second=0, microsecond=0)
+        chart_labels = []
+        chart_values = []
+        for offset in range(25):
+            bucket = first_bucket + timedelta(hours=offset)
+            chart_labels.append(bucket.strftime("%H:00"))
+            chart_values.append(sum(1 for value in timestamps if bucket <= value < bucket + timedelta(hours=1)))
+    else:
+        first_bucket = since.date()
+        chart_labels = []
+        chart_values = []
+        for offset in range(period + 1):
+            bucket = first_bucket + timedelta(days=offset)
+            chart_labels.append(bucket.strftime("%d/%m"))
+            chart_values.append(sum(1 for value in timestamps if value.date() == bucket))
     metrics = {
         "customers": business.customers.count(), "transactions": totals[0],
         "current_points": db.session.query(func.coalesce(func.sum(Customer.current_points), 0)).filter_by(business_id=business.id).scalar(),
@@ -315,7 +356,7 @@ def manager_portal():
         "rewards_available": Customer.query.filter(Customer.business_id == business.id, Customer.current_stamps >= business.stamps_reward_limit).count() if business.loyalty_type == "stamps" else 0,
     }
     return render_template("manager/dashboard.html", metrics=metrics, transactions=transactions,
-                           chart_labels=[str(row[0]) for row in recent_rows], chart_values=[row[1] for row in recent_rows], period=period,
+                           chart_labels=chart_labels, chart_values=chart_values, period=period,
                            **_portal_context("dashboard"))
 
 

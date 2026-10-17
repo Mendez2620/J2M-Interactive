@@ -1,2 +1,39 @@
-{% extends "base.html" %}{% block title %}Acceso de gerente · J2M Interactive{% endblock %}
-{% block content %}<main class="min-h-screen grid lg:grid-cols-2 bg-slate-950"><section class="hidden lg:flex p-14 text-white flex-col justify-between bg-gradient-to-br from-indigo-600 to-slate-950"><div class="text-2xl font-black">J2M Interactive</div><div><h1 class="text-5xl font-extrabold leading-tight">Tu programa de lealtad, bajo control.</h1><p class="text-indigo-100 mt-5 text-lg">Consulta actividad, clientes, movimientos y equipo desde un espacio seguro.</p></div><small class="text-slate-400">Portal exclusivo para gerentes autorizados</small></section><section class="bg-slate-50 flex items-center justify-center p-6"><div class="w-full max-w-md bg-white border rounded-3xl shadow-xl p-8"><div class="w-14 h-14 bg-indigo-600 text-white rounded-2xl grid place-items-center font-black mb-6">J2M</div><h2 class="text-2xl font-extrabold">Bienvenido</h2><p class="text-slate-500 mt-1 mb-6">Ingresa a tu panel de gerente.</p>{% if error %}<div class="bg-rose-50 text-rose-800 rounded-xl p-3 text-sm mb-4">{{ error }}</div>{% endif %}<form method="POST" class="space-y-4"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><div><label class="text-sm font-semibold">Usuario o correo</label><input name="identity" autocomplete="username" required class="mt-1 w-full border rounded-xl px-4 py-3"></div><div><label class="text-sm font-semibold">Identificador del negocio</label><input name="business_slug" autocomplete="organization" placeholder="Solo si tu usuario se repite" class="mt-1 w-full border rounded-xl px-4 py-3"></div><div><label class="text-sm font-semibold">Contraseña</label><input type="password" name="password" autocomplete="current-password" required class="mt-1 w-full border rounded-xl px-4 py-3"></div><button class="w-full bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl py-3 font-bold">Entrar al panel</button></form></div></section></main>{% endblock %}
+{% extends "base.html" %}
+{% block title %}Acceso de gerente · J2M Interactive{% endblock %}
+{% block content %}
+<main class="min-h-screen grid lg:grid-cols-2 bg-slate-950">
+  <section class="hidden lg:flex p-14 text-white flex-col justify-between bg-gradient-to-br from-indigo-600 to-slate-950">
+    <div class="text-2xl font-black">J2M Interactive</div>
+    <div><h1 class="text-5xl font-extrabold leading-tight">Tu programa de lealtad, bajo control.</h1><p class="text-indigo-100 mt-5 text-lg">Consulta actividad, clientes, movimientos y equipo desde un espacio seguro.</p></div>
+    <small class="text-slate-400">Portal exclusivo para gerentes autorizados</small>
+  </section>
+  <section class="bg-slate-50 flex items-center justify-center p-6">
+    <div class="w-full max-w-md bg-white border rounded-3xl shadow-xl p-8">
+      <div class="w-14 h-14 bg-indigo-600 text-white rounded-2xl grid place-items-center font-black mb-6">J2M</div>
+      {% if account_choices %}
+        <h2 class="text-2xl font-extrabold">Elige tu negocio</h2>
+        <p class="text-slate-500 mt-1 mb-6">Tus credenciales son válidas para más de una cuenta.</p>
+        <form method="POST" class="space-y-3">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          {% for staff in account_choices %}
+            <button name="account_id" value="{{ staff.id }}" class="w-full text-left border rounded-xl p-4 hover:border-indigo-500 hover:bg-indigo-50 focus-visible:ring-2 focus-visible:ring-indigo-500">
+              <span class="block font-bold text-slate-900">{{ staff.business.name }}</span>
+              <span class="block text-sm text-slate-500">Continuar como {{ staff.name or staff.username }}</span>
+            </button>
+          {% endfor %}
+        </form>
+      {% else %}
+        <h2 class="text-2xl font-extrabold">Bienvenido</h2>
+        <p class="text-slate-500 mt-1 mb-6">Ingresa a tu panel de gerente.</p>
+        {% if error %}<div role="alert" class="bg-rose-50 text-rose-800 rounded-xl p-3 text-sm mb-4">{{ error }}</div>{% endif %}
+        <form method="POST" class="space-y-4">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <div><label for="login-email" class="text-sm font-semibold">Correo electrónico</label><input id="login-email" type="email" name="email" autocomplete="username" required class="mt-1 field" placeholder="gerente@negocio.com"></div>
+          <div><label for="login-password" class="text-sm font-semibold">Contraseña</label><input id="login-password" type="password" name="password" autocomplete="current-password" required class="mt-1 field"></div>
+          <button class="w-full btn btn-primary py-3">Entrar al panel</button>
+        </form>
+      {% endif %}
+    </div>
+  </section>
+</main>
+{% endblock %}

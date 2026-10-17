@@ -61,11 +61,16 @@ def create_app(config_name=None):
     register_routes(app)
 
     from app.security import csrf_token, validate_csrf, wants_json
-    from app.iconography import icon
+    from app.iconography import contrast_text_color, icon
 
     app.jinja_env.globals["csrf_token"] = csrf_token
     app.jinja_env.globals["csp_nonce"] = lambda: getattr(g, "csp_nonce", "")
     app.jinja_env.globals["icon"] = icon
+    app.jinja_env.globals["contrast_text_color"] = contrast_text_color
+    app.jinja_env.globals["public_join_url"] = lambda slug: (
+        f"{app.config.get('PUBLIC_BASE_URL') or request.url_root.rstrip('/')}"
+        f"/join/{slug}"
+    )
 
     @app.before_request
     def protect_admin_forms():

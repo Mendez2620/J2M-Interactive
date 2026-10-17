@@ -22,6 +22,10 @@ admin_bp = Blueprint("admin", __name__, url_prefix="/admin")
 
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 ALLOWED_IMAGE_FORMATS = {"PNG": "png", "JPEG": "jpg", "WEBP": "webp"}
+VISUAL_THEMES = {"modern", "elegant", "minimal"}
+FONT_STYLES = {"modern", "classic", "geometric"}
+TEXT_SIZES = {"compact", "standard", "large"}
+HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 
 def validate_image(upload):
@@ -119,6 +123,29 @@ def parse_loyalty(data, current=None):
         if not math.isfinite(points) or points <= 0:
             raise ValueError("Los puntos por moneda deben ser un número positivo.")
     return loyalty_type, points, stamps
+
+
+def parse_visual_preferences(data, current=None):
+    """Validate the bounded presentation presets and palette."""
+    values = {
+        "visual_theme": data.get("visual_theme", current.visual_theme if current else "modern"),
+        "font_style": data.get("font_style", current.font_style if current else "modern"),
+        "text_size": data.get("text_size", current.text_size if current else "standard"),
+        "primary_color": data.get("primary_color", current.primary_color if current else "#1E3A8A"),
+        "secondary_color": data.get("secondary_color", current.secondary_color if current else "#FFFFFF"),
+    }
+    values = {key: str(value).strip().lower() for key, value in values.items()}
+    if values["visual_theme"] not in VISUAL_THEMES:
+        raise ValueError("El tema visual seleccionado no es válido.")
+    if values["font_style"] not in FONT_STYLES:
+        raise ValueError("El estilo tipográfico seleccionado no es válido.")
+    if values["text_size"] not in TEXT_SIZES:
+        raise ValueError("El tamaño de texto seleccionado no es válido.")
+    for key in ("primary_color", "secondary_color"):
+        if not HEX_COLOR_RE.fullmatch(values[key]):
+            raise ValueError("Los colores deben usar el formato hexadecimal #RRGGBB.")
+        values[key] = values[key].upper()
+    return values
 
 
 def calculate_age_distribution():
@@ -252,10 +279,9 @@ def create_business():
 
     try:
         loyalty_type, points_per_currency, stamps_reward_limit = parse_loyalty(data)
+        visual = parse_visual_preferences(data)
     except ValueError as exc:
         return jsonify({"status": "error", "message": str(exc)}), 400
-    primary_color = data.get("primary_color") or "#1E3A8A"
-    secondary_color = data.get("secondary_color") or "#FFFFFF"
     logo_url = data.get("logo_url") or None
     latitude = float(data.get("latitude")) if data.get("latitude") else None
     longitude = float(data.get("longitude")) if data.get("longitude") else None
@@ -279,8 +305,11 @@ def create_business():
         logo_url=logo_url,
         logo_path=logo_path,
         cover_path=cover_path,
-        primary_color=primary_color,
-        secondary_color=secondary_color,
+        primary_color=visual["primary_color"],
+        secondary_color=visual["secondary_color"],
+        visual_theme=visual["visual_theme"],
+        font_style=visual["font_style"],
+        text_size=visual["text_size"],
         loyalty_type=loyalty_type,
         points_per_currency=points_per_currency,
         stamps_reward_limit=stamps_reward_limit,
@@ -356,6 +385,11 @@ def update_business(business_id: int):
 
     data = request.get_json(silent=True) or request.form.to_dict()
 
+    try:
+        visual = parse_visual_preferences(data, business)
+    except ValueError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 400
+
     if "name" in data and data["name"].strip():
         business.name = data["name"].strip()
     if "slug" in data and data["slug"].strip():
@@ -371,10 +405,11 @@ def update_business(business_id: int):
             business.category_id = None
     if "logo_url" in data:
         business.logo_url = data["logo_url"].strip() or None
-    if "primary_color" in data and data["primary_color"].strip():
-        business.primary_color = data["primary_color"].strip()
-    if "secondary_color" in data and data["secondary_color"].strip():
-        business.secondary_color = data["secondary_color"].strip()
+    business.primary_color = visual["primary_color"]
+    business.secondary_color = visual["secondary_color"]
+    business.visual_theme = visual["visual_theme"]
+    business.font_style = visual["font_style"]
+    business.text_size = visual["text_size"]
     if "latitude" in data:
         try:
             business.latitude = float(data["latitude"]) if str(data["latitude"]).strip() != "" else None
@@ -601,6 +636,11 @@ def delete_staff(staff_id: int):
     staff = db.session.get(Staff, staff_id)
     if not staff:
         return jsonify({"status": "error", "message": "Usuario no encontrado"}), 404
+    if staff.transactions.count():
+        return jsonify({
+            "status": "error",
+            "message": "Este usuario conserva movimientos históricos. Desactívalo para preservar la trazabilidad.",
+        }), 409
 
     business_id = staff.business_id
     previous = staff_access_state(staff) | {"username": staff.username, "role": staff.role}

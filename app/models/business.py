@@ -17,6 +17,9 @@ class Business(db.Model):
     cover_path = db.Column(db.String(255), nullable=True)
     primary_color = db.Column(db.String(7), default="#000000", nullable=False)
     secondary_color = db.Column(db.String(7), default="#FFFFFF", nullable=False)
+    visual_theme = db.Column(db.String(20), default="modern", server_default="modern", nullable=False)
+    font_style = db.Column(db.String(20), default="modern", server_default="modern", nullable=False)
+    text_size = db.Column(db.String(20), default="standard", server_default="standard", nullable=False)
     loyalty_type = db.Column(db.String(20), default="stamps", nullable=False)  # 'stamps' or 'points'
     points_per_currency = db.Column(db.Float, default=1.0, nullable=False)
     stamps_reward_limit = db.Column(db.Integer, default=10, nullable=False)
@@ -58,6 +61,9 @@ class Business(db.Model):
             "cover_path": self.cover_path,
             "primary_color": self.primary_color,
             "secondary_color": self.secondary_color,
+            "visual_theme": self.visual_theme,
+            "font_style": self.font_style,
+            "text_size": self.text_size,
             "loyalty_type": self.loyalty_type,
             "points_per_currency": self.points_per_currency,
             "stamps_reward_limit": self.stamps_reward_limit,
