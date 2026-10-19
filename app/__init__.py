@@ -6,7 +6,12 @@ import secrets
 import time
 from datetime import datetime, timezone
 from flask import Flask, g, jsonify, request
-from app.config import config_by_name
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import ArgumentError
+from app.config import (
+    POSTGRES_TLS_MODES, config_by_name, normalize_database_url,
+    postgres_engine_options,
+)
 from app.extensions import db, migrate, cors
 from app.routes import register_routes
 
@@ -38,8 +43,25 @@ def create_app(config_name=None):
             raise RuntimeError("Producción requiere CORS_ORIGINS explícito.")
         if app.config.get("RECOVERY_MAIL_BACKEND") == "memory":
             raise RuntimeError("Producción no permite el proveedor de correo en memoria.")
+        raw_database_url = os.getenv("DATABASE_URL", "").strip()
+        if not raw_database_url:
+            raise RuntimeError("Producción requiere una DATABASE_URL PostgreSQL explícita.")
+        normalized_database_url = normalize_database_url(raw_database_url)
+        try:
+            database_url = make_url(normalized_database_url)
+        except (ArgumentError, ValueError):
+            raise RuntimeError("DATABASE_URL debe ser una URL PostgreSQL válida en producción.") from None
+        if database_url.get_backend_name() != "postgresql":
+            raise RuntimeError("Producción requiere PostgreSQL; SQLite no está permitido.")
+        configured_sslmode = os.getenv("DATABASE_SSLMODE", "require").strip().lower()
+        url_sslmode = str(database_url.query.get("sslmode", "")).strip().lower()
+        if configured_sslmode not in POSTGRES_TLS_MODES or (url_sslmode and url_sslmode not in POSTGRES_TLS_MODES):
+            raise RuntimeError("Producción requiere TLS PostgreSQL con sslmode require, verify-ca o verify-full.")
+        effective_sslmode = url_sslmode or configured_sslmode
+        app.config["SQLALCHEMY_DATABASE_URI"] = normalized_database_url
+        app.config["SQLALCHEMY_ENGINE_OPTIONS"] = postgres_engine_options(effective_sslmode)
         public_base_url = app.config.get("PUBLIC_BASE_URL", "")
-        if public_base_url and not public_base_url.startswith("https://"):
+        if not public_base_url or not public_base_url.startswith("https://"):
             raise RuntimeError("PUBLIC_BASE_URL debe utilizar HTTPS en producción.")
         proxy_count = app.config.get("TRUSTED_PROXY_COUNT", 0)
         if proxy_count < 0 or proxy_count > 10:
@@ -47,6 +69,12 @@ def create_app(config_name=None):
         if proxy_count:
             from werkzeug.middleware.proxy_fix import ProxyFix
             app.wsgi_app = ProxyFix(app.wsgi_app, x_for=proxy_count, x_proto=proxy_count, x_host=proxy_count)
+        upload_backend = os.getenv(
+            "UPLOAD_STORAGE_BACKEND", app.config.get("UPLOAD_STORAGE_BACKEND", "disabled")
+        ).strip().lower()
+        if upload_backend != "disabled":
+            raise RuntimeError("Producción requiere UPLOAD_STORAGE_BACKEND=disabled hasta disponer de almacenamiento persistente.")
+        app.config["UPLOAD_STORAGE_BACKEND"] = upload_backend
 
     # Initialize extensions
     db.init_app(app)

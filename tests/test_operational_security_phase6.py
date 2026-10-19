@@ -157,9 +157,14 @@ class OperationalSecurityPhase6TestCase(unittest.TestCase):
     def test_production_csp_local_assets_and_proxy_trust(self):
         env = {"SECRET_KEY": "session-secret-with-more-than-32-characters-a",
                "JWT_SECRET_KEY": "jwt-secret-with-more-than-32-characters-b",
-               "CORS_ORIGINS": "https://app.example.test"}
+               "CORS_ORIGINS": "https://app.example.test",
+               "PUBLIC_BASE_URL": "https://app.example.test",
+               "DATABASE_URL": "postgresql://user:password@db.example.test:5432/postgres",
+               "DATABASE_SSLMODE": "require",
+               "UPLOAD_STORAGE_BACKEND": "disabled"}
         with patch.dict(os.environ, env, clear=False), \
              patch.object(ProductionConfig, "SQLALCHEMY_DATABASE_URI", self.uri), \
+             patch.object(ProductionConfig, "PUBLIC_BASE_URL", "https://app.example.test"), \
              patch.object(ProductionConfig, "TRUSTED_PROXY_COUNT", 0), \
              patch.object(ProductionConfig, "RECOVERY_MAIL_BACKEND", "smtp"):
             production = create_app("production")
@@ -180,6 +185,7 @@ class OperationalSecurityPhase6TestCase(unittest.TestCase):
 
         with patch.dict(os.environ, env, clear=False), \
              patch.object(ProductionConfig, "SQLALCHEMY_DATABASE_URI", self.uri), \
+             patch.object(ProductionConfig, "PUBLIC_BASE_URL", "https://app.example.test"), \
              patch.object(ProductionConfig, "TRUSTED_PROXY_COUNT", 1), \
              patch.object(ProductionConfig, "RECOVERY_MAIL_BACKEND", "smtp"):
             proxied = create_app("production")
@@ -195,9 +201,14 @@ class OperationalSecurityPhase6TestCase(unittest.TestCase):
     def test_production_rejects_invalid_operational_configuration(self):
         env = {"SECRET_KEY": "session-secret-with-more-than-32-characters-a",
                "JWT_SECRET_KEY": "jwt-secret-with-more-than-32-characters-b",
-               "CORS_ORIGINS": "https://app.example.test"}
+               "CORS_ORIGINS": "https://app.example.test",
+               "PUBLIC_BASE_URL": "https://app.example.test",
+               "DATABASE_URL": "postgresql://user:password@db.example.test:5432/postgres",
+               "DATABASE_SSLMODE": "require",
+               "UPLOAD_STORAGE_BACKEND": "disabled"}
         cases = (
             ({"RECOVERY_MAIL_BACKEND": "memory"}, "correo en memoria"),
+            ({"PUBLIC_BASE_URL": ""}, "HTTPS"),
             ({"PUBLIC_BASE_URL": "http://app.example.test"}, "HTTPS"),
             ({"TRUSTED_PROXY_COUNT": 11}, "TRUSTED_PROXY_COUNT"),
         )
@@ -205,7 +216,7 @@ class OperationalSecurityPhase6TestCase(unittest.TestCase):
             with self.subTest(overrides=overrides), patch.dict(os.environ, env, clear=False), \
                  patch.object(ProductionConfig, "SQLALCHEMY_DATABASE_URI", self.uri), \
                  patch.object(ProductionConfig, "RECOVERY_MAIL_BACKEND", overrides.get("RECOVERY_MAIL_BACKEND", "smtp")), \
-                 patch.object(ProductionConfig, "PUBLIC_BASE_URL", overrides.get("PUBLIC_BASE_URL", "")), \
+                 patch.object(ProductionConfig, "PUBLIC_BASE_URL", overrides.get("PUBLIC_BASE_URL", "https://app.example.test")), \
                  patch.object(ProductionConfig, "TRUSTED_PROXY_COUNT", overrides.get("TRUSTED_PROXY_COUNT", 0)):
                 with self.assertRaisesRegex(RuntimeError, message):
                     create_app("production")

@@ -59,6 +59,9 @@ def validate_image(upload):
 
 def persist_images(files):
     """Validate the whole batch before writing, preventing partial orphan files."""
+    has_uploads = any(files.get(field) and files.get(field).filename for field in ("logo_file", "cover_file"))
+    if has_uploads and current_app.config.get("UPLOAD_STORAGE_BACKEND", "local") != "local":
+        raise RuntimeError("Las subidas están deshabilitadas hasta configurar almacenamiento persistente.")
     prepared = {
         field: validate_image(files.get(field))
         for field in ("logo_file", "cover_file")
@@ -295,8 +298,9 @@ def create_business():
         image_paths, created_files = persist_images(files) if files else ({}, [])
         logo_path = image_paths.get("logo_file")
         cover_path = image_paths.get("cover_file")
-    except ValueError as exc:
-        return jsonify({"status": "error", "message": str(exc)}), 400
+    except (ValueError, RuntimeError) as exc:
+        status = 503 if isinstance(exc, RuntimeError) else 400
+        return jsonify({"status": "error", "message": str(exc)}), status
 
     business = Business(
         name=name,
@@ -447,9 +451,10 @@ def update_business(business_id: int):
             image_paths, created_files = persist_images(request.files)
             logo_path = image_paths.get("logo_file")
             cover_path = image_paths.get("cover_file")
-        except ValueError as exc:
+        except (ValueError, RuntimeError) as exc:
             db.session.rollback()
-            return jsonify({"status": "error", "message": str(exc)}), 400
+            status = 503 if isinstance(exc, RuntimeError) else 400
+            return jsonify({"status": "error", "message": str(exc)}), status
         if logo_path:
             business.logo_path = logo_path
         if cover_path:
