@@ -5,8 +5,9 @@ Esta guía prepara `j2m-web` para Railway y PostgreSQL de Supabase. No despliega
 ## Arquitectura preparada
 
 - Railway construye el `Dockerfile`: Node 22 ejecuta `npm ci` y `npm run build:css`; la imagen final usa Python 3.12, `requirements.lock` y Gunicorn.
-- Gunicorn escucha en `0.0.0.0:$PORT`. Railway comprueba `/api/ready`, que hace `SELECT 1`; `/api/health` solo confirma que el proceso responde.
-- `DATABASE_URL` apunta al Session pooler de Supabase en el puerto 5432. SQLAlchemy usa un pool conservador (3 conexiones, 2 de desborde), `pool_pre_ping` y TLS obligatorio.
+- Gunicorn escucha en `0.0.0.0:$PORT`. `/api/health` solo confirma que el proceso responde; `/api/ready` hace un `SELECT 1` y confirma conectividad mínima con la base.
+- Producción no arranca sin una `DATABASE_URL` PostgreSQL explícita. La URL debe apuntar al Session pooler de Supabase en el puerto 5432; SQLite queda limitado a desarrollo y pruebas.
+- SQLAlchemy usa un pool conservador (3 conexiones, 2 de desborde), `pool_pre_ping` y un modo TLS obligatorio: `require`, `verify-ca` o `verify-full`. `require` cifra la conexión, pero no verifica por sí solo la identidad del servidor.
 - Las subidas se deshabilitan por defecto en producción. El sistema no debe prometer persistencia en el disco efímero de Railway.
 - Las migraciones son un paso manual controlado; ninguna petición ni arranque de Gunicorn ejecuta Alembic.
 
@@ -25,7 +26,7 @@ Railway inyecta `PORT`; no configure un puerto fijo. El health check usa `/api/r
 1. En Supabase abra **Connect** y copie la cadena de **Session pooler**; no construya manualmente el host ni el usuario.
 2. Verifique que el host sea el pooler compartido, que el usuario incluya el identificador del proyecto y que el puerto sea `5432`.
 3. Sustituya la contraseña solo dentro de la variable privada `DATABASE_URL` de Railway. Codifique caracteres reservados de la contraseña para una URL.
-4. Añada `sslmode=require` a la URL o mantenga `DATABASE_SSLMODE=require`. En Supabase active **Enforce SSL**. Para verificación completa de CA/hostname se requiere instalar el certificado de Supabase en la imagen antes de cambiar a `verify-full`; no se afirma que eso esté implementado en esta fase.
+4. Añada `sslmode=require` a la URL o mantenga `DATABASE_SSLMODE=require`. Los modos `disable`, `allow` y `prefer` hacen fallar el arranque de producción. En Supabase active **Enforce SSL**. Para verificar CA y hostname se requiere instalar el certificado real de Supabase antes de usar `verify-full`; esta fase no incorpora certificados ni afirma haber validado esa modalidad en Railway.
 5. No pegue la URL en GitHub, logs, tickets, capturas ni comandos que queden en historial.
 
 La documentación oficial de Supabase confirma que el Session pooler compartido utiliza puerto 5432 y es compatible con IPv4. El pool pequeño evita consumir innecesariamente las conexiones del plan gratuito.
@@ -66,7 +67,7 @@ Recomendadas/ajustables:
 - `JWT_ISSUER`
 - `JWT_AUDIENCE`
 
-Use `FLASK_ENV=production`, `SESSION_COOKIE_SECURE=true`, `UPLOAD_STORAGE_BACKEND=disabled` y secretos independientes generados con suficiente entropía. `CORS_ORIGINS` debe contener únicamente los orígenes HTTPS necesarios, nunca `*`.
+Use `FLASK_ENV=production`, `SESSION_COOKIE_SECURE=true`, `DATABASE_SSLMODE=require`, `UPLOAD_STORAGE_BACKEND=disabled` y secretos independientes generados con suficiente entropía. El arranque rechaza una base ausente/no PostgreSQL, TLS opcional y almacenamiento local. `CORS_ORIGINS` debe contener únicamente los orígenes HTTPS necesarios, nunca `*`.
 
 Railway termina TLS delante de la aplicación. Configure `TRUSTED_PROXY_COUNT=1` únicamente después de verificar que el edge de Railway es el único proxy y que reemplaza los encabezados reenviados; si la topología cambia, ajuste el número exacto. No aumente el valor para corregir una URL incorrecta.
 
@@ -82,6 +83,8 @@ flask --app run.py db current
 
 El resultado final esperado es `e2f3a4b5c6d7 (head)`. No ejecute `seed-db`, `db.drop_all()`, downgrades ni scripts de semillas. No añada `db upgrade` al `CMD`, al health check ni a una petición web: dos réplicas podrían intentar migrar simultáneamente.
 
+Un `/api/ready` con estado `200` solo demuestra que `SELECT 1` funciona. No demuestra que las migraciones estén aplicadas. Confirme `flask --app run.py db current`, ejecute el upgrade controlado y vuelva a confirmar el head antes de abrir los paneles.
+
 Después, cree un administrador ficticio de staging mediante una ejecución interactiva y no registre su contraseña:
 
 ```sh
@@ -91,14 +94,14 @@ flask --app run.py create-platform-admin
 ## 5. Verificación controlada
 
 1. Consulte `/api/health`: debe responder `200` sin probar la base.
-2. Consulte `/api/ready`: debe responder `200`; una base inaccesible debe producir `503`.
+2. Consulte `/api/ready`: debe responder `200`; una base inaccesible debe producir `503`. Después verifique Alembic por separado, ya que readiness no valida el esquema.
 3. Revise que las cookies tengan `Secure`, `HttpOnly` y `SameSite=Lax`, que HSTS/CSP sigan presentes y que CORS rechace orígenes no configurados.
 4. Autentique únicamente cuentas ficticias y compruebe aislamiento entre negocios, CSRF, revocación y rate limiting.
 5. Consulte logs por `X-Request-ID`. No imprima variables, cuerpos, cabeceras `Authorization`, cookies, códigos de recuperación, JWT ni cadenas de conexión.
 
 ## 6. Logos y portadas
 
-El filesystem del contenedor Railway no es almacenamiento permanente: un rebuild, redeploy o cambio de réplica puede perder archivos. Por ello producción arranca con subidas deshabilitadas y devuelve un error explícito si se intenta adjuntar una imagen.
+El filesystem del contenedor Railway no es almacenamiento permanente: un rebuild, redeploy o cambio de réplica puede perder archivos. Por ello producción exige `UPLOAD_STORAGE_BACKEND=disabled`, rechaza `local` al arrancar y devuelve un error explícito si se intenta adjuntar una imagen. Desarrollo y pruebas conservan almacenamiento local.
 
 Antes de habilitarlas debe implementarse y probarse un adaptador de almacenamiento persistente, por ejemplo Supabase Storage con un bucket dedicado, políticas de acceso mínimas, nombres aleatorios, validación Pillow antes de subir, eliminación compensatoria ante rollback y URLs compatibles con Apple/Google Wallet. También se necesita migrar los archivos existentes, validar restauración y probar fallos parciales. No cambie `UPLOAD_STORAGE_BACKEND` a `local` en Railway.
 
@@ -113,6 +116,7 @@ Antes de habilitarlas debe implementarse y probarse un adaptador de almacenamien
 ## Pendientes antes de tráfico real
 
 - Probar esta versión contra el PostgreSQL real de Supabase; la suite local no lo sustituye.
+- Ejecutar una imagen correctamente construida en Railway y verificarla allí; el build Docker de CI no demuestra que el servicio ya se haya probado o desplegado en Railway.
 - Verificar la cadena, TLS, topología real de proxy, DNS y dominio público dentro de Railway.
 - Implementar almacenamiento persistente antes de admitir logos o portadas.
 - Configurar SMTP real, respaldos/restauración, monitoreo y credenciales Wallet; los modos mock no equivalen a emisión real.

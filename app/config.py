@@ -8,6 +8,32 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Load environment variables from .env file
 load_dotenv(BASE_DIR / ".env")
 
+POSTGRES_TLS_MODES = frozenset({"require", "verify-ca", "verify-full"})
+
+
+def normalize_database_url(value):
+    """Normalize common PostgreSQL schemes to the installed psycopg2 driver."""
+    if value.startswith("postgres://"):
+        return value.replace("postgres://", "postgresql+psycopg2://", 1)
+    if value.startswith("postgresql://"):
+        return value.replace("postgresql://", "postgresql+psycopg2://", 1)
+    return value
+
+
+def postgres_engine_options(sslmode=None):
+    """Return conservative options suitable for a small pooled database."""
+    return {
+        "pool_pre_ping": True,
+        "pool_size": int(os.getenv("DATABASE_POOL_SIZE", 3)),
+        "max_overflow": int(os.getenv("DATABASE_MAX_OVERFLOW", 2)),
+        "pool_timeout": int(os.getenv("DATABASE_POOL_TIMEOUT", 30)),
+        "pool_recycle": int(os.getenv("DATABASE_POOL_RECYCLE", 300)),
+        "connect_args": {
+            "sslmode": sslmode or os.getenv("DATABASE_SSLMODE", "require").lower(),
+            "connect_timeout": int(os.getenv("DATABASE_CONNECT_TIMEOUT", 10)),
+        },
+    }
+
 
 class Config:
     """Base application configuration."""
@@ -18,25 +44,12 @@ class Config:
         "DATABASE_URL", f"sqlite:///{BASE_DIR / 'j2m_loyalty.db'}"
     )
     # If DATABASE_URL starts with postgres:// (e.g. from Heroku/older providers), fix to postgresql://
-    if SQLALCHEMY_DATABASE_URI.startswith("postgres://"):
-        SQLALCHEMY_DATABASE_URI = SQLALCHEMY_DATABASE_URI.replace(
-            "postgres://", "postgresql://", 1
-        )
+    SQLALCHEMY_DATABASE_URI = normalize_database_url(SQLALCHEMY_DATABASE_URI)
 
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     SQLALCHEMY_ENGINE_OPTIONS = (
-        {
-            "pool_pre_ping": True,
-            "pool_size": int(os.getenv("DATABASE_POOL_SIZE", 3)),
-            "max_overflow": int(os.getenv("DATABASE_MAX_OVERFLOW", 2)),
-            "pool_timeout": int(os.getenv("DATABASE_POOL_TIMEOUT", 30)),
-            "pool_recycle": int(os.getenv("DATABASE_POOL_RECYCLE", 300)),
-            "connect_args": {
-                "sslmode": os.getenv("DATABASE_SSLMODE", "require"),
-                "connect_timeout": int(os.getenv("DATABASE_CONNECT_TIMEOUT", 10)),
-            },
-        }
-        if SQLALCHEMY_DATABASE_URI.startswith("postgresql://")
+        postgres_engine_options()
+        if SQLALCHEMY_DATABASE_URI.startswith("postgresql")
         else {}
     )
     

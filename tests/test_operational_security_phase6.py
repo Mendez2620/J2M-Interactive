@@ -158,7 +158,10 @@ class OperationalSecurityPhase6TestCase(unittest.TestCase):
         env = {"SECRET_KEY": "session-secret-with-more-than-32-characters-a",
                "JWT_SECRET_KEY": "jwt-secret-with-more-than-32-characters-b",
                "CORS_ORIGINS": "https://app.example.test",
-               "PUBLIC_BASE_URL": "https://app.example.test"}
+               "PUBLIC_BASE_URL": "https://app.example.test",
+               "DATABASE_URL": "postgresql://user:password@db.example.test:5432/postgres",
+               "DATABASE_SSLMODE": "require",
+               "UPLOAD_STORAGE_BACKEND": "disabled"}
         with patch.dict(os.environ, env, clear=False), \
              patch.object(ProductionConfig, "SQLALCHEMY_DATABASE_URI", self.uri), \
              patch.object(ProductionConfig, "PUBLIC_BASE_URL", "https://app.example.test"), \
@@ -199,7 +202,10 @@ class OperationalSecurityPhase6TestCase(unittest.TestCase):
         env = {"SECRET_KEY": "session-secret-with-more-than-32-characters-a",
                "JWT_SECRET_KEY": "jwt-secret-with-more-than-32-characters-b",
                "CORS_ORIGINS": "https://app.example.test",
-               "PUBLIC_BASE_URL": "https://app.example.test"}
+               "PUBLIC_BASE_URL": "https://app.example.test",
+               "DATABASE_URL": "postgresql://user:password@db.example.test:5432/postgres",
+               "DATABASE_SSLMODE": "require",
+               "UPLOAD_STORAGE_BACKEND": "disabled"}
         cases = (
             ({"RECOVERY_MAIL_BACKEND": "memory"}, "correo en memoria"),
             ({"PUBLIC_BASE_URL": ""}, "HTTPS"),
