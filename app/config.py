@@ -24,6 +24,21 @@ class Config:
         )
 
     SQLALCHEMY_TRACK_MODIFICATIONS = False
+    SQLALCHEMY_ENGINE_OPTIONS = (
+        {
+            "pool_pre_ping": True,
+            "pool_size": int(os.getenv("DATABASE_POOL_SIZE", 3)),
+            "max_overflow": int(os.getenv("DATABASE_MAX_OVERFLOW", 2)),
+            "pool_timeout": int(os.getenv("DATABASE_POOL_TIMEOUT", 30)),
+            "pool_recycle": int(os.getenv("DATABASE_POOL_RECYCLE", 300)),
+            "connect_args": {
+                "sslmode": os.getenv("DATABASE_SSLMODE", "require"),
+                "connect_timeout": int(os.getenv("DATABASE_CONNECT_TIMEOUT", 10)),
+            },
+        }
+        if SQLALCHEMY_DATABASE_URI.startswith("postgresql://")
+        else {}
+    )
     
     # CORS
     CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*")
@@ -56,6 +71,7 @@ class Config:
     SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "true").lower() == "true"
     # Two 5 MB images plus multipart form overhead.
     MAX_CONTENT_LENGTH = int(os.getenv("MAX_CONTENT_LENGTH", 12 * 1024 * 1024))
+    UPLOAD_STORAGE_BACKEND = os.getenv("UPLOAD_STORAGE_BACKEND", "local").lower()
     PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
     SESSION_COOKIE_HTTPONLY = True
     SESSION_COOKIE_SAMESITE = "Lax"
@@ -76,6 +92,9 @@ class ProductionConfig(Config):
     PREFERRED_URL_SCHEME = "https"
     RECOVERY_MAIL_BACKEND = os.getenv("RECOVERY_MAIL_BACKEND", "smtp")
     LOG_REQUESTS = True
+    # Railway's filesystem is ephemeral. Uploads remain disabled until a
+    # persistent object-storage adapter is implemented and verified.
+    UPLOAD_STORAGE_BACKEND = os.getenv("UPLOAD_STORAGE_BACKEND", "disabled").lower()
 
 
 class TestingConfig(Config):

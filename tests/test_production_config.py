@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import patch
 
 from app import create_app
+from app.config import ProductionConfig
 
 
 class ProductionConfigTestCase(unittest.TestCase):
@@ -22,7 +23,10 @@ class ProductionConfigTestCase(unittest.TestCase):
     def test_production_forces_debug_off_with_robust_secret(self):
         with patch.dict(os.environ, {"SECRET_KEY": "a-robust-production-secret-key-with-entropy-123",
                                     "JWT_SECRET_KEY": "another-independent-jwt-key-with-entropy-456",
-                                    "CORS_ORIGINS": "https://app.example.com", "FLASK_DEBUG": "true"}, clear=False):
+                                    "CORS_ORIGINS": "https://app.example.com",
+                                    "PUBLIC_BASE_URL": "https://app.example.com",
+                                    "FLASK_DEBUG": "true"}, clear=False), \
+             patch.object(ProductionConfig, "PUBLIC_BASE_URL", "https://app.example.com"):
             app = create_app("production")
             self.assertFalse(app.debug)
             client = app.test_client()

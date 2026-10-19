@@ -39,7 +39,7 @@ def create_app(config_name=None):
         if app.config.get("RECOVERY_MAIL_BACKEND") == "memory":
             raise RuntimeError("Producción no permite el proveedor de correo en memoria.")
         public_base_url = app.config.get("PUBLIC_BASE_URL", "")
-        if public_base_url and not public_base_url.startswith("https://"):
+        if not public_base_url or not public_base_url.startswith("https://"):
             raise RuntimeError("PUBLIC_BASE_URL debe utilizar HTTPS en producción.")
         proxy_count = app.config.get("TRUSTED_PROXY_COUNT", 0)
         if proxy_count < 0 or proxy_count > 10:
@@ -47,6 +47,8 @@ def create_app(config_name=None):
         if proxy_count:
             from werkzeug.middleware.proxy_fix import ProxyFix
             app.wsgi_app = ProxyFix(app.wsgi_app, x_for=proxy_count, x_proto=proxy_count, x_host=proxy_count)
+        if app.config.get("UPLOAD_STORAGE_BACKEND") not in {"disabled", "local"}:
+            raise RuntimeError("UPLOAD_STORAGE_BACKEND debe ser 'disabled' o 'local'.")
 
     # Initialize extensions
     db.init_app(app)
