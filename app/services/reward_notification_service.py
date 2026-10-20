@@ -1,17 +1,11 @@
 import logging
-from app.services import GoogleWalletService, AppleWalletService
+from app.services import AppleWalletService
 
 logger = logging.getLogger(__name__)
 
 
 class RewardNotificationService:
-    """Thin wrapper to notify both Google and Apple wallets about a ready reward.
-
-    The service is deliberately simple: it attempts to update the customer's
-    loyalty object in Google Wallet and sends a silent push notification to
-    Apple Wallet devices. Any exception is caught and logged – the caller does
-    not need to handle failures because reward delivery is best‑effort.
-    """
+    """Notify Apple devices; Google balance updates use the persistent outbox."""
 
     def send_reward_ready(self, customer, business) -> bool:
         """Notify the customer that a reward is ready.
@@ -24,15 +18,6 @@ class RewardNotificationService:
             bool: ``True`` if at least one notification attempt succeeded.
         """
         notified = False
-        try:
-            # Update Google Wallet loyalty object – this method returns a dict
-            # with a ``status`` key. In mock mode it always succeeds.
-            google_result = GoogleWalletService().update_loyalty_object(customer)
-            logger.info("Google Wallet reward sync result: %s", google_result)
-            notified = True
-        except Exception as e:
-            logger.exception("Failed to sync reward to Google Wallet: %s", e)
-
         try:
             # Apple push – we reuse the QR code token as the authentication token.
             # The service method sends a silent APNs notification.

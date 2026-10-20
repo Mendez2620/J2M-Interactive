@@ -11,6 +11,7 @@ import requests
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from flask import current_app, has_app_context
+from google.auth.exceptions import RefreshError, TransportError
 from google.auth.transport.requests import AuthorizedSession
 from google.oauth2 import service_account
 
@@ -132,8 +133,6 @@ class GoogleWalletService:
         if logo_uri:
             result["programLogo"] = {"sourceUri": {"uri": logo_uri}, "contentDescription": {
                 "defaultValue": {"language": "es-419", "value": f"Logo {business.name}"}}}
-        if business.latitude is not None and business.longitude is not None:
-            result["locations"] = [{"latitude": float(business.latitude), "longitude": float(business.longitude)}]
         return result
 
     def _loyalty_points(self, customer):
@@ -155,14 +154,15 @@ class GoogleWalletService:
         }
         if business.wallet_terms:
             result["textModulesData"].append({"id": "terms", "header": "Términos", "body": business.wallet_terms})
-        if business.latitude is not None and business.longitude is not None:
-            result["locations"] = [{"latitude": float(business.latitude), "longitude": float(business.longitude)}]
         return result
 
     def _request(self, method, resource, *, body=None):
         try:
             response = self.http.request(method, f"{self.API_BASE_URL}/{resource}", json=body, timeout=10)
-        except requests.RequestException:
+        except RefreshError:
+            logger.warning("google_wallet_api_error event=authentication_failure")
+            raise GoogleWalletAPIError(status_code=401, retryable=False) from None
+        except (TransportError, requests.RequestException):
             logger.warning("google_wallet_api_error event=network_failure")
             raise GoogleWalletAPIError(retryable=True) from None
         if response.status_code in (200, 201, 204):
@@ -197,14 +197,26 @@ class GoogleWalletService:
 
     def create_jwt_pass(self, customer, origins=None) -> Tuple[str, str]:
         self._require_enabled()
-        if self.mode == "real":
-            self.ensure_resources(customer)
         if origins is None:
             base = self._config("PUBLIC_BASE_URL", "")
             if self.mode == "real" and (not base or not base.startswith("https://")):
                 raise GoogleWalletConfigurationError("PUBLIC_BASE_URL HTTPS es obligatoria para Google Wallet real.")
             origins = [base] if base else ["http://localhost:5000"]
-        payload_data = ({"loyaltyObjects": [{"id": self.get_object_id(customer)}]} if self.mode == "real" else {
+        if not isinstance(origins, list) or not origins:
+            raise GoogleWalletConfigurationError("origins de Google Wallet inválido.")
+        if self.mode == "real":
+            for origin in origins:
+                parsed = urlparse(origin) if isinstance(origin, str) else None
+                if (not parsed or parsed.scheme != "https" or not parsed.netloc or
+                        parsed.username or parsed.password or parsed.path not in ("", "/") or
+                        parsed.params or parsed.query or parsed.fragment):
+                    raise GoogleWalletConfigurationError("origins de Google Wallet inválido.")
+        if self.mode == "real":
+            self.ensure_resources(customer)
+        payload_data = ({"loyaltyObjects": [{
+            "id": self.get_object_id(customer),
+            "classId": self.get_class_id(customer.business),
+        }]} if self.mode == "real" else {
             "loyaltyClasses": [self.create_or_update_class(customer.business)],
             "loyaltyObjects": [self.create_loyalty_object(customer)]})
         claims = {"iss": self.sa_email, "aud": "google", "typ": "savetowallet", "iat": int(time.time()),

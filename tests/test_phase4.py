@@ -2,14 +2,15 @@ import io
 import json
 import zipfile
 import unittest
+from unittest.mock import patch
 from app import create_app
 from app.extensions import db
-from app.models import Business, Customer, AppleDevice, Staff
+from app.models import Business, Customer, AppleDevice, GoogleWalletSyncJob, Staff
 from app.services import AppleWalletService, GoogleWalletService
 
 
 class Phase4TestCase(unittest.TestCase):
-    """Test suite for Phase 4: Apple Web Service Protocol, Google Wallet REST PATCH, and Geofencing."""
+    """Test Apple protocol, Google REST updates, and supported location data."""
 
     def setUp(self):
         self.app = create_app("testing")
@@ -68,11 +69,11 @@ class Phase4TestCase(unittest.TestCase):
         self.assertEqual(pass_json["locations"][0]["longitude"], -99.1656)
         self.assertIn("Taquería Los Volcanes", pass_json["locations"][0]["relevantText"])
 
-        # 2. Google Wallet Geofencing
+        # Google deprecated locations for loyalty resources and does not use
+        # that field for geo notifications, so it is intentionally omitted.
         google_service = GoogleWalletService()
         loyalty_obj = google_service.create_loyalty_object(self.customer)
-        self.assertIn("locations", loyalty_obj)
-        self.assertEqual(loyalty_obj["locations"][0]["latitude"], 19.4194)
+        self.assertNotIn("locations", loyalty_obj)
 
     def test_apple_device_registration_lifecycle(self):
         """Test Apple Wallet Web Service device registration, pass fetch, update listing, and unregistration."""
@@ -184,6 +185,25 @@ class Phase4TestCase(unittest.TestCase):
         self.assertIn("wallet_sync", data)
         self.assertEqual(data["wallet_sync"]["apple_devices_notified"], 1)
         self.assertEqual(data["wallet_sync"]["google_status"], "mock")
+
+    def test_scanner_real_mode_queues_google_without_waiting_for_rest(self):
+        self.app.config["GOOGLE_WALLET_MODE"] = "real"
+        login = self.client.post("/api/scanner/login", json={
+            "username": "scanner", "password": "ScannerPassword123!",
+            "business_slug": self.business.slug,
+        })
+        headers = {
+            "Authorization": f"Bearer {login.get_json()['access_token']}",
+            "Idempotency-Key": "phase4-google-outbox-only",
+        }
+        with patch.object(GoogleWalletService, "update_loyalty_object") as update:
+            response = self.client.post("/api/scanner/process", json={
+                "token": self.customer.qr_code_token, "action": "earn_stamp",
+            }, headers=headers)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["wallet_sync"]["google_status"], "pending")
+        update.assert_not_called()
+        self.assertEqual(GoogleWalletSyncJob.query.count(), 1)
 
 
 if __name__ == "__main__":

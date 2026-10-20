@@ -1,5 +1,6 @@
 import json
 import unittest
+from datetime import timedelta
 from unittest.mock import patch
 
 import jwt
@@ -13,7 +14,10 @@ from app.services.google_wallet import (
     GoogleWalletAPIError, GoogleWalletConfigurationError, GoogleWalletService,
 )
 from app.wallet_access import issue_wallet_token
-from app.services.google_wallet_sync_service import process_pending_google_wallet_jobs
+from app.services.google_wallet_sync_service import (
+    _customer_lock, _now, google_wallet_sync_counts,
+    process_pending_google_wallet_jobs,
+)
 from app.services.loyalty_transaction_service import process_loyalty_transaction
 
 
@@ -89,9 +93,22 @@ class GoogleWalletRealTestCase(unittest.TestCase):
         decoded = jwt.decode(token, public_key, algorithms=["RS256"], audience="google")
         self.assertEqual(decoded["iss"], self.credentials["client_email"])
         self.assertEqual(decoded["origins"], ["https://staging.example.test"])
-        self.assertEqual(decoded["payload"], {"loyaltyObjects": [{"id": service.get_object_id(self.customer)}]})
+        self.assertEqual(decoded["aud"], "google")
+        self.assertEqual(decoded["typ"], "savetowallet")
+        self.assertIsInstance(decoded["iat"], int)
+        self.assertEqual(decoded["payload"], {"loyaltyObjects": [{
+            "id": service.get_object_id(self.customer),
+            "classId": service.get_class_id(self.business),
+        }]})
         self.assertTrue(save_url.endswith(token))
+        self.assertLess(len(save_url), 2000)
         self.assertEqual([call[0] for call in session.calls], ["GET", "POST", "GET", "POST"])
+
+    def test_real_jwt_rejects_non_https_or_non_origin_values(self):
+        service = self.service([])
+        for origins in (["http://staging.example.test"], ["https://staging.example.test/path"], []):
+            with self.subTest(origins=origins), self.assertRaises(GoogleWalletConfigurationError):
+                service.create_jwt_pass(self.customer, origins=origins)
 
     def test_conflict_is_idempotently_resolved_and_identity_is_stable(self):
         original = self.customer.qr_code_token
@@ -102,6 +119,8 @@ class GoogleWalletRealTestCase(unittest.TestCase):
         object_id = service.get_object_id(self.customer)
         self.customer.qr_code_token = "rotated-private-token"
         self.assertEqual(service.get_object_id(self.customer), object_id)
+        self.assertEqual(service.create_loyalty_object(self.customer)["barcode"]["value"],
+                         "rotated-private-token")
         self.customer.qr_code_token = original
 
     def test_object_minimizes_personal_data_and_tenants_do_not_collide(self):
@@ -186,6 +205,118 @@ class GoogleWalletRealTestCase(unittest.TestCase):
         self.assertEqual(process_pending_google_wallet_jobs(service=SuccessService()), 1)
         db.session.refresh(job)
         self.assertEqual(job.status, "completed")
+
+    def _job(self, request_id, tx_type="earn"):
+        transaction = Transaction(
+            business_id=self.business.id, customer_id=self.customer.id,
+            type=tx_type, stamps_amount=1, request_id=request_id,
+        )
+        db.session.add(transaction); db.session.flush()
+        job = GoogleWalletSyncJob(
+            business_id=self.business.id, customer_id=self.customer.id,
+            transaction_id=transaction.id,
+        )
+        db.session.add(job); db.session.commit()
+        return job
+
+    def test_outbox_watermark_keeps_newer_job_pending_and_sends_current_balance(self):
+        old_job = self._job("old-two-stamps")
+        sent = []
+
+        class CaptureService:
+            def update_loyalty_object(_self, customer):
+                sent.append(customer.current_stamps)
+                if len(sent) == 1:
+                    customer.current_stamps = 3
+                    transaction = Transaction(
+                        business_id=self.business.id, customer_id=customer.id,
+                        type="earn", stamps_amount=1, request_id="new-three-stamps",
+                    )
+                    db.session.add(transaction); db.session.flush()
+                    db.session.add(GoogleWalletSyncJob(
+                        business_id=self.business.id, customer_id=customer.id,
+                        transaction_id=transaction.id,
+                    ))
+                    db.session.flush()
+                return {"status": "success"}
+
+        self.assertEqual(process_pending_google_wallet_jobs(limit=1, service=CaptureService()), 1)
+        new_job = GoogleWalletSyncJob.query.filter(
+            GoogleWalletSyncJob.id != old_job.id
+        ).one()
+        db.session.refresh(old_job)
+        self.assertEqual(old_job.status, "completed")
+        self.assertEqual(new_job.status, "pending")
+        self.assertEqual(sent, [2])
+        self.assertEqual(process_pending_google_wallet_jobs(limit=1, service=CaptureService()), 1)
+        db.session.refresh(new_job)
+        self.assertEqual(new_job.status, "completed")
+        self.assertEqual(sent[-1], 3)
+
+    def test_customer_fence_rejects_second_worker_and_recovers_stale_claim(self):
+        stale_job = self._job("stale-worker")
+        stale_job.status = "processing"
+        stale_job.locked_at = _now() - timedelta(minutes=6)
+        db.session.commit()
+        with _customer_lock(self.customer.id) as first:
+            self.assertTrue(first)
+            with _customer_lock(self.customer.id) as second:
+                self.assertFalse(second)
+        db.session.rollback()
+
+        class SuccessService:
+            def update_loyalty_object(_self, customer):
+                return {"status": "success"}
+
+        self.assertEqual(process_pending_google_wallet_jobs(service=SuccessService()), 1)
+        db.session.refresh(stale_job)
+        self.assertEqual(stale_job.status, "completed")
+
+    def test_worker_exception_and_temporary_and_permanent_errors_are_visible(self):
+        failed_call = self._job("worker-exception")
+
+        class RaisingService:
+            def update_loyalty_object(_self, customer):
+                raise RuntimeError("external failure")
+
+        self.assertEqual(process_pending_google_wallet_jobs(service=RaisingService()), 1)
+        db.session.refresh(failed_call)
+        self.assertEqual((failed_call.status, failed_call.attempts), ("pending", 1))
+        failed_call.next_attempt_at = None; db.session.commit()
+
+        class PermanentService:
+            def update_loyalty_object(_self, customer):
+                return {"status": "error", "status_code": 403}
+
+        self.assertEqual(process_pending_google_wallet_jobs(service=PermanentService()), 1)
+        db.session.refresh(failed_call)
+        self.assertEqual((failed_call.status, failed_call.last_status_code), ("failed", 403))
+        self.assertEqual(google_wallet_sync_counts()["failed"], 1)
+
+    def test_worker_cli_reports_only_safe_aggregate_counts(self):
+        result = self.app.test_cli_runner().invoke(args=["process-google-wallet-sync"])
+        self.assertEqual(result.exit_code, 0)
+        output = json.loads(result.output.strip())
+        self.assertEqual(output, {
+            "completed": 0, "failed": 0, "pending": 0, "processed": 0,
+        })
+        self.assertNotIn(self.customer.email, result.output)
+        self.assertNotIn(self.customer.qr_code_token, result.output)
+
+    def test_rapid_earn_and_redeem_are_coalesced_to_latest_confirmed_balance(self):
+        self._job("rapid-earn", "earn")
+        self._job("rapid-redeem", "redeem")
+        self.customer.current_stamps = 1; db.session.commit()
+        sent = []
+
+        class CaptureService:
+            def update_loyalty_object(_self, customer):
+                sent.append(customer.current_stamps)
+                return {"status": "success"}
+
+        self.assertEqual(process_pending_google_wallet_jobs(service=CaptureService()), 2)
+        self.assertEqual(sent, [1])
+        self.assertEqual(GoogleWalletSyncJob.query.filter_by(status="pending").count(), 0)
 
     def test_business_transaction_and_outbox_commit_together(self):
         self.app.config["GOOGLE_WALLET_MODE"] = "real"

@@ -65,17 +65,39 @@ Orden recomendado:
 6. validar salud, preparación y logs sin secretos;
 7. configurar la ejecución periódica del worker de sincronización.
 
+Procedimiento posterior al merge:
+
+1. actualice `main` y después integre ese commit aprobado en `staging`;
+2. despliegue manualmente con `GOOGLE_WALLET_MODE=disabled`;
+3. ejecute `flask --app run.py db upgrade` como operación única;
+4. confirme que `flask --app run.py db current` muestra `f3a4b5c6d7e8`;
+5. cargue `GOOGLE_ISSUER_ID` y `GOOGLE_SERVICE_ACCOUNT_JSON` como variables privadas;
+6. cambie el modo a `real`, reinicie y confirme que el proceso arranca;
+7. revise únicamente logs sanitizados y los endpoints de salud;
+8. cree un negocio ficticio con logotipo HTTPS legítimo;
+9. guarde el pase desde un Android autorizado en Demo Mode;
+10. acredite y canjee puntos o sellos desde los flujos normales;
+11. ejecute la cola y confirme el saldo final tanto en J2M como en Wallet;
+12. diagnostique por código HTTP y estado del outbox, nunca copiando JWT o credenciales;
+13. ante fallos, vuelva a `disabled` y reinicie sin alterar el ledger.
+
 Para desactivar la integración sin afectar el ledger, establezca `GOOGLE_WALLET_MODE=disabled` y reinicie. Las transacciones de J2M continúan; no se emitirán enlaces ni nuevos trabajos de Google hasta reactivar el modo real.
 
 ## Sincronización y reintentos
 
-Cada transacción real registra, en la misma transacción de base de datos, un trabajo de sincronización. Un fallo de Google no revierte el ledger ni el saldo. Configure una ejecución periódica y de una sola instancia del siguiente comando:
+Cada transacción real registra, en la misma transacción de base de datos, un trabajo de sincronización. El endpoint del cajero responde `google_status=pending` sin esperar a Google. Un fallo externo no revierte el ledger ni el saldo. Ejecute manualmente en Railway, como comando puntual con las variables del servicio:
 
 ```sh
 flask --app run.py process-google-wallet-sync
 ```
 
-La cola usa reclamo condicional, reintentos con espera creciente y conserva únicamente códigos de estado seguros. Una respuesta no reintentable queda marcada como fallida para revisión operativa. Si el objeto fue eliminado en Google, el proceso intenta reconstruir sus recursos antes de confirmar la sincronización.
+El comando termina por sí mismo e imprime únicamente cantidades `processed`, `pending`, `failed` y `completed`. Para staging puede configurarse un Railway Cron Job que ejecute exactamente ese comando cada cinco minutos, siempre que el plan lo permita. No lo agregue a Gunicorn, no instale un scheduler dentro de la aplicación y no mantenga un worker permanente. Evite ejecuciones deliberadamente solapadas, aunque el bloqueo de base de datos protege al cliente si ocurre una coincidencia.
+
+En PostgreSQL, la cola toma un advisory lock transaccional por cliente. Dos workers no pueden enviar simultáneamente el saldo del mismo cliente; el lock se libera automáticamente al confirmar, revertir, perder la conexión o terminar el proceso. Una marca de agua limita qué trabajos puede completar cada ejecución. Los movimientos que lleguen durante la llamada permanecen pendientes y la siguiente ejecución lee el saldo confirmado más reciente. SQLite usa un lock equivalente dentro del proceso únicamente para desarrollo y pruebas; la garantía multiproceso de producción depende de PostgreSQL.
+
+Los errores `429`, `408`, `5xx`, timeouts y conectividad vuelven a `pending` con espera exponencial. Los errores permanentes quedan en `failed` con su código HTTP, sin borrar el movimiento. Si el objeto fue eliminado en Google, el proceso intenta reconstruir sus recursos. Si el cron se suspende, los trabajos permanecen en PostgreSQL; al reanudarlo se procesan en orden. Un proceso que termina abruptamente revierte su reclamo, y un estado heredado `processing` puede recuperarse después de cinco minutos sin solaparse con un propietario que aún conserve el advisory lock.
+
+La concurrencia PostgreSQL se cubre por diseño y SQL específico, pero debe verificarse con dos ejecuciones reales en Railway staging antes de producción. Las pruebas locales SQLite validan de forma determinista la exclusión, la marca de agua, los reintentos y la recuperación; no sustituyen esa validación externa.
 
 ## Validación pendiente del propietario
 

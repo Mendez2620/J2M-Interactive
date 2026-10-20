@@ -126,7 +126,7 @@ class Phase6TestCase(unittest.TestCase):
         resp = self.client.post('/api/scanner/process', json=payload, headers=self.auth)
         self.assertEqual(resp.status_code, 200)
         data = resp.get_json()
-        self.assertIn(data['wallet_sync']['google_status'], ['mock', 'success'])
+        self.assertEqual(data['wallet_sync']['google_status'], 'mock')
 
     def test_manager_exports_use_authenticated_business(self):
         excel = self.client.get(

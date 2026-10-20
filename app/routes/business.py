@@ -2,7 +2,6 @@ from datetime import datetime
 from flask import Blueprint, current_app, jsonify, render_template, request
 from app.extensions import db
 from app.models import Business, Customer
-from app.services import GoogleWalletService
 from app.wallet_access import issue_wallet_token
 from app.phone_numbers import normalize_phone
 

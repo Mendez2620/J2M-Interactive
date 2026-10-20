@@ -200,7 +200,11 @@ def create_app(config_name=None):
     @app.cli.command("process-google-wallet-sync")
     def process_google_wallet_sync():
         """Process the persistent Google Wallet outbox once."""
-        from app.services.google_wallet_sync_service import process_pending_google_wallet_jobs
+        import json
+        from app.services.google_wallet_sync_service import (
+            google_wallet_sync_counts, process_pending_google_wallet_jobs,
+        )
         processed = process_pending_google_wallet_jobs()
-        print(f"Google Wallet sync jobs processed: {processed}")
+        counts = google_wallet_sync_counts()
+        print(json.dumps({"processed": processed, **counts}, sort_keys=True))
     return app
