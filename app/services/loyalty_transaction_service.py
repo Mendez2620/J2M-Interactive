@@ -2,11 +2,12 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 
+from flask import current_app
 from sqlalchemy import and_, case, exists, or_, update
 from sqlalchemy.exc import IntegrityError
 
 from app.extensions import db
-from app.models import Customer, LoyaltyLedgerEntry, Transaction
+from app.models import Customer, GoogleWalletSyncJob, LoyaltyLedgerEntry, Transaction
 
 
 POINT_QUANTUM = Decimal("0.000001")
@@ -122,6 +123,11 @@ def process_loyalty_transaction(*, business, customer_id, staff_id, action, tx_t
             points_before=points_before, points_after=points_after,
             stamps_before=stamps_before, stamps_after=stamps_after, created_at=now,
         ))
+        if current_app.config.get("GOOGLE_WALLET_MODE") == "real":
+            db.session.add(GoogleWalletSyncJob(
+                business_id=business.id, customer_id=customer_id,
+                transaction_id=transaction.id, status="pending",
+            ))
         db.session.commit()
     except IntegrityError:
         db.session.rollback()

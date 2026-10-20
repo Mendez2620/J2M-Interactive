@@ -230,8 +230,10 @@ def process_transaction():
     google_sync_result, apple_notified_count = None, 0
     try:
         from app.services import GoogleWalletService
+        from app.services.google_wallet_sync_service import record_google_wallet_result
         from app.routes.apple_webservice import notify_apple_wallet_devices
         google_sync_result = GoogleWalletService().update_loyalty_object(customer)
+        record_google_wallet_result(tx.id, google_sync_result)
         apple_notified_count = notify_apple_wallet_devices(customer)
     except Exception:
         current_app.logger.exception("Wallet sync failed after transaction %s", tx.id)

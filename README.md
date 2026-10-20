@@ -247,10 +247,12 @@ La revisión `c0d1e2f3a4b5` incorpora el ledger de lealtad y el estado de cooldo
 3. En **Google Pay & Wallet Console**, crea tu **Issuer Account** y vincula el email de la Service Account.
 4. Configura en tu `.env` de producción:
    ```env
+   GOOGLE_WALLET_MODE=real
    GOOGLE_ISSUER_ID=3388000000000000000
-   GOOGLE_SA_EMAIL=tu-sa@tu-proyecto.iam.gserviceaccount.com
-   GOOGLE_SA_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
+   GOOGLE_SERVICE_ACCOUNT_JSON={"type":"service_account","project_id":"..."}
    ```
+   Conserva el JSON completo como variable privada de la plataforma; no lo guardes en Git ni lo imprimas en logs.
+   Consulta el procedimiento controlado en `docs/google-wallet-real-staging.md` antes de habilitar el modo real.
 
 ### Apple Wallet
 1. En el **Apple Developer Portal**, genera un **Pass Type ID** (ej. `pass.com.tuempresa.loyalty`).

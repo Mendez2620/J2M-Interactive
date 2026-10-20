@@ -1,319 +1,234 @@
-import os
-import time
+import json
 import logging
+import os
+import re
+import time
+from typing import Optional, Tuple
+from urllib.parse import quote, urlparse
+
 import jwt
 import requests
-from flask import current_app, has_app_context
-from typing import Dict, Any, Tuple, Optional
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+from flask import current_app, has_app_context
+from google.auth.transport.requests import AuthorizedSession
+from google.oauth2 import service_account
 
 logger = logging.getLogger(__name__)
 
 
+class GoogleWalletConfigurationError(RuntimeError):
+    pass
+
+
+class GoogleWalletAPIError(RuntimeError):
+    def __init__(self, status_code=None, retryable=False):
+        super().__init__("Google Wallet API no disponible")
+        self.status_code = status_code
+        self.retryable = retryable
+
+
 class GoogleWalletService:
-    """Service to create and update Google Wallet Loyalty Classes, Objects, signed JWT save URLs, and REST API patches."""
+    """Google Wallet Loyalty integration with explicit disabled/mock/real modes."""
 
     SAVE_URL_PREFIX = "https://pay.google.com/gp/v/save/"
     API_BASE_URL = "https://walletobjects.googleapis.com/walletobjects/v1"
+    OAUTH_SCOPE = "https://www.googleapis.com/auth/wallet_object.issuer"
+    VALID_MODES = {"disabled", "mock", "real"}
 
-    def __init__(
-        self,
-        issuer_id: Optional[str] = None,
-        sa_email: Optional[str] = None,
-        sa_private_key: Optional[str] = None,
-    ):
-        self.issuer_id = (
-            issuer_id
-            or os.getenv("GOOGLE_ISSUER_ID")
-            or "3388000000000000000"
-        )
-        self.sa_email = (
-            sa_email
-            or os.getenv("GOOGLE_SA_EMAIL")
-            or "service-account@j2m-loyalty.iam.gserviceaccount.com"
-        )
-        
-        raw_key = (
-            sa_private_key
-            or os.getenv("GOOGLE_SA_PRIVATE_KEY")
-        )
-
-        self.is_mock_key = True
-        logger.info("GoogleWalletService running in mock mode – generated transient RSA key.")
-        self.sa_private_key = self._generate_dev_private_key()
+    def __init__(self, *, mode=None, credentials_info=None, http_session=None):
+        self.mode = str(mode or self._config("GOOGLE_WALLET_MODE", "mock")).strip().lower()
+        if self.mode not in self.VALID_MODES:
+            raise GoogleWalletConfigurationError("GOOGLE_WALLET_MODE inválido.")
+        self.issuer_id = str(self._config("GOOGLE_ISSUER_ID", "") or "").strip()
+        self.sa_email = None
+        self.sa_private_key = None
+        self.credentials = None
+        self.http = http_session
+        self.is_mock_key = self.mode == "mock"
+        if self.mode == "disabled":
+            return
+        if not re.fullmatch(r"\d{6,20}", self.issuer_id):
+            raise GoogleWalletConfigurationError("GOOGLE_ISSUER_ID ausente o inválido.")
+        if self.mode == "mock":
+            self.sa_email = "mock-wallet@example.invalid"
+            self.sa_private_key = self._generate_dev_private_key()
+            return
+        info = credentials_info or self._credentials_from_environment()
+        self._validate_credentials_info(info)
+        try:
+            self.credentials = service_account.Credentials.from_service_account_info(
+                info, scopes=[self.OAUTH_SCOPE]
+            )
+            serialization.load_pem_private_key(info["private_key"].encode(), password=None)
+        except Exception:
+            raise GoogleWalletConfigurationError("Credencial de Google Wallet inválida.") from None
+        self.sa_email = info["client_email"]
+        self.sa_private_key = info["private_key"]
+        if self.http is None:
+            self.http = AuthorizedSession(self.credentials)
 
     @staticmethod
-    def _generate_dev_private_key() -> str:
-        """Generates a transient 2048-bit RSA private key in PEM format for dev/testing."""
-        private_key = rsa.generate_private_key(
-            public_exponent=65537,
-            key_size=2048,
-        )
-        pem = private_key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.PKCS8,
-            encryption_algorithm=serialization.NoEncryption(),
-        )
-        return pem.decode("utf-8")
+    def _config(name, default=None):
+        environment_value = os.getenv(name)
+        if environment_value is not None:
+            return environment_value
+        return current_app.config.get(name, default) if has_app_context() else default
 
-    def get_class_id(self, business) -> str:
-        """Generates a unique Class ID for the given business."""
-        sanitized_slug = business.slug.replace("-", "_")
-        return f"{self.issuer_id}.business_{business.id}_{sanitized_slug}"
+    @staticmethod
+    def _generate_dev_private_key():
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        return key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                 serialization.NoEncryption()).decode()
 
-    def get_object_id(self, customer) -> str:
-        """Generates a unique Object ID for the given customer."""
-        token_suffix = customer.qr_code_token[:8] if customer.qr_code_token else "00000000"
-        return f"{self.issuer_id}.customer_{customer.id}_{token_suffix}"
+    @classmethod
+    def _credentials_from_environment(cls):
+        raw = cls._config("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+        if not raw:
+            raise GoogleWalletConfigurationError("Faltan credenciales de Google Wallet.")
+        try:
+            return json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            raise GoogleWalletConfigurationError("Credencial de Google Wallet inválida.") from None
 
-    def create_or_update_class(self, business) -> Dict[str, Any]:
-        """Defines the Google Wallet LoyaltyClass dictionary structure with geofencing support."""
-        class_id = self.get_class_id(business)
+    @staticmethod
+    def _validate_credentials_info(info):
+        required = ("type", "project_id", "client_email", "private_key", "token_uri")
+        if not isinstance(info, dict) or info.get("type") != "service_account":
+            raise GoogleWalletConfigurationError("Se requiere una credencial service_account.")
+        if any(not isinstance(info.get(field), str) or not info[field].strip() for field in required):
+            raise GoogleWalletConfigurationError("Credencial de Google Wallet incompleta.")
+        if not info["client_email"].endswith(".iam.gserviceaccount.com"):
+            raise GoogleWalletConfigurationError("Correo de cuenta de servicio inválido.")
 
-        loyalty_class = {
-            "id": class_id,
-            "issuerName": business.name,
-            "programName": f"Club {business.name}",
-            "reviewStatus": "UNDER_REVIEW",
+    def _require_enabled(self):
+        if self.mode == "disabled":
+            raise GoogleWalletConfigurationError("Google Wallet está deshabilitado.")
+
+    def get_class_id(self, business):
+        return f"{self.issuer_id}.business_{business.id}"
+
+    def get_object_id(self, customer):
+        return f"{self.issuer_id}.business_{customer.business_id}_customer_{customer.id}"
+
+    def _logo_uri(self, business):
+        uri = business.logo_url
+        if not uri and business.logo_path and has_app_context():
+            base = current_app.config.get("PUBLIC_BASE_URL", "")
+            if base.startswith("https://"):
+                uri = f"{base.rstrip('/')}/static/{business.logo_path.lstrip('/')}"
+        parsed = urlparse(uri or "")
+        return uri if parsed.scheme == "https" and parsed.netloc else None
+
+    def create_or_update_class(self, business):
+        self._require_enabled()
+        result = {
+            "id": self.get_class_id(business), "issuerName": business.name[:20],
+            "programName": f"Club {business.name}"[:20], "reviewStatus": "UNDER_REVIEW",
             "hexBackgroundColor": business.primary_color or "#1E3A8A",
+            "accountNameLabel": "Miembro", "accountIdLabel": "ID",
         }
-
-        # Google requires a publicly reachable HTTPS URL for images.
-        logo_uri = business.logo_url
-        if not logo_uri and business.logo_path and has_app_context():
-            public_base_url = current_app.config.get("PUBLIC_BASE_URL", "")
-            if public_base_url.startswith("https://"):
-                logo_uri = f"{public_base_url}/static/{business.logo_path.lstrip('/')}"
+        logo_uri = self._logo_uri(business)
         if logo_uri:
-            loyalty_class["programLogo"] = {
-                "sourceUri": {
-                    "uri": logo_uri
-                },
-                "contentDescription": {
-                    "defaultValue": {
-                        "language": "es-419",
-                        "value": f"Logo {business.name}",
-                    }
-                },
-            }
-
-        # Geofencing / Location support for Google Wallet notifications
+            result["programLogo"] = {"sourceUri": {"uri": logo_uri}, "contentDescription": {
+                "defaultValue": {"language": "es-419", "value": f"Logo {business.name}"}}}
         if business.latitude is not None and business.longitude is not None:
-            loyalty_class["locations"] = [
-                {
-                    "kind": "walletobjects#latLongPoint",
-                    "latitude": float(business.latitude),
-                    "longitude": float(business.longitude),
-                }
-            ]
+            result["locations"] = [{"latitude": float(business.latitude), "longitude": float(business.longitude)}]
+        return result
 
-        return loyalty_class
+    def _loyalty_points(self, customer):
+        if customer.business.loyalty_type == "stamps":
+            return {"label": "Sellos", "balance": {"string":
+                    f"{customer.current_stamps} / {customer.business.stamps_reward_limit}"}}
+        return {"label": "Puntos", "balance": {"string": f"{customer.current_points:.0f} pts"}}
 
-    def create_loyalty_object(self, customer) -> Dict[str, Any]:
-        """Defines the Google Wallet LoyaltyObject dictionary structure for a customer."""
+    def create_loyalty_object(self, customer):
+        self._require_enabled()
         business = customer.business
-        object_id = self.get_object_id(customer)
-        class_id = self.get_class_id(business)
-
-        # Loyalty balance representation based on business loyalty type
-        if business.loyalty_type == "stamps":
-            loyalty_points = {
-                "label": "Sellos",
-                "balance": {
-                    "string": f"{customer.current_stamps} / {business.stamps_reward_limit}"
-                },
-            }
-        else:
-            loyalty_points = {
-                "label": "Puntos",
-                "balance": {
-                    "string": f"{customer.current_points:.0f} pts"
-                },
-            }
-
-        loyalty_object = {
-            "id": object_id,
-            "classId": class_id,
-            "state": "ACTIVE",
-            "accountId": str(customer.id),
-            "accountName": customer.full_name,
-            "barcode": {
-                "type": "QR_CODE",
-                "value": customer.qr_code_token,
-                "alternateText": customer.qr_code_token,
-            },
-            "loyaltyPoints": loyalty_points,
-            "textModulesData": [
-                {
-                    "header": "Cliente",
-                    "body": customer.full_name,
-                },
-                {
-                    "header": "Programa",
-                    "body": "Sellos de Recompensa" if business.loyalty_type == "stamps" else "Puntos Acumulables",
-                },
-            ],
+        result = {
+            "id": self.get_object_id(customer), "classId": self.get_class_id(business), "state": "ACTIVE",
+            "accountId": f"member-{customer.id}", "accountName": "Miembro",
+            "barcode": {"type": "QR_CODE", "value": customer.qr_code_token},
+            "loyaltyPoints": self._loyalty_points(customer),
+            "textModulesData": [{"id": "program", "header": "Programa", "body":
+                "Sellos de recompensa" if business.loyalty_type == "stamps" else "Puntos acumulables"}],
         }
-
         if business.wallet_terms:
-            loyalty_object["textModulesData"].append({
-                "header": "Términos y Condiciones",
-                "body": business.wallet_terms,
-            })
-
-        # Geofencing on object level
+            result["textModulesData"].append({"id": "terms", "header": "Términos", "body": business.wallet_terms})
         if business.latitude is not None and business.longitude is not None:
-            loyalty_object["locations"] = [
-                {
-                    "kind": "walletobjects#latLongPoint",
-                    "latitude": float(business.latitude),
-                    "longitude": float(business.longitude),
-                }
-            ]
+            result["locations"] = [{"latitude": float(business.latitude), "longitude": float(business.longitude)}]
+        return result
 
-        if customer.email:
-            loyalty_object["textModulesData"].append({
-                "header": "Email",
-                "body": customer.email,
-            })
+    def _request(self, method, resource, *, body=None):
+        try:
+            response = self.http.request(method, f"{self.API_BASE_URL}/{resource}", json=body, timeout=10)
+        except requests.RequestException:
+            logger.warning("google_wallet_api_error event=network_failure")
+            raise GoogleWalletAPIError(retryable=True) from None
+        if response.status_code in (200, 201, 204):
+            return response.json() if getattr(response, "content", b"") else {}
+        retryable = response.status_code in {408, 429, 500, 502, 503, 504}
+        logger.warning("google_wallet_api_error status_code=%s retryable=%s", response.status_code, retryable)
+        raise GoogleWalletAPIError(response.status_code, retryable)
 
-        if customer.phone:
-            loyalty_object["textModulesData"].append({
-                "header": "Teléfono",
-                "body": customer.phone,
-            })
+    def _upsert(self, kind, resource_id, body):
+        resource = f"{kind}/{quote(resource_id, safe='')}"
+        try:
+            self._request("GET", resource)
+        except GoogleWalletAPIError as exc:
+            if exc.status_code != 404:
+                raise
+            try:
+                return self._request("POST", kind, body=body)
+            except GoogleWalletAPIError as create_error:
+                if create_error.status_code != 409:
+                    raise
+        return self._request("PATCH", resource, body=body)
 
-        return loyalty_object
+    def ensure_resources(self, customer):
+        if self.mode != "real":
+            return
+        loyalty_class = self.create_or_update_class(customer.business)
+        if "programLogo" not in loyalty_class:
+            raise GoogleWalletConfigurationError("Google Wallet real requiere un logotipo HTTPS público.")
+        self._upsert("loyaltyClass", loyalty_class["id"], loyalty_class)
+        loyalty_object = self.create_loyalty_object(customer)
+        self._upsert("loyaltyObject", loyalty_object["id"], loyalty_object)
 
     def create_jwt_pass(self, customer, origins=None) -> Tuple[str, str]:
-        """
-        Generates a signed JWT with RS256 algorithm and builds the Google Wallet Save URL.
-        
-        Returns:
-            Tuple[jwt_token, save_url]
-        """
-        business = customer.business
-        loyalty_class = self.create_or_update_class(business)
-        loyalty_object = self.create_loyalty_object(customer)
-
+        self._require_enabled()
+        if self.mode == "real":
+            self.ensure_resources(customer)
         if origins is None:
-            origins = ["http://localhost:5000", "https://pay.google.com"]
+            base = self._config("PUBLIC_BASE_URL", "")
+            if self.mode == "real" and (not base or not base.startswith("https://")):
+                raise GoogleWalletConfigurationError("PUBLIC_BASE_URL HTTPS es obligatoria para Google Wallet real.")
+            origins = [base] if base else ["http://localhost:5000"]
+        payload_data = ({"loyaltyObjects": [{"id": self.get_object_id(customer)}]} if self.mode == "real" else {
+            "loyaltyClasses": [self.create_or_update_class(customer.business)],
+            "loyaltyObjects": [self.create_loyalty_object(customer)]})
+        claims = {"iss": self.sa_email, "aud": "google", "typ": "savetowallet", "iat": int(time.time()),
+                  "origins": origins, "payload": payload_data}
+        token = jwt.encode(claims, self.sa_private_key, algorithm="RS256")
+        return token, f"{self.SAVE_URL_PREFIX}{token}"
 
-        # JWT payload according to Google Wallet API specifications
-        payload = {
-            "iss": self.sa_email,
-            "aud": "google",
-            "typ": "savetowallet",
-            "iat": int(time.time()),
-            "origins": origins,
-            "payload": {
-                "loyaltyClasses": [loyalty_class],
-                "loyaltyObjects": [loyalty_object],
-            },
-        }
-
-        # Sign JWT with RS256
-        token = jwt.encode(payload, self.sa_private_key, algorithm="RS256")
-        save_url = f"{self.SAVE_URL_PREFIX}{token}"
-
-        return token, save_url
-
-    def _get_oauth2_access_token(self) -> Optional[str]:
-        """
-        Generates an OAuth2 access token for Google Wallet REST API calls using Google Service Account assertion.
-        """
-        if self.is_mock_key:
-            return None
-
-        now = int(time.time())
-        claims = {
-            "iss": self.sa_email,
-            "scope": "https://www.googleapis.com/auth/wallet_object.issuer",
-            "aud": "https://oauth2.googleapis.com/token",
-            "exp": now + 3600,
-            "iat": now,
-        }
-
-        assertion = jwt.encode(claims, self.sa_private_key, algorithm="RS256")
-        token_response = requests.post(
-            "https://oauth2.googleapis.com/token",
-            data={
-                "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
-                "assertion": assertion,
-            },
-            timeout=10,
-        )
-
-        if token_response.status_code == 200:
-            return token_response.json().get("access_token")
-        
-        logger.error("Failed to acquire Google OAuth2 access token: %s", token_response.text)
-        return None
-
-    def update_loyalty_object(self, customer) -> Dict[str, Any]:
-        """
-        Updates the customer's LoyaltyObject in Google Wallet via REST API PATCH.
-        In development / mock mode, logs the patch and returns simulated success.
-        """
-        object_id = self.get_object_id(customer)
-        business = customer.business
-
-        if business.loyalty_type == "stamps":
-            loyalty_points = {
-                "label": "Sellos",
-                "balance": {
-                    "string": f"{customer.current_stamps} / {business.stamps_reward_limit}"
-                },
-            }
-        else:
-            loyalty_points = {
-                "label": "Puntos",
-                "balance": {
-                    "string": f"{customer.current_points:.0f} pts"
-                },
-            }
-
-        patch_body = {
-            "loyaltyPoints": loyalty_points,
-        }
-
-        # In dev/mock mode
-        if self.is_mock_key:
-            logger.info("Dev Mode: Simulated Google Wallet REST PATCH for object %s: %s", object_id, patch_body)
-            return {
-                "status": "mock_success",
-                "object_id": object_id,
-                "patch_body": patch_body,
-                "message": "Actualización de Google Wallet simulada en desarrollo.",
-            }
-
-        access_token = self._get_oauth2_access_token()
-        if not access_token:
-            return {
-                "status": "error",
-                "message": "No se pudo obtener el token OAuth2 de Google.",
-            }
-
-        url = f"{self.API_BASE_URL}/loyaltyObject/{object_id}"
-        headers = {
-            "Authorization": f"Bearer {access_token}",
-            "Content-Type": "application/json",
-        }
-
+    def update_loyalty_object(self, customer):
+        if self.mode == "disabled":
+            return {"status": "disabled"}
+        patch_body = {"loyaltyPoints": self._loyalty_points(customer)}
+        if self.mode == "mock":
+            return {"status": "mock", "object_id": self.get_object_id(customer), "patch_body": patch_body}
         try:
-            resp = requests.patch(url, headers=headers, json=patch_body, timeout=10)
-            if resp.status_code in (200, 204):
-                return {
-                    "status": "success",
-                    "object_id": object_id,
-                    "data": resp.json() if resp.content else {},
-                }
-            return {
-                "status": "api_error",
-                "status_code": resp.status_code,
-                "error": resp.text,
-            }
-        except Exception as e:
-            logger.exception("Error calling Google Wallet PATCH API: %s", e)
-            return {"status": "exception", "error": str(e)}
+            object_id = self.get_object_id(customer)
+            result = self._request("PATCH", f"loyaltyObject/{quote(object_id, safe='')}", body=patch_body)
+            return {"status": "success", "object_id": object_id, "data": result}
+        except GoogleWalletAPIError as exc:
+            if exc.status_code == 404:
+                try:
+                    self.ensure_resources(customer)
+                    return {"status": "success", "object_id": self.get_object_id(customer), "data": {}}
+                except GoogleWalletAPIError as recovery_error:
+                    exc = recovery_error
+                except GoogleWalletConfigurationError:
+                    return {"status": "error", "status_code": None}
+            return {"status": "retry" if exc.retryable else "error", "status_code": exc.status_code}

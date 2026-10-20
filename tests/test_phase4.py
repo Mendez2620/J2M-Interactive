@@ -144,9 +144,9 @@ class Phase4TestCase(unittest.TestCase):
         google_service = GoogleWalletService()
         result = google_service.update_loyalty_object(self.customer)
 
-        self.assertIn(result.get("status"), ["mock_success", "success"])
+        self.assertIn(result.get("status"), ["mock", "success"])
         self.assertIn("object_id", result)
-        if result.get("status") == "mock_success":
+        if result.get("status") == "mock":
             self.assertEqual(
                 result["patch_body"]["loyaltyPoints"]["balance"]["string"],
                 f"{self.customer.current_stamps} / {self.business.stamps_reward_limit}",
@@ -183,7 +183,7 @@ class Phase4TestCase(unittest.TestCase):
         self.assertEqual(data["customer"]["current_stamps"], 4)
         self.assertIn("wallet_sync", data)
         self.assertEqual(data["wallet_sync"]["apple_devices_notified"], 1)
-        self.assertEqual(data["wallet_sync"]["google_status"], "mock_success")
+        self.assertEqual(data["wallet_sync"]["google_status"], "mock")
 
 
 if __name__ == "__main__":

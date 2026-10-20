@@ -162,6 +162,7 @@ class OperationalSecurityPhase6TestCase(unittest.TestCase):
                "DATABASE_URL": "postgresql://user:password@db.example.test:5432/postgres",
                "DATABASE_SSLMODE": "require",
                "UPLOAD_STORAGE_BACKEND": "disabled"}
+        env["GOOGLE_WALLET_MODE"] = "disabled"
         with patch.dict(os.environ, env, clear=False), \
              patch.object(ProductionConfig, "SQLALCHEMY_DATABASE_URI", self.uri), \
              patch.object(ProductionConfig, "PUBLIC_BASE_URL", "https://app.example.test"), \
@@ -206,6 +207,7 @@ class OperationalSecurityPhase6TestCase(unittest.TestCase):
                "DATABASE_URL": "postgresql://user:password@db.example.test:5432/postgres",
                "DATABASE_SSLMODE": "require",
                "UPLOAD_STORAGE_BACKEND": "disabled"}
+        env["GOOGLE_WALLET_MODE"] = "disabled"
         cases = (
             ({"RECOVERY_MAIL_BACKEND": "memory"}, "correo en memoria"),
             ({"PUBLIC_BASE_URL": ""}, "HTTPS"),
