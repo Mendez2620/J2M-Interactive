@@ -1,3 +1,5 @@
 {% extends "manager/base.html" %}
 {% block portal_title %}Escáner QR{% endblock %}
-{% block portal_content %}<section><h1 class="text-2xl font-bold">Escanear QR</h1><p class="mt-1 text-sm text-slate-500">Consulta y confirma movimientos del negocio mediante el escáner web autorizado.</p><div class="mt-5 rounded-2xl border bg-white p-5">El escáner seguro se está preparando.</div></section>{% endblock %}
+{% block head %}{{ super() }}<script src="{{ url_for('static', filename='vendor/html5-qrcode/html5-qrcode.min.js') }}"></script>{% endblock %}
+{% block portal_content %}{% include 'components/web_scanner.html' %}{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='js/web-scanner.js') }}"></script>{% endblock %}
