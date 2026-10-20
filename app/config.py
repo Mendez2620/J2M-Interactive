@@ -86,6 +86,9 @@ class Config:
     MAX_CONTENT_LENGTH = int(os.getenv("MAX_CONTENT_LENGTH", 12 * 1024 * 1024))
     UPLOAD_STORAGE_BACKEND = os.getenv("UPLOAD_STORAGE_BACKEND", "local").lower()
     PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
+    GOOGLE_WALLET_MODE = os.getenv("GOOGLE_WALLET_MODE", "mock").lower()
+    GOOGLE_ISSUER_ID = os.getenv("GOOGLE_ISSUER_ID", "")
+    GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
     SESSION_COOKIE_HTTPONLY = True
     SESSION_COOKIE_SAMESITE = "Lax"
     SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "false").lower() == "true"
@@ -108,6 +111,7 @@ class ProductionConfig(Config):
     # Railway's filesystem is ephemeral. Uploads remain disabled until a
     # persistent object-storage adapter is implemented and verified.
     UPLOAD_STORAGE_BACKEND = os.getenv("UPLOAD_STORAGE_BACKEND", "disabled").lower()
+    GOOGLE_WALLET_MODE = os.getenv("GOOGLE_WALLET_MODE", "disabled").lower()
 
 
 class TestingConfig(Config):
@@ -119,6 +123,8 @@ class TestingConfig(Config):
     JWT_SECRET_KEY = "testing-only-jwt-secret-key-longer-than-32-bytes"
     RECOVERY_MAIL_BACKEND = "memory"
     AUTH_RATE_LIMIT_ATTEMPTS = 10
+    GOOGLE_WALLET_MODE = "mock"
+    GOOGLE_ISSUER_ID = "3388000000000000000"
 
 
 config_by_name = {

@@ -264,6 +264,15 @@ class CustomerRecoveryPhase4TestCase(unittest.TestCase):
         self.assertIn(b"7", self.client.get("/recover/cafe-dos").data)
         self.assertEqual(db.session.get(Customer, self.other_customer.id).current_stamps, 7)
 
+    def test_disabled_google_wallet_is_not_offered_after_recovery(self):
+        self.authorize()
+        self.app.config["GOOGLE_WALLET_MODE"] = "disabled"
+        page = self.client.get("/recover/cafe-uno")
+        self.assertNotIn(b"Guardar en Google Wallet", page.data)
+        response = self.client.get("/recover/cafe-uno/wallet/google")
+        self.assertEqual(response.status_code, 503)
+        self.assertNotIn(b"credencial", response.data.lower())
+
     def test_join_link_and_phone_only_account_do_not_expose_secrets(self):
         join = self.client.get("/join/cafe-uno").get_data(as_text=True)
         self.assertIn("¿Ya tienes una tarjeta? Recupérala aquí", join)
