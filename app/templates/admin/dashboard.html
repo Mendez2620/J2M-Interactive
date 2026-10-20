@@ -26,7 +26,7 @@
           {{ icon('qr','icon text-slate-500') }}
           <span>Abrir Escáner</span>
         </a>{% endif %}
-        <button onclick="openBusinessModal()"
+        <button type="button" data-open-business
                 class="inline-flex items-center space-x-1.5 px-3.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-xs font-semibold text-white shadow-sm transition">
           {{ icon('plus','icon-sm') }}
           <span>Nuevo Negocio</span>
@@ -262,21 +262,33 @@
           <h3 class="text-base font-bold text-slate-900">Dar de Alta Nuevo Negocio</h3>
           <p class="text-xs text-slate-500">Configura los datos base del restaurante, bar o comercio</p>
         </div>
-        <button onclick="closeBusinessModal()" class="text-slate-400 hover:text-slate-700 text-lg p-1">
+        <button type="button" data-close-business class="text-slate-400 hover:text-slate-700 text-lg p-1" aria-label="Cerrar formulario">
           {{ icon('x') }}
         </button>
       </div>
 
       <form id="createBusinessForm" class="space-y-4" enctype="multipart/form-data">
+        <div id="businessFormMessage" class="hidden rounded-lg border px-3 py-2 text-sm" role="alert" aria-live="assertive"></div>
         <div>
           <label class="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">Nombre Comercial</label>
           <input type="text" id="bName" name="name" required placeholder="Ej. Restaurante La Parroquia"
                  class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900 focus:outline-none focus:bg-white focus:ring-2 focus:ring-slate-900">
         </div>
-        <div class="grid grid-cols-2 gap-3">
-          <div><label class="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">Archivo de logo</label><input type="file" name="logo_file" accept="image/png,image/jpeg,image/webp" class="w-full text-xs" data-preview-target="logoPreview"><img id="logoPreview" class="hidden mt-2 h-20 max-w-full object-contain rounded border" alt="Vista previa del logo"></div>
-          <div><label class="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">Imagen de portada</label><input type="file" name="cover_file" accept="image/png,image/jpeg,image/webp" class="w-full text-xs" data-preview-target="coverPreview"><img id="coverPreview" class="hidden mt-2 h-20 w-full object-cover rounded border" alt="Vista previa de la portada"></div>
+        {% if uploads_enabled %}
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {% for field, label, preview in [('logo_file', 'Archivo de logo', 'logoPreview'), ('cover_file', 'Imagen de portada', 'coverPreview')] %}
+          <div class="rounded-xl border border-slate-200 p-3" data-file-control>
+            <label class="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-2" for="{{ field }}">{{ label }}</label>
+            <input id="{{ field }}" type="file" name="{{ field }}" accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp" class="sr-only" data-preview-target="{{ preview }}">
+            <div class="flex flex-wrap items-center gap-2"><label for="{{ field }}" class="cursor-pointer rounded-lg bg-slate-900 px-3 py-2 text-xs font-semibold text-white">Seleccionar archivo</label><button type="button" class="hidden text-xs text-rose-700" data-clear-file>Limpiar</button></div>
+            <p class="mt-2 truncate text-xs text-slate-500" data-file-name>Ningún archivo seleccionado</p>
+            <img id="{{ preview }}" class="hidden mt-2 h-20 max-w-full object-contain rounded border" alt="Vista previa de {{ label|lower }}">
+          </div>
+          {% endfor %}
         </div>
+        {% else %}
+        <div class="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900" role="status">La subida de imágenes estará disponible cuando se configure almacenamiento persistente. Por ahora utiliza la URL pública HTTPS del logo.</div>
+        {% endif %}
 
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
@@ -288,13 +300,21 @@
             <label class="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">Categoría</label>
             <select id="bCategory" name="category_id"
                     class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900 focus:outline-none focus:bg-white focus:ring-2 focus:ring-slate-900">
-              <option value="">Seleccionar Categoría</option>
+              <option value="">Sin categoría</option>
               {% for cat in categories %}
                 <option value="{{ cat.id }}">{{ cat.name }}</option>
               {% endfor %}
             </select>
+            {% if not categories %}<p id="emptyCategoriesHelp" class="mt-1 text-xs text-amber-700">Todavía no hay categorías. Puedes crear el negocio sin categoría o agregar una aquí.</p>{% endif %}
           </div>
         </div>
+
+        <fieldset class="rounded-xl border border-slate-200 p-3">
+          <legend class="px-1 text-xs font-semibold uppercase tracking-wider text-slate-700">Crear categoría sin perder este formulario</legend>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-2"><input id="newCategoryName" type="text" maxlength="80" placeholder="Nombre, ej. Cafetería" class="field"><input id="newCategorySlug" type="text" maxlength="80" placeholder="Slug, ej. cafeteria" class="field"></div>
+          <div class="mt-2 flex flex-wrap gap-1" aria-label="Sugerencias de categoría">{% for suggestion in ['Restaurante','Cafetería','Bar','Tienda','Servicios','Otros'] %}<button type="button" data-category-suggestion="{{ suggestion }}" class="rounded-full border border-slate-200 px-2 py-1 text-xs text-slate-600">{{ suggestion }}</button>{% endfor %}</div>
+          <div class="mt-2 flex items-center gap-3"><button id="createCategoryButton" type="button" class="rounded-lg border border-slate-300 px-3 py-2 text-xs font-semibold">Agregar categoría</button><span id="categoryMessage" class="text-xs" role="status" aria-live="polite"></span></div>
+        </fieldset>
 
         <div>
           <label class="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">URL del Logo (Opcional)</label>
@@ -302,21 +322,21 @@
                  class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900 focus:outline-none focus:bg-white focus:ring-2 focus:ring-slate-900">
         </div>
 
-        <div class="grid grid-cols-2 gap-3">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
             <label class="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">Color Primario</label>
-            <div class="flex items-center space-x-2">
-              <input type="color" id="bPrimaryColor" name="primary_color" value="#1E3A8A"
+            <div class="flex items-center gap-2" data-color-control>
+              <input type="color" id="bPrimaryColorPicker" value="#1E3A8A" data-color-picker
                      class="w-10 h-9 bg-slate-50 border border-slate-200 rounded-lg p-0.5 cursor-pointer">
-              <span class="text-xs text-slate-500 font-mono">Fondo Tarjeta</span>
+              <input type="text" id="bPrimaryColor" name="primary_color" value="#1E3A8A" maxlength="7" pattern="#[0-9A-Fa-f]{6}" data-color-text class="field font-mono uppercase" aria-label="Color primario hexadecimal">
             </div>
           </div>
           <div>
             <label class="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">Color Secundario</label>
-            <div class="flex items-center space-x-2">
-              <input type="color" id="bSecondaryColor" name="secondary_color" value="#FFFFFF"
+            <div class="flex items-center gap-2" data-color-control>
+              <input type="color" id="bSecondaryColorPicker" value="#FFFFFF" data-color-picker
                      class="w-10 h-9 bg-slate-50 border border-slate-200 rounded-lg p-0.5 cursor-pointer">
-              <span class="text-xs text-slate-500 font-mono">Etiquetas</span>
+              <input type="text" id="bSecondaryColor" name="secondary_color" value="#FFFFFF" maxlength="7" pattern="#[0-9A-Fa-f]{6}" data-color-text class="field font-mono uppercase" aria-label="Color secundario hexadecimal">
             </div>
           </div>
         </div>
@@ -357,7 +377,7 @@
         </div>
 
         <div class="flex space-x-3 pt-3 border-t border-slate-100">
-          <button type="button" onclick="closeBusinessModal()"
+          <button type="button" data-close-business
                   class="w-1/2 py-2 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 text-xs font-semibold transition">
             Cancelar
           </button>
@@ -461,11 +481,22 @@
 <script nonce="{{ csp_nonce() }}">
   function openBusinessModal() {
     document.getElementById('businessModal').classList.remove('hidden');
+    document.getElementById('bName').focus();
   }
 
   function closeBusinessModal() {
     document.getElementById('businessModal').classList.add('hidden');
-    document.getElementById('createBusinessForm').reset();
+  }
+
+  function showBusinessMessage(message, ok = false) {
+    const box = document.getElementById('businessFormMessage');
+    box.textContent = message;
+    box.className = `rounded-lg border px-3 py-2 text-sm ${ok ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-rose-200 bg-rose-50 text-rose-800'}`;
+    box.focus?.();
+  }
+
+  async function readJson(response) {
+    try { return await response.json(); } catch (_error) { return {}; }
   }
 
   // Dynamic loyalty type listener: disable stamp limit when 'points' is selected
@@ -501,23 +532,51 @@
         headers: { 'X-CSRFToken': csrfToken },
         body: payload
       });
-      const data = await res.json();
+      const data = await readJson(res);
       if (res.ok && data.status === 'success') {
-        window.location.reload();
+        showBusinessMessage(data.message || 'Negocio creado correctamente.', true);
+        window.setTimeout(() => window.location.reload(), 350);
       } else {
-        alert(data.message || 'Error al crear el negocio.');
-        btn.disabled = false;
-        btn.innerHTML = 'Crear Negocio';
+        showBusinessMessage(data.message || `No fue posible crear el negocio (HTTP ${res.status}).`);
       }
     } catch (err) {
-      alert('Error de conexión.');
+      showBusinessMessage('No fue posible conectar con el servidor. Conservamos los datos para que puedas intentarlo de nuevo.');
+    } finally {
       btn.disabled = false;
-      btn.innerHTML = 'Crear Negocio';
+      btn.textContent = 'Crear Negocio';
     }
   });
-  function previewUpload(input,id){const img=document.getElementById(id);if(input.files&&input.files[0]){img.src=URL.createObjectURL(input.files[0]);img.classList.remove('hidden');}}
+  function updateFileControl(input) {
+    const control = input.closest('[data-file-control]'); const img = document.getElementById(input.dataset.previewTarget); const file = input.files?.[0];
+    control.querySelector('[data-file-name]').textContent = file ? file.name : 'Ningún archivo seleccionado';
+    control.querySelector('[data-clear-file]').classList.toggle('hidden', !file);
+    if (file) { img.src = URL.createObjectURL(file); img.classList.remove('hidden'); } else { img.removeAttribute('src'); img.classList.add('hidden'); }
+  }
+  document.querySelectorAll('[data-open-business]').forEach(button => button.addEventListener('click', openBusinessModal));
+  document.querySelectorAll('[data-close-business]').forEach(button => button.addEventListener('click', closeBusinessModal));
+  document.querySelectorAll('[data-file-control]').forEach(control => {
+    const input = control.querySelector('input[type=file]'); input.addEventListener('change', () => updateFileControl(input));
+    control.querySelector('[data-clear-file]').addEventListener('click', () => { input.value = ''; updateFileControl(input); });
+  });
+  document.querySelectorAll('[data-color-control]').forEach(control => {
+    const picker = control.querySelector('[data-color-picker]'); const text = control.querySelector('[data-color-text]');
+    picker.addEventListener('input', () => { text.value = picker.value.toUpperCase(); });
+    text.addEventListener('input', () => { text.value = text.value.toUpperCase(); if (/^#[0-9A-F]{6}$/.test(text.value)) picker.value = text.value; });
+  });
+  document.querySelectorAll('[data-category-suggestion]').forEach(button => button.addEventListener('click', () => {
+    document.getElementById('newCategoryName').value = button.dataset.categorySuggestion;
+    document.getElementById('newCategorySlug').value = button.dataset.categorySuggestion.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  }));
+  document.getElementById('createCategoryButton').addEventListener('click', async (event) => {
+    const button = event.currentTarget; const message = document.getElementById('categoryMessage'); button.disabled = true; message.textContent = '';
+    try {
+      const response = await fetch('/admin/categories', {method:'POST', headers:{'Content-Type':'application/json','Accept':'application/json','X-CSRFToken':csrfToken}, body:JSON.stringify({name:document.getElementById('newCategoryName').value, slug:document.getElementById('newCategorySlug').value})});
+      const data = await readJson(response); if (!response.ok) throw new Error(data.message || `No fue posible crear la categoría (HTTP ${response.status}).`);
+      const option = document.createElement('option'); option.value = String(data.category.id); option.textContent = data.category.name; option.selected = true; document.getElementById('bCategory').appendChild(option);
+      document.getElementById('emptyCategoriesHelp')?.remove(); document.getElementById('newCategoryName').value = ''; document.getElementById('newCategorySlug').value = ''; message.textContent = 'Categoría creada y seleccionada.'; message.className = 'text-xs text-emerald-700';
+    } catch (error) { message.textContent = error.message; message.className = 'text-xs text-rose-700'; } finally { button.disabled = false; }
+  });
   document.querySelectorAll('[data-auto-submit]').forEach((select) => select.addEventListener('change', () => select.form.requestSubmit()));
-  document.querySelectorAll('[data-preview-target]').forEach((input) => input.addEventListener('change', () => previewUpload(input, input.dataset.previewTarget)));
   document.querySelector('[data-admin-selector]')?.addEventListener('change', (event) => selectAdmin(event.target.value));
 </script>
 {% endblock %}
