@@ -123,6 +123,46 @@ class GoogleWalletRealTestCase(unittest.TestCase):
                          "rotated-private-token")
         self.customer.qr_code_token = original
 
+    def test_existing_object_issuance_updates_metadata_without_balance(self):
+        session = FakeSession([
+            FakeResponse(200, {"id": "class"}), FakeResponse(200, {"id": "class"}),
+            FakeResponse(200, {"id": "object"}), FakeResponse(200, {"id": "object"}),
+        ])
+        service = GoogleWalletService(
+            mode="real", credentials_info=self.credentials, http_session=session,
+        )
+        service.create_jwt_pass(self.customer)
+        object_patch = session.calls[-1][2]
+        self.assertEqual(session.calls[-1][0], "PATCH")
+        self.assertNotIn("loyaltyPoints", object_patch)
+        self.assertEqual(object_patch["barcode"]["value"], self.customer.qr_code_token)
+        self.assertNotIn("id", object_patch)
+        self.assertNotIn("classId", object_patch)
+
+    def test_object_create_conflict_never_patches_balance_from_issuance(self):
+        service = self.service([
+            FakeResponse(404), FakeResponse(409), FakeResponse(200, {"id": "object"}),
+        ])
+        service._ensure_loyalty_object(self.customer)
+        self.assertEqual([call[0] for call in service.http.calls], ["GET", "POST", "PATCH"])
+        self.assertIn("loyaltyPoints", service.http.calls[1][2])
+        self.assertNotIn("loyaltyPoints", service.http.calls[2][2])
+
+    def test_issuance_and_worker_interleaving_leaves_balance_to_worker_only(self):
+        service = self.service([
+            FakeResponse(200, {"updated": True}),
+            FakeResponse(200, {"id": "class"}), FakeResponse(200, {"id": "class"}),
+            FakeResponse(200, {"id": "object"}), FakeResponse(200, {"id": "object"}),
+        ])
+        self.customer.current_stamps = 3
+        worker_result = service.update_loyalty_object(self.customer)
+        service.create_jwt_pass(self.customer)
+        self.assertEqual(worker_result["status"], "success")
+        balance_writes = [body for _method, _url, body in service.http.calls
+                          if body and "loyaltyPoints" in body]
+        self.assertEqual(len(balance_writes), 1)
+        self.assertEqual(balance_writes[0]["loyaltyPoints"]["balance"]["string"], "3 / 8")
+
     def test_object_minimizes_personal_data_and_tenants_do_not_collide(self):
         service = self.service([])
         payload = service.create_loyalty_object(self.customer)
@@ -157,10 +197,13 @@ class GoogleWalletRealTestCase(unittest.TestCase):
             FakeResponse(200, {"id": "class"}),
             FakeResponse(404),
             FakeResponse(200, {"id": "object"}),
+            FakeResponse(200, {"updated": True}),
         ])
         result = service.update_loyalty_object(self.customer)
         self.assertEqual(result["status"], "success")
-        self.assertEqual([call[0] for call in service.http.calls], ["PATCH", "GET", "PATCH", "GET", "POST"])
+        self.assertEqual([call[0] for call in service.http.calls],
+                         ["PATCH", "GET", "PATCH", "GET", "POST", "PATCH"])
+        self.assertIn("loyaltyPoints", service.http.calls[-1][2])
 
     def test_disabled_endpoint_is_generic_and_wallet_token_remains_required(self):
         self.app.config["GOOGLE_WALLET_MODE"] = "disabled"

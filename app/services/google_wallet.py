@@ -185,6 +185,26 @@ class GoogleWalletService:
                     raise
         return self._request("PATCH", resource, body=body)
 
+    def _ensure_loyalty_object(self, customer):
+        """Create an object once; refresh existing metadata without its balance."""
+        body = self.create_loyalty_object(customer)
+        resource = f"loyaltyObject/{quote(body['id'], safe='')}"
+        metadata = {
+            key: value for key, value in body.items()
+            if key not in {"id", "classId", "loyaltyPoints"}
+        }
+        try:
+            self._request("GET", resource)
+        except GoogleWalletAPIError as exc:
+            if exc.status_code != 404:
+                raise
+            try:
+                return self._request("POST", "loyaltyObject", body=body)
+            except GoogleWalletAPIError as create_error:
+                if create_error.status_code != 409:
+                    raise
+        return self._request("PATCH", resource, body=metadata)
+
     def ensure_resources(self, customer):
         if self.mode != "real":
             return
@@ -192,8 +212,7 @@ class GoogleWalletService:
         if "programLogo" not in loyalty_class:
             raise GoogleWalletConfigurationError("Google Wallet real requiere un logotipo HTTPS público.")
         self._upsert("loyaltyClass", loyalty_class["id"], loyalty_class)
-        loyalty_object = self.create_loyalty_object(customer)
-        self._upsert("loyaltyObject", loyalty_object["id"], loyalty_object)
+        self._ensure_loyalty_object(customer)
 
     def create_jwt_pass(self, customer, origins=None) -> Tuple[str, str]:
         self._require_enabled()
@@ -238,7 +257,12 @@ class GoogleWalletService:
             if exc.status_code == 404:
                 try:
                     self.ensure_resources(customer)
-                    return {"status": "success", "object_id": self.get_object_id(customer), "data": {}}
+                    object_id = self.get_object_id(customer)
+                    result = self._request(
+                        "PATCH", f"loyaltyObject/{quote(object_id, safe='')}",
+                        body=patch_body,
+                    )
+                    return {"status": "success", "object_id": object_id, "data": result}
                 except GoogleWalletAPIError as recovery_error:
                     exc = recovery_error
                 except GoogleWalletConfigurationError:
