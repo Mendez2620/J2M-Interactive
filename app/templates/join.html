@@ -208,7 +208,9 @@
         document.getElementById('wallet-success-section').classList.remove('hidden');
 
         document.getElementById('customer-greeting').textContent = `¡Hola ${data.customer.full_name}! Guarda tu tarjeta digital en tu billetera móvil:`;
-        document.getElementById('google-wallet-btn').href = data.google_wallet_url;
+        const googleButton = document.getElementById('google-wallet-btn');
+        if (data.google_wallet_url) googleButton.href = data.google_wallet_url;
+        else googleButton.classList.add('hidden');
         document.getElementById('apple-wallet-btn').href = data.apple_wallet_url;
       } else {
         alert(data.message || 'Ocurrió un error al registrarte. Intenta nuevamente.');

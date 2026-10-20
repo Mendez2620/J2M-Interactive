@@ -80,13 +80,15 @@ class GoogleWalletTestCase(unittest.TestCase):
 
         # Check LoyaltyClass
         loyalty_class = payload_data["loyaltyClasses"][0]
-        self.assertIn(self.business_stamps.slug.replace("-", "_"), loyalty_class["id"])
+        self.assertEqual(loyalty_class["id"], f"{service.issuer_id}.business_{self.business_stamps.id}")
         self.assertEqual(loyalty_class["issuerName"], "Café Central")
         self.assertEqual(loyalty_class["hexBackgroundColor"], "#4A2E18")
 
         # Check LoyaltyObject
         loyalty_object = payload_data["loyaltyObjects"][0]
-        self.assertEqual(loyalty_object["accountName"], "Carlos Mendoza")
+        self.assertEqual(loyalty_object["accountName"], "Miembro")
+        self.assertNotIn("carlos@example.com", str(loyalty_object))
+        self.assertNotIn("+5215512345678", str(loyalty_object))
         self.assertEqual(loyalty_object["barcode"]["value"], self.customer_stamps.qr_code_token)
         self.assertEqual(loyalty_object["loyaltyPoints"]["balance"]["string"], "5 / 8")
 
@@ -113,13 +115,20 @@ class GoogleWalletTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
 
         data = response.get_json()
-        self.assertEqual(data["status"], "success")
+        self.assertEqual(data["status"], "mock")
         self.assertEqual(data["customer_id"], self.customer_stamps.id)
         self.assertEqual(data["business_name"], "Café Central")
         self.assertTrue(data["save_url"].startswith("https://pay.google.com/gp/v/save/"))
         self.assertNotIn("jwt", data)
         self.assertEqual(response.headers["Cache-Control"], "no-store, private")
         self.assertEqual(response.headers["Referrer-Policy"], "no-referrer")
+
+        redirect_response = self.client.get(
+            f"/api/customers/{self.customer_stamps.id}/wallet/google",
+            query_string={"token": issue_wallet_token(self.customer_stamps), "format": "redirect"},
+        )
+        self.assertEqual(redirect_response.status_code, 302)
+        self.assertTrue(redirect_response.location.startswith("https://pay.google.com/gp/v/save/"))
 
     def test_google_wallet_endpoint_not_found(self):
         """Test GET /api/customers/<id>/wallet/google with non-existing customer."""

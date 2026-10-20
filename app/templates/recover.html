@@ -21,7 +21,7 @@
         <div><h2 class="font-bold text-xl">Hola, {{ customer.full_name }}</h2><p class="text-sm text-slate-500">Tu tarjeta existente está lista.</p></div>
         <div class="rounded-2xl bg-slate-50 p-5"><small class="uppercase tracking-wide text-slate-500">{{ 'Puntos actuales' if business.loyalty_type == 'points' else 'Sellos actuales' }}</small><strong class="block text-3xl mt-1">{{ ('%.0f'|format(customer.current_points)) if business.loyalty_type == 'points' else customer.current_stamps }}</strong></div>
         <a href="{{ url_for('recovery.recovery_apple_wallet', business_slug=business.slug) }}" class="btn w-full bg-black text-white">{{ icon('wallet') }} Agregar a Apple Wallet</a>
-        <a href="{{ url_for('recovery.recovery_google_wallet', business_slug=business.slug) }}" class="btn w-full bg-slate-900 text-white">{{ icon('wallet') }} Guardar en Google Wallet</a>
+        {% if google_enabled %}<a href="{{ url_for('recovery.recovery_google_wallet', business_slug=business.slug) }}" class="btn w-full bg-slate-900 text-white">{{ icon('wallet') }} Guardar en Google Wallet</a>{% endif %}
         {% if google_mock %}<p class="text-xs text-amber-700">Google Wallet está en modo de desarrollo; la emisión real requiere credenciales configuradas.</p>{% endif %}
         <form method="POST" action="{{ url_for('recovery.end_recovery', business_slug=business.slug) }}"><button class="text-sm text-slate-500 underline">Terminar recuperación</button></form>
       </div>

@@ -1,8 +1,7 @@
 from datetime import datetime
-from flask import Blueprint, jsonify, render_template, request
+from flask import Blueprint, current_app, jsonify, render_template, request
 from app.extensions import db
 from app.models import Business, Customer
-from app.services import GoogleWalletService
 from app.wallet_access import issue_wallet_token
 from app.phone_numbers import normalize_phone
 
@@ -107,7 +106,10 @@ def join_business(slug: str):
 
     # Generate Wallet links
     wallet_token = issue_wallet_token(customer)
-    google_wallet_url = f"/api/customers/{customer.id}/wallet/google?token={wallet_token}"
+    google_wallet_url = (
+        f"/api/customers/{customer.id}/wallet/google?token={wallet_token}&format=redirect"
+        if current_app.config.get("GOOGLE_WALLET_MODE") != "disabled" else None
+    )
     apple_wallet_url = f"/api/customers/{customer.id}/wallet/apple?token={wallet_token}"
 
     return jsonify({

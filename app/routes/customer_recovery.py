@@ -19,6 +19,7 @@ from app.models import (
 )
 from app.security import valid_email, wants_json
 from app.services import AppleWalletService, GoogleWalletService
+from app.services.google_wallet import GoogleWalletAPIError, GoogleWalletConfigurationError
 
 
 recovery_bp = Blueprint("recovery", __name__)
@@ -121,11 +122,12 @@ def recover(business_slug):
     business = _business_or_404(business_slug)
     verified = _current_authorization(business)
     customer = verified[1] if verified else None
-    google_mock = GoogleWalletService().is_mock_key if customer else False
+    google_mode = current_app.config.get("GOOGLE_WALLET_MODE", "mock") if customer else "disabled"
     return render_template(
         "recover.html", business=business, customer=customer,
         challenge_pending=bool(session.get("customer_recovery_challenge_id")),
-        google_mock=google_mock,
+        google_enabled=google_mode != "disabled",
+        google_mock=google_mode == "mock",
         notice=GENERIC_REQUEST_MESSAGE if request.args.get("requested") else None,
     )
 
@@ -299,6 +301,12 @@ def recovery_google_wallet(business_slug):
     try:
         _jwt_token, save_url = GoogleWalletService().create_jwt_pass(verified[1])
         return redirect(save_url)
+    except GoogleWalletConfigurationError:
+        current_app.logger.warning("google_wallet_recovery_unavailable business_id=%s", business.id)
+        return render_template("recover.html", business=business, customer=verified[1], challenge_pending=False, google_enabled=False, google_mock=False, error="Google Wallet no está disponible temporalmente."), 503
+    except GoogleWalletAPIError as exc:
+        current_app.logger.warning("google_wallet_recovery_failed business_id=%s status_code=%s", business.id, exc.status_code)
+        return render_template("recover.html", business=business, customer=verified[1], challenge_pending=False, google_enabled=True, google_mock=False, error="No fue posible preparar Google Wallet."), 502
     except Exception:
         current_app.logger.exception("Google Wallet recovery issuance failed")
         return render_template("recover.html", business=business, customer=verified[1], challenge_pending=False, google_mock=False, error="No fue posible generar el enlace de Google Wallet."), 502

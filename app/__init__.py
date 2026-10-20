@@ -75,6 +75,13 @@ def create_app(config_name=None):
         if upload_backend != "disabled":
             raise RuntimeError("Producción requiere UPLOAD_STORAGE_BACKEND=disabled hasta disponer de almacenamiento persistente.")
         app.config["UPLOAD_STORAGE_BACKEND"] = upload_backend
+        wallet_mode = os.getenv("GOOGLE_WALLET_MODE", app.config.get("GOOGLE_WALLET_MODE", "disabled")).lower()
+        if wallet_mode not in {"disabled", "real"}:
+            raise RuntimeError("Producción solo permite GOOGLE_WALLET_MODE=disabled o real.")
+        app.config["GOOGLE_WALLET_MODE"] = wallet_mode
+        if wallet_mode == "real":
+            from app.services.google_wallet import GoogleWalletService
+            GoogleWalletService(mode="real")
 
     # Initialize extensions
     db.init_app(app)
@@ -189,4 +196,15 @@ def create_app(config_name=None):
         db.session.add(admin)
         db.session.commit()
         click.echo(f"Administrador de plataforma creado: {email}")
+
+    @app.cli.command("process-google-wallet-sync")
+    def process_google_wallet_sync():
+        """Process the persistent Google Wallet outbox once."""
+        import json
+        from app.services.google_wallet_sync_service import (
+            google_wallet_sync_counts, process_pending_google_wallet_jobs,
+        )
+        processed = process_pending_google_wallet_jobs()
+        counts = google_wallet_sync_counts()
+        print(json.dumps({"processed": processed, **counts}, sort_keys=True))
     return app

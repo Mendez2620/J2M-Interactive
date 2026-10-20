@@ -15,6 +15,7 @@ class ProductionConfigTestCase(unittest.TestCase):
             "DATABASE_URL": "postgresql://user:password@db.example.test:5432/postgres",
             "DATABASE_SSLMODE": "require",
             "UPLOAD_STORAGE_BACKEND": "disabled",
+            "GOOGLE_WALLET_MODE": "disabled",
         }
         environment.update(overrides)
         return environment
@@ -102,6 +103,18 @@ class ProductionConfigTestCase(unittest.TestCase):
         with patch.dict(os.environ, self.valid_environment(UPLOAD_STORAGE_BACKEND="local"), clear=True), \
              patch.object(ProductionConfig, "PUBLIC_BASE_URL", "https://app.example.com"), \
              self.assertRaisesRegex(RuntimeError, "UPLOAD_STORAGE_BACKEND=disabled"):
+            create_app("production")
+
+    def test_production_never_allows_google_wallet_mock_or_incomplete_real_mode(self):
+        with patch.dict(os.environ, self.valid_environment(GOOGLE_WALLET_MODE="mock"), clear=True), \
+             patch.object(ProductionConfig, "PUBLIC_BASE_URL", "https://app.example.com"), \
+             self.assertRaisesRegex(RuntimeError, "disabled o real"):
+            create_app("production")
+        with patch.dict(os.environ, self.valid_environment(
+                 GOOGLE_WALLET_MODE="real", GOOGLE_ISSUER_ID="3388000000023203929"
+             ), clear=True), \
+             patch.object(ProductionConfig, "PUBLIC_BASE_URL", "https://app.example.com"), \
+             self.assertRaisesRegex(RuntimeError, "credenciales"):
             create_app("production")
 
 

@@ -1,8 +1,9 @@
 import logging
-from flask import Blueprint, jsonify, request, send_file
+from flask import Blueprint, jsonify, redirect, request, send_file
 from app.extensions import db
 from app.models import Customer
 from app.services import GoogleWalletService, AppleWalletService
+from app.services.google_wallet import GoogleWalletAPIError, GoogleWalletConfigurationError
 from app.wallet_access import validate_wallet_token
 
 logger = logging.getLogger(__name__)
@@ -61,25 +62,26 @@ def get_google_wallet_pass(customer_id: int):
         wallet_service = GoogleWalletService()
         _jwt_token, save_url = wallet_service.create_jwt_pass(customer)
 
+        if request.args.get("format") == "redirect":
+            return redirect(save_url, code=302)
+
         response_data = {
-            "status": "success",
+            "status": "mock" if wallet_service.mode == "mock" else "success",
             "customer_id": customer.id,
             "business_name": customer.business.name,
             "save_url": save_url,
-            "is_dev_mock_key": wallet_service.is_mock_key,
-            "message": "Enlace de pase de Google Wallet generado correctamente.",
+            "mode": wallet_service.mode,
+            "message": ("Simulación de Google Wallet generada para desarrollo."
+                        if wallet_service.mode == "mock" else "Enlace de Google Wallet preparado."),
         }
-
-        if wallet_service.is_mock_key:
-            response_data["notice"] = (
-                "Se utilizó una clave RSA temporal para desarrollo. "
-                "Para producción, configura GOOGLE_ISSUER_ID, GOOGLE_SA_EMAIL "
-                "y GOOGLE_SA_PRIVATE_KEY en las variables de entorno."
-            )
-
         return jsonify(response_data), 200
-
-    except Exception as e:
+    except GoogleWalletConfigurationError:
+        logger.warning("google_wallet_issuance_unavailable customer_id=%s", customer_id)
+        return jsonify({"status": "unavailable", "message": "Google Wallet no está disponible temporalmente."}), 503
+    except GoogleWalletAPIError as exc:
+        logger.warning("google_wallet_issuance_failed customer_id=%s status_code=%s", customer_id, exc.status_code)
+        return jsonify({"status": "error", "message": "No fue posible preparar Google Wallet."}), 502
+    except Exception:
         logger.exception("Error generating Google Wallet pass for customer %s", customer_id)
         return (
             jsonify({

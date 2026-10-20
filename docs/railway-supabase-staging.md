@@ -81,7 +81,7 @@ flask --app run.py db upgrade
 flask --app run.py db current
 ```
 
-El resultado final esperado es `e2f3a4b5c6d7 (head)`. No ejecute `seed-db`, `db.drop_all()`, downgrades ni scripts de semillas. No añada `db upgrade` al `CMD`, al health check ni a una petición web: dos réplicas podrían intentar migrar simultáneamente.
+El resultado final esperado es `f3a4b5c6d7e8 (head)`. No ejecute `seed-db`, `db.drop_all()`, downgrades ni scripts de semillas. No añada `db upgrade` al `CMD`, al health check ni a una petición web: dos réplicas podrían intentar migrar simultáneamente.
 
 Un `/api/ready` con estado `200` solo demuestra que `SELECT 1` funciona. No demuestra que las migraciones estén aplicadas. Confirme `flask --app run.py db current`, ejecute el upgrade controlado y vuelva a confirmar el head antes de abrir los paneles.
 

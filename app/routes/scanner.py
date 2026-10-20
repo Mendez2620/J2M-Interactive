@@ -227,11 +227,11 @@ def process_transaction():
     if result.replay:
         return _replay_or_conflict(result.transaction, fingerprint)
     tx, customer = result.transaction, result.customer
-    google_sync_result, apple_notified_count = None, 0
+    google_mode = current_app.config.get("GOOGLE_WALLET_MODE", "disabled")
+    google_status = "pending" if google_mode == "real" else google_mode
+    apple_notified_count = 0
     try:
-        from app.services import GoogleWalletService
         from app.routes.apple_webservice import notify_apple_wallet_devices
-        google_sync_result = GoogleWalletService().update_loyalty_object(customer)
         apple_notified_count = notify_apple_wallet_devices(customer)
     except Exception:
         current_app.logger.exception("Wallet sync failed after transaction %s", tx.id)
@@ -246,5 +246,5 @@ def process_transaction():
     return jsonify({"status": "success", "customer": {"id": customer.id,
         "current_points": customer.current_points, "current_stamps": customer.current_stamps},
         "transaction": tx.to_dict(), "wallet_sync": {
-            "google_status": google_sync_result.get("status") if isinstance(google_sync_result, dict) else "skipped",
+            "google_status": google_status,
             "apple_devices_notified": apple_notified_count}, "reward_notified": reward_notified}), 200
