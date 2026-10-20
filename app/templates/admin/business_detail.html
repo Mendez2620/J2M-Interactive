@@ -125,10 +125,15 @@
             </div>
           </div>
 
+          {% if uploads_enabled %}
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div><label class="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">Sustituir logo</label><input type="file" name="logo_file" accept="image/png,image/jpeg,image/webp" class="w-full text-xs" data-preview-target="detailLogoPreview"><img id="detailLogoPreview" src="{{ url_for('static', filename=business.logo_path) if business.logo_path else '' }}" class="mt-2 h-24 max-w-full object-contain rounded border {{ 'hidden' if not business.logo_path }}" alt="Vista previa del logo"><p class="mt-1 text-[11px] text-slate-500">El archivo local tiene prioridad sobre la URL externa.</p></div>
-            <div><label class="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">Sustituir portada</label><input type="file" name="cover_file" accept="image/png,image/jpeg,image/webp" class="w-full text-xs" data-preview-target="detailCoverPreview"><img id="detailCoverPreview" src="{{ url_for('static', filename=business.cover_path) if business.cover_path else '' }}" class="mt-2 h-24 w-full object-cover rounded border {{ 'hidden' if not business.cover_path }}" alt="Vista previa de la portada"></div>
+            {% for field, label, preview, current_path in [('logo_file', 'Sustituir logo', 'detailLogoPreview', business.logo_path), ('cover_file', 'Sustituir portada', 'detailCoverPreview', business.cover_path)] %}
+            <div class="rounded-xl border border-slate-200 p-3" data-file-control><label for="detail_{{ field }}" class="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-2">{{ label }}</label><input id="detail_{{ field }}" type="file" name="{{ field }}" accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp" class="sr-only" data-preview-target="{{ preview }}"><div class="flex flex-wrap items-center gap-2"><label for="detail_{{ field }}" class="cursor-pointer rounded-lg bg-slate-900 px-3 py-2 text-xs font-semibold text-white">Seleccionar archivo</label><button type="button" class="hidden text-xs text-rose-700" data-clear-file>Limpiar</button></div><p class="mt-2 truncate text-xs text-slate-500" data-file-name>Ningún archivo seleccionado</p><img id="{{ preview }}" src="{{ url_for('static', filename=current_path) if current_path else '' }}" class="mt-2 h-24 max-w-full object-contain rounded border {{ 'hidden' if not current_path }}" alt="Vista previa de {{ label|lower }}"></div>
+            {% endfor %}
           </div>
+          {% else %}
+          <div class="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900" role="status">La subida de imágenes estará disponible cuando se configure almacenamiento persistente. Por ahora utiliza la URL pública HTTPS del logo.</div>
+          {% endif %}
 
           <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
             <div>
@@ -178,18 +183,18 @@
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label class="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">Color Primario (Fondo Tarjeta)</label>
-              <div class="flex items-center space-x-3">
-                <input type="color" name="primary_color" value="{{ business.primary_color }}"
+              <div class="flex items-center gap-2" data-color-control>
+                <input type="color" value="{{ business.primary_color }}" data-color-picker
                        class="w-12 h-9 bg-slate-50 border border-slate-200 rounded-lg p-0.5 cursor-pointer">
-                <span class="text-xs font-mono text-slate-600">{{ business.primary_color }}</span>
+                <input type="text" name="primary_color" value="{{ business.primary_color }}" maxlength="7" pattern="#[0-9A-Fa-f]{6}" data-color-text class="field font-mono uppercase" aria-label="Color primario hexadecimal">
               </div>
             </div>
             <div>
               <label class="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">Color Secundario (Etiquetas)</label>
-              <div class="flex items-center space-x-3">
-                <input type="color" name="secondary_color" value="{{ business.secondary_color }}"
+              <div class="flex items-center gap-2" data-color-control>
+                <input type="color" value="{{ business.secondary_color }}" data-color-picker
                        class="w-12 h-9 bg-slate-50 border border-slate-200 rounded-lg p-0.5 cursor-pointer">
-                <span class="text-xs font-mono text-slate-600">{{ business.secondary_color }}</span>
+                <input type="text" name="secondary_color" value="{{ business.secondary_color }}" maxlength="7" pattern="#[0-9A-Fa-f]{6}" data-color-text class="field font-mono uppercase" aria-label="Color secundario hexadecimal">
               </div>
             </div>
           </div>
@@ -622,7 +627,7 @@
     if (resetPasswordReturnFocus?.isConnected) resetPasswordReturnFocus.focus();
     resetPasswordReturnFocus = null;
   }
-  function previewUpload(input,id){const img=document.getElementById(id);if(input.files&&input.files[0]){img.src=URL.createObjectURL(input.files[0]);img.classList.remove('hidden');}}
+  function updateFileControl(input){const control=input.closest('[data-file-control]');const img=document.getElementById(input.dataset.previewTarget);const file=input.files?.[0];control.querySelector('[data-file-name]').textContent=file?file.name:'Ningún archivo seleccionado';control.querySelector('[data-clear-file]').classList.toggle('hidden',!file);if(file){img.src=URL.createObjectURL(file);img.classList.remove('hidden');}}
 
   document.addEventListener('DOMContentLoaded', function() {
     const permissionsModal = document.getElementById('permissionsModal');
@@ -725,7 +730,8 @@
         if (!window.confirm(`¿Eliminar al usuario ${form.dataset.username}?`)) event.preventDefault();
       });
     });
-    document.querySelectorAll('[data-preview-target]').forEach((input) => input.addEventListener('change', () => previewUpload(input, input.dataset.previewTarget)));
+    document.querySelectorAll('[data-file-control]').forEach((control) => { const input=control.querySelector('input[type=file]'); input.addEventListener('change',()=>updateFileControl(input)); control.querySelector('[data-clear-file]').addEventListener('click',()=>{input.value='';updateFileControl(input);}); });
+    document.querySelectorAll('[data-color-control]').forEach((control) => { const picker=control.querySelector('[data-color-picker]');const text=control.querySelector('[data-color-text]');picker.addEventListener('input',()=>{text.value=picker.value.toUpperCase();});text.addEventListener('input',()=>{text.value=text.value.toUpperCase();if(/^#[0-9A-F]{6}$/.test(text.value))picker.value=text.value;}); });
     document.querySelector('[data-loyalty-toggle]')?.addEventListener('change', toggleLoyaltyFields);
     const pointsInput = document.getElementById('pointsPerCurrency');
     function updatePointsExample() { if (pointsInput) document.getElementById('pointsExample').textContent = `Ejemplo: una compra de $100 MXN otorga ${((Number(pointsInput.value) || 0) * 100).toLocaleString('es-MX')} puntos.`; }
