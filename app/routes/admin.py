@@ -5,8 +5,11 @@ import math
 import os
 import re
 import uuid
+import unicodedata
 import warnings
 from PIL import Image, UnidentifiedImageError
+from sqlalchemy import or_
+from sqlalchemy.exc import IntegrityError
 from werkzeug.utils import secure_filename
 from app.extensions import db
 from app.models import Business, BusinessCategory, Customer, PlatformAdmin, Staff, Transaction
@@ -26,6 +29,7 @@ VISUAL_THEMES = {"modern", "elegant", "minimal"}
 FONT_STYLES = {"modern", "classic", "geometric"}
 TEXT_SIZES = {"compact", "standard", "large"}
 HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+CATEGORY_SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 
 def validate_image(upload):
@@ -151,6 +155,30 @@ def parse_visual_preferences(data, current=None):
     return values
 
 
+def parse_category_id(value):
+    """Return a real category id or None without passing loose strings to PostgreSQL."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise ValueError("La categoría seleccionada no es válida.")
+    if isinstance(value, str):
+        value = value.strip()
+        if not value.isascii() or not value.isdigit():
+            raise ValueError("La categoría seleccionada no es válida.")
+    try:
+        category_id = int(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("La categoría seleccionada no es válida.")
+    if category_id <= 0 or db.session.get(BusinessCategory, category_id) is None:
+        raise ValueError("La categoría seleccionada no existe.")
+    return category_id
+
+
+def category_slug(value):
+    normalized = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^a-z0-9]+", "-", normalized.lower()).strip("-")
+
+
 def calculate_age_distribution():
     """Calculates customer demographics into standard age buckets based on birthdate."""
     today = date.today()
@@ -246,6 +274,7 @@ def dashboard():
         current_search=search,
         current_category=category_id,
         platform_admins=PlatformAdmin.query.order_by(PlatformAdmin.name).all(),
+        uploads_enabled=current_app.config.get("UPLOAD_STORAGE_BACKEND", "local") == "local",
     )
 
 
@@ -273,14 +302,8 @@ def create_business():
         return jsonify({"status": "error", "message": f"El slug '{slug}' ya está en uso."}), 409
 
     # Parse optional fields
-    category_id = data.get("category_id")
-    if category_id:
-        try:
-            category_id = int(category_id)
-        except (ValueError, TypeError):
-            category_id = None
-
     try:
+        category_id = parse_category_id(data.get("category_id"))
         loyalty_type, points_per_currency, stamps_reward_limit = parse_loyalty(data)
         visual = parse_visual_preferences(data)
     except ValueError as exc:
@@ -327,10 +350,16 @@ def create_business():
     try:
         db.session.add(business)
         db.session.commit()
-    except Exception:
+    except IntegrityError:
         db.session.rollback()
         cleanup_created_files(created_files)
-        raise
+        current_app.logger.warning("No se pudo crear el negocio por un conflicto de integridad.")
+        return jsonify({"status": "error", "message": "El nombre o slug del negocio entra en conflicto con un registro existente."}), 409
+    except Exception as exc:
+        db.session.rollback()
+        cleanup_created_files(created_files)
+        current_app.logger.error("No se pudo crear el negocio (%s).", type(exc).__name__)
+        return jsonify({"status": "error", "message": "No fue posible crear el negocio."}), 500
 
     return jsonify({
         "status": "success",
@@ -376,6 +405,7 @@ def get_business_details(business_id: int):
         transactions=transactions,
         staff_members=staff_members,
         total_volume=total_volume,
+        uploads_enabled=current_app.config.get("UPLOAD_STORAGE_BACKEND", "local") == "local",
     )
 
 
@@ -391,6 +421,7 @@ def update_business(business_id: int):
 
     try:
         visual = parse_visual_preferences(data, business)
+        category_id = parse_category_id(data.get("category_id")) if "category_id" in data else business.category_id
     except ValueError as exc:
         return jsonify({"status": "error", "message": str(exc)}), 400
 
@@ -403,10 +434,7 @@ def update_business(business_id: int):
             return jsonify({"status": "error", "message": f"El slug '{new_slug}' ya está en uso."}), 409
         business.slug = new_slug
     if "category_id" in data:
-        try:
-            business.category_id = int(data["category_id"]) if data["category_id"] else None
-        except (ValueError, TypeError):
-            business.category_id = None
+        business.category_id = category_id
     if "logo_url" in data:
         business.logo_url = data["logo_url"].strip() or None
     business.primary_color = visual["primary_color"]
@@ -462,10 +490,15 @@ def update_business(business_id: int):
 
     try:
         db.session.commit()
-    except Exception:
+    except IntegrityError:
         db.session.rollback()
         cleanup_created_files(locals().get("created_files", []))
-        raise
+        return jsonify({"status": "error", "message": "El nombre o slug del negocio entra en conflicto con un registro existente."}), 409
+    except Exception as exc:
+        db.session.rollback()
+        cleanup_created_files(locals().get("created_files", []))
+        current_app.logger.error("No se pudo actualizar el negocio (%s).", type(exc).__name__)
+        return jsonify({"status": "error", "message": "No fue posible actualizar el negocio."}), 500
 
     if request.is_json or request.headers.get("Accept") == "application/json":
         return jsonify({
@@ -899,14 +932,33 @@ def manage_categories():
     if request.method == "POST":
         data = request.get_json(silent=True) or request.form.to_dict()
         name = (data.get("name") or "").strip()
-        slug = (data.get("slug") or "").strip().lower() or name.lower().replace(" ", "-")
+        supplied_slug = (data.get("slug") or "").strip().lower()
+        slug = supplied_slug or category_slug(name)
 
         if not name:
             return jsonify({"status": "error", "message": "El nombre de la categoría es requerido."}), 400
+        if len(name) > 80:
+            return jsonify({"status": "error", "message": "El nombre de la categoría no puede exceder 80 caracteres."}), 400
+        if not slug or len(slug) > 80 or not CATEGORY_SLUG_RE.fullmatch(slug):
+            return jsonify({"status": "error", "message": "El slug debe usar letras minúsculas, números y guiones."}), 400
+
+        duplicate = BusinessCategory.query.filter(
+            or_(db.func.lower(BusinessCategory.name) == name.lower(), BusinessCategory.slug == slug)
+        ).first()
+        if duplicate:
+            return jsonify({"status": "error", "message": "Ya existe una categoría con ese nombre o slug."}), 409
 
         category = BusinessCategory(name=name, slug=slug)
-        db.session.add(category)
-        db.session.commit()
+        try:
+            db.session.add(category)
+            db.session.commit()
+        except IntegrityError:
+            db.session.rollback()
+            return jsonify({"status": "error", "message": "Ya existe una categoría con ese nombre o slug."}), 409
+        except Exception as exc:
+            db.session.rollback()
+            current_app.logger.error("No se pudo crear la categoría (%s).", type(exc).__name__)
+            return jsonify({"status": "error", "message": "No fue posible crear la categoría."}), 500
         return jsonify({"status": "success", "category": category.to_dict()}), 201
 
     categories = BusinessCategory.query.order_by(BusinessCategory.name).all()
