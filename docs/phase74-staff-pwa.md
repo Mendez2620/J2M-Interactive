@@ -2,6 +2,7 @@
 
 ## Accesos
 
+- Inicio común de la PWA: `/staff-access`, con selección explícita de rol.
 - Cajeros: `/staff/login` y `/staff/portal/scanner`.
 - Gerentes: `/manager/login` y `/manager/portal/scanner`.
 - Super Admin: el botón **Gestionar categorías** abre el módulo independiente sin recrear ni eliminar registros.
@@ -18,7 +19,7 @@ La lectura solamente consulta. El usuario debe confirmar después la acreditaci�
 
 En Chrome Android y navegadores compatibles aparece **Instalar J2M Staff** cuando se recibe `beforeinstallprompt`. En Safari para iPhone o iPad se muestran las instrucciones **Compartir → Añadir a pantalla de inicio**. La disponibilidad y algunas capacidades dependen de la versión del sistema y navegador.
 
-El manifest usa `display: standalone`, iconos 192 y 512, y abre `/staff/login`. El service worker solo almacena CSS, JavaScript público, iconos y la biblioteca QR. Las navegaciones autenticadas, APIs, tokens, saldos y transacciones nunca se guardan en Cache Storage. Sin conexión se muestra un aviso y no se encola ninguna operación.
+El manifest usa `display: standalone`, iconos 192 y 512 y abre `/staff-access`; desde ahí cada persona elige Gerente o Cajero sin mezclar autenticación ni permisos. La instalación solo se anuncia en páginas del personal, no en Super Admin ni en páginas públicas de clientes. El service worker solo almacena CSS, JavaScript público, iconos y la biblioteca QR; usa una caché versionada, elimina versiones anteriores al activarse y actualiza esos activos desde red antes de recurrir a la copia local. Las navegaciones autenticadas, APIs, tokens, saldos y transacciones nunca se guardan en Cache Storage. Sin conexión se muestra un aviso y no se encola ninguna operación.
 
 ## Despliegue y límites
 

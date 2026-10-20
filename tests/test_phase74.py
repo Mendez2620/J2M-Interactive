@@ -1,4 +1,5 @@
 import json
+import subprocess
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -118,6 +119,38 @@ class Phase74TestCase(unittest.TestCase):
         insufficient = self.client.post("/api/web-scanner/process", json={"token":self.other_customer.qr_code_token, "action":"redeem_points", "amount":1000}, headers={"Idempotency-Key":"phase74-insufficient"})
         self.assertEqual(insufficient.status_code, 400)
 
+    def test_web_scanner_rejects_malformed_json_types_and_unexpected_fields(self):
+        self.staff_login()
+        invalid_lookup_payloads = [[], 42, "token", {"token": 123}, {"token": self.customer.qr_code_token, "extra": True}]
+        for payload in invalid_lookup_payloads:
+            response = self.client.post("/api/web-scanner/lookup", json=payload)
+            self.assertEqual(response.status_code, 400, payload)
+        invalid_process_payloads = [
+            [], 42, {"token": 123, "action":"earn_stamp"},
+            {"token":self.customer.qr_code_token, "action":[]},
+            {"token":self.customer.qr_code_token, "action":"earn_stamp", "unexpected":"value"},
+            {"token":self.customer.qr_code_token, "action":"unknown"},
+        ]
+        for index, payload in enumerate(invalid_process_payloads):
+            response = self.client.post("/api/web-scanner/process", json=payload, headers={"Idempotency-Key":f"invalid-{index}"})
+            self.assertEqual(response.status_code, 400, payload)
+        self.assertEqual(Transaction.query.count(), 0)
+        self.assertEqual(LoyaltyLedgerEntry.query.count(), 0)
+
+    def test_lost_response_retry_uses_one_transaction_and_one_ledger_effect(self):
+        self.staff_login()
+        payload = {"token":self.customer.qr_code_token, "action":"earn_stamp"}
+        headers = {"Idempotency-Key":"lost-response-same-key"}
+        committed_response = self.client.post("/api/web-scanner/process", json=payload, headers=headers)
+        self.assertEqual(committed_response.status_code, 200)
+        replay = self.client.post("/api/web-scanner/process", json=payload, headers=headers)
+        self.assertEqual(replay.status_code, 200)
+        self.assertTrue(replay.get_json()["idempotent_replay"])
+        self.assertEqual(Transaction.query.count(), 1)
+        transaction_id = committed_response.get_json()["transaction"]["id"]
+        self.assertEqual(LoyaltyLedgerEntry.query.filter_by(transaction_id=transaction_id).count(), 1)
+        self.assertEqual(db.session.get(Customer, self.customer.id).current_stamps, 1)
+
     def test_csrf_and_direct_access_are_protected(self):
         self.app.config["CSRF_ENABLED"] = True
         self.assertEqual(self.client.post("/staff/login", data={"identity":"cajero", "business_slug":"negocio-web", "password":"PasswordSeguro123"}).status_code, 400)
@@ -135,7 +168,7 @@ class Phase74TestCase(unittest.TestCase):
         manifest_response = self.client.get("/static/manifest.webmanifest")
         manifest = json.loads(manifest_response.get_data(as_text=True))
         manifest_response.close()
-        self.assertEqual(manifest["name"], "J2M Interactive Staff"); self.assertEqual(manifest["display"], "standalone"); self.assertEqual(manifest["scope"], "/")
+        self.assertEqual(manifest["name"], "J2M Interactive Staff"); self.assertEqual(manifest["display"], "standalone"); self.assertEqual(manifest["scope"], "/"); self.assertEqual(manifest["start_url"], "/staff-access?source=pwa")
         root = Path(self.app.root_path) / "static"
         with Image.open(root / "pwa/j2m-staff-192.png") as icon192, Image.open(root / "pwa/j2m-staff-512.png") as icon512:
             self.assertEqual(icon192.size, (192, 192)); self.assertEqual(icon512.size, (512, 512))
@@ -143,7 +176,19 @@ class Phase74TestCase(unittest.TestCase):
         source = worker.get_data(as_text=True); worker.close(); self.assertNotIn("/api/", source); self.assertNotIn("localStorage", source); self.assertIn("request.method !== 'GET'", source); self.assertIn("No se guardó ninguna operación", source)
         scanner_js = (root / "js/web-scanner.js").read_text(encoding="utf-8")
         self.assertIn("data-start-camera", scanner_js); self.assertIn("Idempotency-Key", scanner_js); self.assertNotIn("console.log", scanner_js); self.assertNotIn("localStorage", scanner_js)
+        access = self.client.get("/staff-access"); self.assertEqual(access.status_code, 200); self.assertIn(b"/manager/login", access.data); self.assertIn(b"/staff/login", access.data)
         login = self.client.get("/staff/login").get_data(as_text=True); self.assertIn("manifest.webmanifest", login); self.assertIn("Añadir a pantalla de inicio", login)
+        self.admin_login(); self.assertNotIn("manifest.webmanifest", self.client.get("/admin").get_data(as_text=True))
+        self.assertNotIn("manifest.webmanifest", self.client.get(f"/join/{self.business.slug}").get_data(as_text=True))
+
+    def test_javascript_state_machine_and_service_worker_upgrade(self):
+        root = Path(__file__).resolve().parents[1]
+        result = subprocess.run(
+            ["node", "tests/js/phase74_scanner_state.test.js"], cwd=root,
+            capture_output=True, text=True, timeout=20, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("phase74 javascript behavior: ok", result.stdout)
 
 
 if __name__ == "__main__":
