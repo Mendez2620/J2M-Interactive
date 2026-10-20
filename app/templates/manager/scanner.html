@@ -2,4 +2,4 @@
 {% block portal_title %}Escáner QR{% endblock %}
 {% block head %}{{ super() }}<script src="{{ url_for('static', filename='vendor/html5-qrcode/html5-qrcode.min.js') }}"></script>{% endblock %}
 {% block portal_content %}{% include 'components/web_scanner.html' %}{% endblock %}
-{% block scripts %}<script src="{{ url_for('static', filename='js/web-scanner.js') }}"></script>{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='js/web-scanner-state.js') }}"></script><script src="{{ url_for('static', filename='js/web-scanner.js') }}"></script>{% endblock %}

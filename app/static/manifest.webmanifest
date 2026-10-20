@@ -3,7 +3,7 @@
   "name": "J2M Interactive Staff",
   "short_name": "J2M Staff",
   "description": "Portal seguro del personal de J2M Interactive",
-  "start_url": "/staff/login?source=pwa",
+  "start_url": "/staff-access?source=pwa",
   "scope": "/",
   "display": "standalone",
   "background_color": "#0F172A",

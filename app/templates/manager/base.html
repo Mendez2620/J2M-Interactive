@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}{% block portal_title %}Panel{% endblock %} · {{ business.name }}{% endblock %}
-{% block head %}<style>.portal-grid{display:grid;grid-template-columns:260px 1fr}.mobile-nav{display:none}@media(max-width:900px){.portal-grid{display:block}.sidebar{display:none}.mobile-nav{display:flex}}.metric{background:white;border:1px solid #e2e8f0;border-radius:1rem;padding:1.15rem}.table-wrap{overflow:auto;border:1px solid #e2e8f0;border-radius:1rem;background:white}.nav-link.active{background:#4f46e5;color:white}.bar{min-width:14px;background:#6366f1;border-radius:6px 6px 0 0}</style>{% endblock %}
+{% block head %}{% include 'components/pwa_head.html' %}<style>.portal-grid{display:grid;grid-template-columns:260px 1fr}.mobile-nav{display:none}@media(max-width:900px){.portal-grid{display:block}.sidebar{display:none}.mobile-nav{display:flex}}.metric{background:white;border:1px solid #e2e8f0;border-radius:1rem;padding:1.15rem}.table-wrap{overflow:auto;border:1px solid #e2e8f0;border-radius:1rem;background:white}.nav-link.active{background:#4f46e5;color:white}.bar{min-width:14px;background:#6366f1;border-radius:6px 6px 0 0}</style>{% endblock %}
 {% block content %}
 <div class="min-h-screen bg-slate-50 portal-grid">
   <aside class="sidebar bg-slate-950 text-white p-6 min-h-screen sticky top-0">

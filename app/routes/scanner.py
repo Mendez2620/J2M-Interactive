@@ -55,7 +55,7 @@ def _replay_or_conflict(existing, fingerprint):
         customer = existing.customer
         google_mode = current_app.config.get("GOOGLE_WALLET_MODE", "disabled")
         return jsonify({"status": "success", "idempotent_replay": True,
-                        "customer": {"id": customer.id, "current_points": customer.current_points,
+                        "customer": {"id": customer.id, "full_name": customer.full_name, "current_points": customer.current_points,
                                      "current_stamps": customer.current_stamps},
                         "transaction": existing.to_dict(),
                         "wallet_sync": {"google_status": "pending" if google_mode == "real" else google_mode,
@@ -164,8 +164,13 @@ def lookup_customer():
 
 
 def _lookup_for_staff(staff, data):
-    token = (data.get("token") or "").strip()
-    if not token:
+    if not isinstance(data, dict):
+        return _error("Solicitud JSON inválida.", 400)
+    token = data.get("token")
+    if not isinstance(token, str):
+        return _error("Token de escaneo inválido.", 400)
+    token = token.strip()
+    if not token or len(token) > 512:
         return _error("Token de escaneo obligatorio.", 400)
     customer = Customer.query.filter_by(business_id=staff.business_id, qr_code_token=token).first()
     if not customer:
@@ -179,14 +184,27 @@ def _lookup_for_staff(staff, data):
 @scanner_bp.route("/api/scanner/process", methods=["POST"])
 @staff_required("mobile", "scanner_operate")
 def process_transaction():
-    data = request.get_json(silent=True) or {}
-    request_id = (request.headers.get("Idempotency-Key") or data.get("request_id") or "").strip()
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return _error("Solicitud JSON inválida.", 400)
+    request_id_value = request.headers.get("Idempotency-Key") or data.get("request_id") or ""
+    if not isinstance(request_id_value, str):
+        return _error("Idempotency-Key obligatorio e inválido.", 400)
+    request_id = request_id_value.strip()
     return _process_for_staff(g.staff, data, request_id)
 
 
 def _process_for_staff(staff, data, request_id):
-    token = (data.get("token") or "").strip()
+    if not isinstance(data, dict):
+        return _error("Solicitud JSON inválida.", 400)
+    token = data.get("token")
     action = data.get("action")
+    if not isinstance(token, str) or not isinstance(action, str):
+        return _error("Token o acción inválidos.", 400)
+    token = token.strip()
+    action = action.strip()
+    if not token or len(token) > 512 or len(action) > 32:
+        return _error("Token o acción inválidos.", 400)
     if not request_id or len(request_id) > 64:
         return _error("Idempotency-Key obligatorio e inválido.", 400)
     customer = Customer.query.filter_by(business_id=staff.business_id, qr_code_token=token).first()
@@ -259,7 +277,7 @@ def _process_for_staff(staff, data, request_id):
             reward_notified = True
         except Exception:
             current_app.logger.exception("Reward notification failed after transaction %s", tx.id)
-    return jsonify({"status": "success", "customer": {"id": customer.id,
+    return jsonify({"status": "success", "customer": {"id": customer.id, "full_name": customer.full_name,
         "current_points": customer.current_points, "current_stamps": customer.current_stamps},
         "transaction": tx.to_dict(), "wallet_sync": {
             "google_status": google_status,
@@ -280,7 +298,10 @@ def web_lookup_customer():
     staff, error = _browser_scanner_staff()
     if error:
         return error
-    return _lookup_for_staff(staff, request.get_json(silent=True) or {})
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or set(data) - {"token"}:
+        return _error("Solicitud JSON inválida.", 400)
+    return _lookup_for_staff(staff, data)
 
 
 @scanner_bp.route("/api/web-scanner/process", methods=["POST"])
@@ -288,6 +309,11 @@ def web_process_transaction():
     staff, error = _browser_scanner_staff()
     if error:
         return error
-    data = request.get_json(silent=True) or {}
-    request_id = (request.headers.get("Idempotency-Key") or data.get("request_id") or "").strip()
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or set(data) - {"token", "action", "purchase_amount", "amount", "request_id"}:
+        return _error("Solicitud JSON inválida.", 400)
+    request_id_value = request.headers.get("Idempotency-Key") or data.get("request_id") or ""
+    if not isinstance(request_id_value, str):
+        return _error("Idempotency-Key obligatorio e inválido.", 400)
+    request_id = request_id_value.strip()
     return _process_for_staff(staff, data, request_id)

@@ -1,4 +1,4 @@
-from flask import Blueprint, current_app, jsonify, make_response, send_from_directory
+from flask import Blueprint, current_app, jsonify, make_response, render_template, send_from_directory
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from app.extensions import db
@@ -14,6 +14,11 @@ from app.routes.customer_recovery import recovery_bp
 
 # Health Check Blueprint or root API routes
 main_bp = Blueprint("main", __name__)
+
+
+@main_bp.route("/staff-access", methods=["GET"])
+def staff_access():
+    return render_template("staff/access.html")
 
 
 @main_bp.route("/api/health", methods=["GET"])

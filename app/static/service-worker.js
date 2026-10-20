@@ -1,6 +1,7 @@
-const CACHE = 'j2m-staff-static-v1';
+const CACHE = 'j2m-staff-static-v2-20261020';
 const SAFE_ASSETS = [
   '/static/css/tailwind.min.css',
+  '/static/js/web-scanner-state.js',
   '/static/js/web-scanner.js',
   '/static/js/pwa-install.js',
   '/static/vendor/html5-qrcode/html5-qrcode.min.js',
@@ -9,14 +10,19 @@ const SAFE_ASSETS = [
   '/static/icons.svg'
 ];
 self.addEventListener('install', event => event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SAFE_ASSETS)).then(() => self.skipWaiting())));
-self.addEventListener('activate', event => event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(key => key !== CACHE).map(key => caches.delete(key)))).then(() => self.clients.claim())));
+self.addEventListener('activate', event => event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(key => key.startsWith('j2m-staff-static-') && key !== CACHE).map(key => caches.delete(key)))).then(() => self.clients.claim())));
 self.addEventListener('fetch', event => {
   const request = event.request;
   if (request.method !== 'GET') return;
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
   if (SAFE_ASSETS.includes(url.pathname)) {
-    event.respondWith(caches.match(request).then(cached => cached || fetch(request)));
+    event.respondWith(fetch(request).then(response => {
+      if (!response.ok || /(?:^|,)\s*no-store\b/i.test(response.headers.get('Cache-Control') || '')) return response;
+      const copy = response.clone();
+      event.waitUntil(caches.open(CACHE).then(cache => cache.put(request, copy)));
+      return response;
+    }).catch(() => caches.match(request).then(cached => cached || new Response('', {status:503}))));
     return;
   }
   if (request.mode === 'navigate') {

@@ -4,12 +4,6 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="csrf-token" content="{{ csrf_token() }}">
-  <meta name="theme-color" content="#4F46E5">
-  <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="apple-mobile-web-app-title" content="J2M Staff">
-  <link rel="manifest" href="{{ url_for('static', filename='manifest.webmanifest') }}">
-  <link rel="apple-touch-icon" sizes="192x192" href="{{ url_for('static', filename='pwa/j2m-staff-192.png') }}">
   <title>{% block title %}J2M Interactive - Tarjetas de Lealtad{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/tailwind.min.css') }}">
   {% block head %}{% endblock %}
@@ -30,6 +24,5 @@
   </script>
   <script src="{{ url_for('static', filename='js/legacy-actions.js') }}"></script>
   <script src="{{ url_for('static', filename='js/ajax-search.js') }}"></script>
-  <script src="{{ url_for('static', filename='js/pwa-install.js') }}"></script>
 </body>
 </html>
