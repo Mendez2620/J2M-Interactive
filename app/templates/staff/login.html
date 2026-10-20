@@ -7,6 +7,8 @@
     {% if error %}<div class="mb-4 rounded-xl bg-rose-50 p-3 text-sm text-rose-800" role="alert">{{ error }}</div>{% endif %}
     <form method="POST" class="space-y-4"><div><label for="business_slug" class="mb-1 block text-sm font-semibold">Negocio</label><input id="business_slug" name="business_slug" class="field" required autocomplete="organization" placeholder="slug-del-negocio"></div><div><label for="identity" class="mb-1 block text-sm font-semibold">Usuario o correo</label><input id="identity" name="identity" class="field" required autocomplete="username"></div><div><label for="password" class="mb-1 block text-sm font-semibold">Contraseña</label><input id="password" name="password" type="password" class="field" required autocomplete="current-password"></div><button class="btn btn-primary w-full" type="submit">Iniciar sesión</button></form>
     <p class="mt-5 text-xs text-slate-500">El acceso web es independiente del acceso móvil y puede revocarse en cualquier momento.</p>
+    <button type="button" hidden data-install-pwa class="mt-4 w-full rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-2 text-sm font-semibold text-indigo-800">Instalar J2M Staff</button>
+    <p hidden data-ios-install class="mt-4 rounded-xl bg-indigo-50 p-3 text-sm text-indigo-900">En Safari, toca Compartir y después “Añadir a pantalla de inicio”. La disponibilidad puede variar según la versión de iOS o iPadOS.</p>
   </section>
 </main>
 {% endblock %}

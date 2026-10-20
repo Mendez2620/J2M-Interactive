@@ -1,4 +1,4 @@
-from flask import Blueprint, jsonify
+from flask import Blueprint, current_app, jsonify, make_response, send_from_directory
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from app.extensions import db
@@ -34,6 +34,15 @@ def readiness_check():
         db.session.rollback()
         return jsonify({"status": "unavailable", "database": "unavailable"}), 503
     return jsonify({"status": "ready", "database": "available"}), 200
+
+
+@main_bp.route("/service-worker.js", methods=["GET"])
+def service_worker():
+    response = make_response(send_from_directory(current_app.static_folder, "service-worker.js"))
+    response.headers["Content-Type"] = "application/javascript; charset=utf-8"
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["Service-Worker-Allowed"] = "/"
+    return response
 
 
 def register_routes(app):
