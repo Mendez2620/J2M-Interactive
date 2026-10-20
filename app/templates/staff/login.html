@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Acceso del personal · J2M Interactive{% endblock %}
+{% block content %}
+<main class="min-h-screen bg-slate-950 px-4 py-10 grid place-items-center">
+  <section class="w-full max-w-md rounded-3xl bg-white p-6 sm:p-8 shadow-2xl" aria-labelledby="staffLoginTitle">
+    <div class="mb-6"><div class="mb-3 inline-grid h-12 w-12 place-items-center rounded-2xl bg-indigo-600 font-black text-white">J2M</div><h1 id="staffLoginTitle" class="text-2xl font-bold">Acceso del personal</h1><p class="mt-1 text-sm text-slate-500">Ingresa con la cuenta web autorizada por tu negocio.</p></div>
+    {% if error %}<div class="mb-4 rounded-xl bg-rose-50 p-3 text-sm text-rose-800" role="alert">{{ error }}</div>{% endif %}
+    <form method="POST" class="space-y-4"><div><label for="business_slug" class="mb-1 block text-sm font-semibold">Negocio</label><input id="business_slug" name="business_slug" class="field" required autocomplete="organization" placeholder="slug-del-negocio"></div><div><label for="identity" class="mb-1 block text-sm font-semibold">Usuario o correo</label><input id="identity" name="identity" class="field" required autocomplete="username"></div><div><label for="password" class="mb-1 block text-sm font-semibold">Contraseña</label><input id="password" name="password" type="password" class="field" required autocomplete="current-password"></div><button class="btn btn-primary w-full" type="submit">Iniciar sesión</button></form>
+    <p class="mt-5 text-xs text-slate-500">El acceso web es independiente del acceso móvil y puede revocarse en cualquier momento.</p>
+  </section>
+</main>
+{% endblock %}

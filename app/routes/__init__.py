@@ -6,6 +6,7 @@ from app.routes.auth import auth_bp
 from app.routes.business import business_bp
 from app.routes.customer import customer_bp
 from app.routes.scanner import scanner_bp
+from app.routes.staff_portal import staff_portal_bp
 from app.routes.admin import admin_bp
 from app.routes.manager import manager_bp
 from app.routes.apple_webservice import apple_ws_bp
@@ -42,6 +43,7 @@ def register_routes(app):
     app.register_blueprint(business_bp)
     app.register_blueprint(customer_bp)
     app.register_blueprint(scanner_bp)
+    app.register_blueprint(staff_portal_bp)
     app.register_blueprint(admin_bp)
     app.register_blueprint(manager_bp)
     app.register_blueprint(apple_ws_bp)

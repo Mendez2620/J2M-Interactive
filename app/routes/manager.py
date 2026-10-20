@@ -224,6 +224,7 @@ def manager_transactions(business_id):
 def _portal_destination(staff):
     permissions = effective_permissions(staff)
     for permission, endpoint in (
+        ("scanner_operate_web", "manager.portal_scanner"),
         ("view_stats", "manager.manager_portal"),
         ("view_customers", "manager.portal_customers"),
         ("view_transactions", "manager.portal_transactions"),
@@ -369,6 +370,12 @@ def manager_portal():
     return render_template("manager/dashboard.html", metrics=metrics, transactions=transactions,
                            chart_labels=chart_labels, chart_values=chart_values, period=period,
                            **_portal_context("dashboard"))
+
+
+@manager_bp.route("/portal/scanner", methods=["GET"])
+@manager_portal_required("scanner_operate_web")
+def portal_scanner():
+    return render_template("manager/scanner.html", **_portal_context("scanner"))
 
 
 @manager_bp.route("/portal/customers", methods=["GET"])

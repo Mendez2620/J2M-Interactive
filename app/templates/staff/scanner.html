@@ -1,0 +1,3 @@
+{% extends "base.html" %}
+{% block title %}Escáner del personal · J2M Interactive{% endblock %}
+{% block content %}<main class="min-h-screen bg-slate-950 text-white p-4"><div class="mx-auto max-w-lg"><header class="mb-4 flex items-center justify-between"><div><strong>J2M Interactive Staff</strong><p class="text-sm text-slate-400">Escáner web autorizado</p></div><form method="POST" action="{{ url_for('staff_portal.staff_logout') }}"><button class="rounded-lg border border-slate-700 px-3 py-2 text-sm">Cerrar sesión</button></form></header><div class="rounded-2xl bg-slate-900 p-5">El escáner seguro se está preparando.</div></div></main>{% endblock %}
