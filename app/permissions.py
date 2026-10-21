@@ -10,6 +10,7 @@ PERMISSION_CATALOG = {
     "edit_cashiers": {"label": "Editar cajeros", "description": "Editar datos básicos de cajeros.", "channel": "web", "roles": {"manager"}},
     "toggle_cashiers": {"label": "Activar o suspender", "description": "Activar o desactivar cajeros.", "channel": "web", "roles": {"manager"}},
     "reset_cashier_password": {"label": "Restablecer contraseñas", "description": "Restablecer contraseñas de cajeros.", "channel": "web", "roles": {"manager"}},
+    "scanner_operate_web": {"label": "Operar escáner web", "description": "Consultar QR y confirmar movimientos desde el portal web.", "channel": "web", "roles": {"manager", "cashier"}},
     "scanner_operate": {"label": "Operar escáner", "description": "Consultar QR y procesar puntos o sellos.", "channel": "mobile", "roles": {"manager", "cashier"}},
 }
 

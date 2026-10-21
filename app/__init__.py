@@ -113,8 +113,9 @@ def create_app(config_name=None):
         g.request_id = secrets.token_hex(16)
         g.csp_nonce = secrets.token_urlsafe(18)
         protected_manager_path = request.path in {"/manager/login", "/manager/logout"} or request.path.startswith("/manager/portal")
+        protected_staff_path = request.path.startswith("/staff/") or request.path.startswith("/api/web-scanner/")
         protected_recovery_path = request.path.startswith("/recover/")
-        if app.config.get("CSRF_ENABLED", True) and request.method in {"POST", "PUT", "PATCH", "DELETE"} and (request.path.startswith("/admin") or protected_manager_path or protected_recovery_path):
+        if app.config.get("CSRF_ENABLED", True) and request.method in {"POST", "PUT", "PATCH", "DELETE"} and (request.path.startswith("/admin") or protected_manager_path or protected_staff_path or protected_recovery_path):
             if not validate_csrf():
                 payload = {"status": "error", "message": "Token CSRF inválido o ausente."}
                 return jsonify(payload), 400
@@ -146,13 +147,13 @@ def create_app(config_name=None):
             csp = (f"default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; "
                    f"img-src 'self' data: blob: https:; font-src 'self'; "
                    f"style-src 'self' 'unsafe-inline'; "
-                   f"script-src 'self' 'nonce-{nonce}' https://unpkg.com; script-src-attr 'none'; "
+                   f"script-src 'self' 'nonce-{nonce}'; script-src-attr 'none'; "
                    f"connect-src 'self'")
         else:
-            csp = "default-src 'self'; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' https://unpkg.com"
+            csp = "default-src 'self'; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'"
         response.headers.setdefault("Content-Security-Policy", csp)
         response.headers.setdefault("X-Request-ID", getattr(g, "request_id", ""))
-        if request.path.startswith(("/admin", "/manager", "/recover", "/api/scanner")):
+        if request.path.startswith(("/admin", "/manager", "/staff", "/recover", "/api/scanner", "/api/web-scanner")):
             response.headers.setdefault("Cache-Control", "no-store")
         duration_ms = round((time.perf_counter() - getattr(g, "request_started_at", time.perf_counter())) * 1000, 2)
         if app.config.get("LOG_REQUESTS"):
