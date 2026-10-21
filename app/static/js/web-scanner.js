@@ -17,6 +17,12 @@
     status.className = `rounded-xl p-3 text-sm ${type === 'error' ? 'bg-rose-50 text-rose-800' : type === 'success' ? 'bg-emerald-50 text-emerald-800' : 'bg-indigo-50 text-indigo-800'}`;
   }
   async function responseJson(response) { try { return await response.json(); } catch (_error) { return null; } }
+  function requireReauthentication(response, data) {
+    if (response.status !== 401 && !(response.status === 400 && data?.message?.includes('CSRF'))) return false;
+    const login = window.location.pathname.startsWith('/manager/') ? '/manager/login' : '/staff/login';
+    window.location.assign(`${login}?csrf_error=1`);
+    return true;
+  }
   function requestId() {
     if (crypto.randomUUID) return crypto.randomUUID();
     const bytes = crypto.getRandomValues(new Uint8Array(16));
@@ -104,6 +110,7 @@
     try {
       const response = await fetch('/api/web-scanner/lookup', {method:'POST', headers:{'Content-Type':'application/json','Accept':'application/json','X-CSRFToken':csrf}, body:JSON.stringify({token})});
       const data = await responseJson(response);
+      if (requireReauthentication(response, data)) return;
       if (version !== state.lookupVersion) return;
       if (!response.ok || !data?.customer || !data?.business) {
         state.finishLookup(version, null); clearSelection();
@@ -141,6 +148,7 @@
     try {
       const response = await fetch('/api/web-scanner/process', {method:'POST', signal:controller.signal, headers:{'Content-Type':'application/json','Accept':'application/json','X-CSRFToken':csrf,'Idempotency-Key':operation.id}, body:operation.signature});
       const data = await responseJson(response);
+      if (requireReauthentication(response, data)) return;
       if (!response.ok) {
         if (response.status >= 500) {
           state.finishOperation('ambiguous');

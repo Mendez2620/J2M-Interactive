@@ -15,6 +15,7 @@ from app.extensions import db
 from app.models import Business, BusinessCategory, Customer, PlatformAdmin, Staff, Transaction
 from app.security import current_platform_admin, platform_admin_required, valid_email, validate_password
 from app.services import ExportService
+from app.services.google_wallet_sync_service import google_wallet_sync_business_summaries
 from app.staff_auth import revoke_staff_sessions
 from app.access_audit import access_audit, staff_access_state
 from app.permissions import (
@@ -236,6 +237,7 @@ def dashboard():
     query = query.order_by(Business.created_at.desc())
     pagination = query.paginate(page=page, per_page=per_page, error_out=False)
     businesses = pagination.items
+    wallet_sync = google_wallet_sync_business_summaries([business.id for business in businesses])
 
     total_businesses = Business.query.count()
     total_customers = Customer.query.count()
@@ -275,6 +277,7 @@ def dashboard():
         current_category=category_id,
         platform_admins=PlatformAdmin.query.order_by(PlatformAdmin.name).all(),
         uploads_enabled=current_app.config.get("UPLOAD_STORAGE_BACKEND", "local") == "local",
+        wallet_sync=wallet_sync,
     )
 
 

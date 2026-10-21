@@ -114,10 +114,11 @@ function scannerHarness(fetchImpl) {
     resume() { this.paused = false; }
     async stop() { this.stopped = true; }
   }
-  const window = {J2MScannerState:{ScannerState}, Html5Qrcode, isSecureContext:true, addEventListener:(name, handler) => { windowListeners[name] = handler; }};
+  let assignedUrl = null;
+  const window = {J2MScannerState:{ScannerState}, Html5Qrcode, isSecureContext:true, location:{pathname:'/staff/portal/scanner', assign:url => { assignedUrl = url; }}, addEventListener:(name, handler) => { windowListeners[name] = handler; }};
   const context = {window, document, navigator:{mediaDevices:{getUserMedia(){}}}, Html5Qrcode, crypto:globalThis.crypto, AbortController, setTimeout, clearTimeout, fetch:fetchImpl};
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../../app/static/js/web-scanner.js'), 'utf8'), context);
-  return {nodes, instances, windowListeners, documentListeners};
+  return {nodes, instances, windowListeners, documentListeners, assignedUrl:() => assignedUrl};
 }
 
 const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
@@ -184,6 +185,15 @@ async function testCameraIntegration() {
   disconnected.instances[0].callback('qr-sin-red'); await sleep(10);
   assert.equal(disconnectedCalls, 1);
   assert.equal(disconnected.instances[0].paused, false, 'network loss safely permits scanning again');
+
+  const expired = scannerHarness(async () => new Response(
+    JSON.stringify({message:'Token CSRF inválido o ausente.'}),
+    {status:400, headers:{'Content-Type':'application/json'}},
+  ));
+  expired.nodes.manual.value = 'qr-expirado';
+  await expired.nodes.lookup.dispatch('click');
+  await sleep(10);
+  assert.equal(expired.assignedUrl(), '/staff/login?csrf_error=1', 'expired CSRF requires a clean login');
 }
 
 Promise.all([testServiceWorkerUpgrade(), testCameraIntegration()]).then(() => process.stdout.write('phase74 javascript behavior: ok\n'));

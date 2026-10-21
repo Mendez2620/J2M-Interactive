@@ -24,7 +24,7 @@ def staff_private_cache(response):
 
 @staff_portal_bp.route("/login", methods=["GET", "POST"])
 def staff_login():
-    error = None
+    error = "La sesión de seguridad cambió. Inicia sesión nuevamente." if request.args.get("csrf_error") else None
     status = 200
     if request.method == "POST":
         identity = (request.form.get("identity") or "").strip().lower()
