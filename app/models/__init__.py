@@ -15,6 +15,9 @@ from app.models.customer_recovery import (
 from app.models.loyalty_ledger import LoyaltyLedgerEntry
 from app.models.auth_rate_limit import AuthRateLimitSlot
 from app.models.google_wallet_sync_job import GoogleWalletSyncJob
+from app.models.customer_registration import (
+    CustomerRegistrationChallenge, CustomerRegistrationIdentityClaim,
+)
 
 __all__ = [
     "db",
@@ -33,4 +36,6 @@ __all__ = [
     "LoyaltyLedgerEntry",
     "AuthRateLimitSlot",
     "GoogleWalletSyncJob",
+    "CustomerRegistrationChallenge",
+    "CustomerRegistrationIdentityClaim",
 ]
