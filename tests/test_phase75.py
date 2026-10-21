@@ -147,10 +147,55 @@ class Phase75TestCase(unittest.TestCase):
             "/manager/logout", data={"csrf_token": token},
             headers={"Accept": "text/html"},
         )
-        self.assertEqual(stale.status_code, 303)
-        self.assertIn("csrf_error=1", stale.location)
+        self.assertEqual(stale.status_code, 400)
+        stale_html = stale.get_data(as_text=True)
+        self.assertIn("No se pudo cerrar tu sesión. Actualiza la página y vuelve a intentarlo", stale_html)
+        self.assertNotIn("application/json", stale.content_type)
+        retry_token = self.csrf(stale_html)
+        self.assertTrue(retry_token)
+        manager_session = StaffSession.query.filter_by(staff_id=self.manager.id, channel="browser").one()
+        self.assertIsNone(manager_session.revoked_at)
         self.assertEqual(self.https_get("/manager/portal").status_code, 200)
-        self.assertEqual(self.https_post("/manager/logout", data={"csrf_token": current_token}).status_code, 302)
+        self.assertEqual(self.https_post("/manager/logout", data={"csrf_token": retry_token}).status_code, 302)
+        self.assertIsNotNone(db.session.get(StaffSession, manager_session.id).revoked_at)
+        self.assertEqual(self.https_get("/manager/portal").status_code, 302)
+
+    def test_staff_pwa_missing_csrf_offers_safe_retry_without_revocation(self):
+        login_page = self.https_get("/staff/login")
+        login = self.https_post("/staff/login", data={
+            "identity": "caja75", "business_slug": self.business.slug,
+            "password": "PasswordSeguro123",
+            "csrf_token": self.csrf(login_page.get_data(as_text=True)),
+        })
+        self.assertEqual(login.status_code, 302)
+        session_row = StaffSession.query.filter_by(staff_id=self.cashier.id, channel="browser").one()
+        missing = self.https_post("/staff/logout", headers={"Accept": "text/html"})
+        self.assertEqual(missing.status_code, 400)
+        html = missing.get_data(as_text=True)
+        self.assertIn("Tu sesión continúa activa", html)
+        self.assertIn("Volver a intentar cerrar sesión", html)
+        self.assertIsNone(db.session.get(StaffSession, session_row.id).revoked_at)
+        self.assertEqual(self.https_get("/staff/portal/scanner").status_code, 200)
+        retry = self.https_post("/staff/logout", data={"csrf_token": self.csrf(html)})
+        self.assertEqual(retry.status_code, 302)
+        self.assertIsNotNone(db.session.get(StaffSession, session_row.id).revoked_at)
+        self.assertEqual(self.https_get("/staff/portal/scanner").status_code, 302)
+
+    def test_expired_staff_session_can_return_to_login_without_csrf_revocation(self):
+        login_page = self.https_get("/staff/login")
+        self.https_post("/staff/login", data={
+            "identity": "caja75", "business_slug": self.business.slug,
+            "password": "PasswordSeguro123",
+            "csrf_token": self.csrf(login_page.get_data(as_text=True)),
+        })
+        session_row = StaffSession.query.filter_by(staff_id=self.cashier.id, channel="browser").one()
+        session_row.expires_at = _now() - timedelta(seconds=1)
+        db.session.commit()
+        expired = self.https_post("/staff/logout", headers={"Accept": "text/html"})
+        self.assertEqual(expired.status_code, 303)
+        self.assertIn("/staff/login", expired.location)
+        self.assertIsNone(db.session.get(StaffSession, session_row.id).revoked_at)
+        self.assertEqual(self.https_get("/staff/portal/scanner").status_code, 302)
 
     def create_stamp(self, customer, request_id):
         return process_loyalty_transaction(

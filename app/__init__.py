@@ -5,7 +5,7 @@ import os
 import secrets
 import time
 from datetime import datetime, timezone
-from flask import Flask, g, jsonify, redirect, request, url_for
+from flask import Flask, g, jsonify, redirect, render_template, request, url_for
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 from app.config import (
@@ -118,8 +118,22 @@ def create_app(config_name=None):
         if app.config.get("CSRF_ENABLED", True) and request.method in {"POST", "PUT", "PATCH", "DELETE"} and (request.path.startswith("/admin") or protected_manager_path or protected_staff_path or protected_recovery_path):
             if not validate_csrf():
                 if not wants_json() and request.path in {"/staff/logout", "/manager/logout"}:
-                    endpoint = "staff_portal.staff_login" if request.path.startswith("/staff/") else "manager.manager_login"
-                    return redirect(url_for(endpoint, csrf_error="1"), code=303)
+                    from app.manager_auth import current_manager, current_staff_browser_session
+
+                    is_staff = request.path.startswith("/staff/")
+                    active_session = current_staff_browser_session() if is_staff else current_manager()
+                    login_endpoint = "staff_portal.staff_login" if is_staff else "manager.manager_login"
+                    if active_session is None:
+                        return redirect(url_for(login_endpoint), code=303)
+                    return render_template(
+                        "auth/logout_retry.html",
+                        logout_url=url_for(
+                            "staff_portal.staff_logout" if is_staff else "manager.manager_logout"
+                        ),
+                        return_url=url_for(
+                            "staff_portal.staff_scanner" if is_staff else "manager.manager_portal"
+                        ),
+                    ), 400
                 payload = {"status": "error", "message": "Token CSRF inválido o ausente."}
                 return jsonify(payload), 400
 

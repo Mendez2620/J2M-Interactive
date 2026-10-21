@@ -76,8 +76,9 @@ class ManagerPortalPhase3TestCase(unittest.TestCase):
         db.session.add(second); db.session.commit()
         self.app.config["CSRF_ENABLED"] = True
         invalid_logout = self.client.post("/manager/logout")
-        self.assertEqual(invalid_logout.status_code, 303)
-        self.assertIn("/manager/login?csrf_error=1", invalid_logout.location)
+        self.assertEqual(invalid_logout.status_code, 400)
+        self.assertIn(b"No se pudo cerrar tu sesi", invalid_logout.data)
+        self.assertIsNone(db.session.get(StaffSession, current_id).revoked_at)
         logout = self.client.post("/manager/logout", headers={"X-CSRFToken": "portal-csrf"})
         self.assertEqual(logout.status_code, 302)
         self.assertIsNotNone(db.session.get(StaffSession, current_id).revoked_at)
