@@ -1,8 +1,11 @@
+import json
+import logging
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, or_, text
+from sqlalchemy import case, func, or_, text
 
 from app.extensions import db
 from app.models import Customer, GoogleWalletSyncJob
@@ -136,3 +139,92 @@ def google_wallet_sync_counts():
         "failed": counts.get("failed", 0),
         "completed": counts.get("completed", 0),
     }
+
+
+def google_wallet_sync_metrics():
+    """Return safe aggregate queue health without customer or credential data."""
+    now = _now()
+    rows = dict(db.session.query(
+        GoogleWalletSyncJob.status, func.count(GoogleWalletSyncJob.id)
+    ).group_by(GoogleWalletSyncJob.status).all())
+    oldest_pending = db.session.query(func.min(GoogleWalletSyncJob.created_at)).filter(
+        GoogleWalletSyncJob.status.in_(("pending", "processing"))
+    ).scalar()
+    last_attempt = db.session.query(func.max(GoogleWalletSyncJob.updated_at)).filter(
+        or_(GoogleWalletSyncJob.attempts > 0, GoogleWalletSyncJob.status != "pending")
+    ).scalar()
+    last_success = db.session.query(func.max(GoogleWalletSyncJob.updated_at)).filter_by(
+        status="completed"
+    ).scalar()
+    pending = rows.get("pending", 0)
+    processing = rows.get("processing", 0)
+    retrying = db.session.query(func.count(GoogleWalletSyncJob.id)).filter(
+        GoogleWalletSyncJob.status == "pending", GoogleWalletSyncJob.attempts > 0
+    ).scalar() or 0
+    return {
+        "pending": pending, "processing": processing, "retrying": retrying,
+        "completed": rows.get("completed", 0), "failed": rows.get("failed", 0),
+        "oldest_pending_seconds": int((now - oldest_pending).total_seconds()) if oldest_pending else None,
+        "last_attempt_at": last_attempt.isoformat() if last_attempt else None,
+        "last_success_at": last_success.isoformat() if last_success else None,
+    }
+
+
+def google_wallet_sync_business_summaries(business_ids=None):
+    """Aggregate queue state in one grouped query for the Super Admin table."""
+    query = db.session.query(
+        GoogleWalletSyncJob.business_id, GoogleWalletSyncJob.status,
+        func.count(GoogleWalletSyncJob.id), func.max(GoogleWalletSyncJob.updated_at),
+        func.sum(case((GoogleWalletSyncJob.attempts > 0, 1), else_=0)),
+    )
+    if business_ids is not None:
+        query = query.filter(GoogleWalletSyncJob.business_id.in_(business_ids))
+    summaries = {}
+    for business_id, status, count, updated_at, attempted in query.group_by(
+        GoogleWalletSyncJob.business_id, GoogleWalletSyncJob.status
+    ).all():
+        summary = summaries.setdefault(business_id, {
+            "pending": 0, "processing": 0, "retrying": 0, "completed": 0,
+            "failed": 0, "last_attempt_at": None, "last_success_at": None,
+        })
+        summary[status] = count
+        if (attempted or status != "pending") and (
+            summary["last_attempt_at"] is None or updated_at > summary["last_attempt_at"]
+        ):
+            summary["last_attempt_at"] = updated_at
+        if status == "pending":
+            summary["retrying"] += attempted or 0
+        if status == "completed" and (summary["last_success_at"] is None or updated_at > summary["last_success_at"]):
+            summary["last_success_at"] = updated_at
+    return summaries
+
+
+def run_google_wallet_sync_worker(*, stop_event=None, sleep_fn=time.sleep, service=None,
+                                  poll_seconds=10, batch_size=50, alert_pending=100,
+                                  alert_stale_seconds=300, max_cycles=None, logger=None):
+    """Continuously drain the outbox; per-customer locks make replicas safe."""
+    stop_event = stop_event or threading.Event()
+    logger = logger or logging.getLogger(__name__)
+    cycles = 0
+    while not stop_event.is_set():
+        try:
+            processed = process_pending_google_wallet_jobs(limit=batch_size, service=service)
+            metrics = google_wallet_sync_metrics()
+            logger.info("google_wallet_worker_metrics %s", json.dumps({"processed": processed, **metrics}, sort_keys=True))
+            backlog = metrics["pending"] + metrics["processing"]
+            stale = metrics["oldest_pending_seconds"] or 0
+            if backlog >= alert_pending or (backlog and stale >= alert_stale_seconds):
+                logger.warning(
+                    "google_wallet_worker_backlog pending=%s processing=%s retrying=%s oldest_pending_seconds=%s",
+                    metrics["pending"], metrics["processing"], metrics["retrying"], stale,
+                )
+        except Exception as exc:
+            db.session.rollback()
+            logger.error("google_wallet_worker_cycle_failed error_type=%s", type(exc).__name__)
+        cycles += 1
+        if max_cycles is not None and cycles >= max_cycles:
+            break
+        if sleep_fn is time.sleep:
+            stop_event.wait(max(1, poll_seconds))
+        else:
+            sleep_fn(max(1, poll_seconds))

@@ -242,7 +242,7 @@ def _portal_destination(staff):
 
 @manager_bp.route("/login", methods=["GET", "POST"])
 def manager_login():
-    error = None
+    error = "La sesión de seguridad cambió. Inicia sesión nuevamente." if request.args.get("csrf_error") else None
     status = 200
     account_choices = None
     if request.method == "POST":

@@ -5,7 +5,7 @@ import os
 import secrets
 import time
 from datetime import datetime, timezone
-from flask import Flask, g, jsonify, request
+from flask import Flask, g, jsonify, redirect, request, url_for
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 from app.config import (
@@ -117,6 +117,9 @@ def create_app(config_name=None):
         protected_recovery_path = request.path.startswith("/recover/")
         if app.config.get("CSRF_ENABLED", True) and request.method in {"POST", "PUT", "PATCH", "DELETE"} and (request.path.startswith("/admin") or protected_manager_path or protected_staff_path or protected_recovery_path):
             if not validate_csrf():
+                if not wants_json() and request.path in {"/staff/logout", "/manager/logout"}:
+                    endpoint = "staff_portal.staff_login" if request.path.startswith("/staff/") else "manager.manager_login"
+                    return redirect(url_for(endpoint, csrf_error="1"), code=303)
                 payload = {"status": "error", "message": "Token CSRF inválido o ausente."}
                 return jsonify(payload), 400
 
@@ -208,4 +211,25 @@ def create_app(config_name=None):
         processed = process_pending_google_wallet_jobs()
         counts = google_wallet_sync_counts()
         print(json.dumps({"processed": processed, **counts}, sort_keys=True))
+
+    @app.cli.command("run-google-wallet-sync-worker")
+    def run_google_wallet_sync_worker_command():
+        """Continuously process the Google Wallet outbox in a dedicated service."""
+        import signal
+        import threading
+        from app.services.google_wallet_sync_service import run_google_wallet_sync_worker
+
+        stop_event = threading.Event()
+        for signal_name in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(signal_name, lambda _signum, _frame: stop_event.set())
+        app.logger.info("google_wallet_worker_started")
+        run_google_wallet_sync_worker(
+            stop_event=stop_event,
+            poll_seconds=app.config["GOOGLE_WALLET_SYNC_POLL_SECONDS"],
+            batch_size=app.config["GOOGLE_WALLET_SYNC_BATCH_SIZE"],
+            alert_pending=app.config["GOOGLE_WALLET_SYNC_ALERT_PENDING"],
+            alert_stale_seconds=app.config["GOOGLE_WALLET_SYNC_ALERT_STALE_SECONDS"],
+            logger=app.logger,
+        )
+        app.logger.info("google_wallet_worker_stopped")
     return app

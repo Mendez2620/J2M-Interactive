@@ -15,6 +15,8 @@ def _now():
 
 
 def _create_browser_session(staff, prefix):
+    from app.security import csrf_token
+
     session.clear()
     session_id = secrets.token_urlsafe(32)
     verifier = secrets.token_urlsafe(32)
@@ -28,6 +30,9 @@ def _create_browser_session(staff, prefix):
     session[f"{prefix}_staff_id"] = staff.id
     session[f"{prefix}_session_id"] = session_id
     session[f"{prefix}_auth_version"] = staff.auth_version
+    # Rotate CSRF together with the authenticated browser session.  Do not wait
+    # for a later template render: AJAX and logout must share this exact token.
+    csrf_token()
 
 
 def create_manager_browser_session(staff):
