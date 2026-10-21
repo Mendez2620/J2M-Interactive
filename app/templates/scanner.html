@@ -3,8 +3,7 @@
 {% block title %}Escáner de Lealtad | J2M Interactive{% endblock %}
 
 {% block head %}
-<!-- html5-qrcode library CDN for fast in-browser QR scanning -->
-<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script src="{{ url_for('static', filename='vendor/html5-qrcode/html5-qrcode.min.js') }}"></script>
 {% endblock %}
 
 {% block content %}
@@ -193,7 +192,6 @@
   }
 
   function onScanSuccess(decodedText) {
-    console.log("QR Scanned:", decodedText);
     lookupCustomer(decodedText);
   }
 
