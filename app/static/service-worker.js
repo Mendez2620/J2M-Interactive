@@ -1,4 +1,4 @@
-const CACHE = 'j2m-staff-static-v2-20261020';
+const CACHE = 'j2m-staff-static-v3-phase76';
 const SAFE_ASSETS = [
   '/static/css/tailwind.min.css',
   '/static/js/web-scanner-state.js',
@@ -9,7 +9,10 @@ const SAFE_ASSETS = [
   '/static/pwa/j2m-staff-512.png',
   '/static/icons.svg'
 ];
-self.addEventListener('install', event => event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SAFE_ASSETS)).then(() => self.skipWaiting())));
+self.addEventListener('install', event => event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SAFE_ASSETS))));
+self.addEventListener('message', event => {
+  if (event.data?.type === 'SKIP_WAITING') self.skipWaiting();
+});
 self.addEventListener('activate', event => event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(key => key.startsWith('j2m-staff-static-') && key !== CACHE).map(key => caches.delete(key)))).then(() => self.clients.claim())));
 self.addEventListener('fetch', event => {
   const request = event.request;

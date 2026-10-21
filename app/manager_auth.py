@@ -1,5 +1,6 @@
 import hashlib
 import secrets
+import time
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 
@@ -14,33 +15,39 @@ def _now():
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def _create_browser_session(staff, prefix):
+def _create_browser_session(staff, prefix, remember=False):
     from app.security import csrf_token
 
     session.clear()
     session_id = secrets.token_urlsafe(32)
     verifier = secrets.token_urlsafe(32)
-    expires = _now() + timedelta(seconds=current_app.config["PERMANENT_SESSION_LIFETIME"])
+    lifetime = (
+        current_app.config["REMEMBER_SESSION_ABSOLUTE_SECONDS"]
+        if remember else current_app.config["BROWSER_SESSION_ABSOLUTE_SECONDS"]
+    )
+    expires = _now() + timedelta(seconds=lifetime)
     db.session.add(StaffSession(
         id=session_id, staff_id=staff.id, channel="browser",
         refresh_jti_hash=hashlib.sha256(verifier.encode()).hexdigest(), expires_at=expires,
     ))
     db.session.commit()
-    session.permanent = True
+    session.permanent = bool(remember)
     session[f"{prefix}_staff_id"] = staff.id
     session[f"{prefix}_session_id"] = session_id
     session[f"{prefix}_auth_version"] = staff.auth_version
+    session[f"{prefix}_remember"] = bool(remember)
+    session[f"{prefix}_last_active_at"] = time.time()
     # Rotate CSRF together with the authenticated browser session.  Do not wait
     # for a later template render: AJAX and logout must share this exact token.
     csrf_token()
 
 
-def create_manager_browser_session(staff):
-    _create_browser_session(staff, "manager")
+def create_manager_browser_session(staff, remember=False):
+    _create_browser_session(staff, "manager", remember=remember)
 
 
-def create_staff_browser_session(staff):
-    _create_browser_session(staff, "staff")
+def create_staff_browser_session(staff, remember=False):
+    _create_browser_session(staff, "staff", remember=remember)
 
 
 def revoke_current_manager_session():
@@ -57,7 +64,10 @@ def _revoke_browser_session(prefix):
     if auth_session and not auth_session.revoked_at:
         auth_session.revoked_at = _now()
         db.session.commit()
-    for key in (f"{prefix}_staff_id", f"{prefix}_session_id", f"{prefix}_auth_version"):
+    for key in (
+        f"{prefix}_staff_id", f"{prefix}_session_id", f"{prefix}_auth_version",
+        f"{prefix}_remember", f"{prefix}_last_active_at",
+    ):
         session.pop(key, None)
 
 
@@ -86,6 +96,12 @@ def _current_browser_staff(prefix, required_role):
         or not staff.business.web_access_enabled
     ):
         return None
+    last_active_at = session.get(f"{prefix}_last_active_at")
+    if session.get(f"{prefix}_remember"):
+        idle_limit = current_app.config["REMEMBER_SESSION_IDLE_SECONDS"]
+        if not isinstance(last_active_at, (int, float)) or time.time() - last_active_at > idle_limit:
+            return None
+    session[f"{prefix}_last_active_at"] = time.time()
     return staff
 
 
