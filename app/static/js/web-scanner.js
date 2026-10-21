@@ -9,6 +9,8 @@
   const actionButtons = [...root.querySelectorAll('[data-action]')];
   let scanner = null;
   let scanning = false;
+  let cameraLookupLocked = false;
+  let cameraGeneration = 0;
 
   function message(text, type = 'info') {
     status.textContent = text;
@@ -25,6 +27,7 @@
     const uncertain = state.phase === 'uncertain';
     actionButtons.forEach(button => { button.disabled = !(selected || (uncertain && button.dataset.action === state.pendingOperation?.action)); });
     root.querySelector('[data-lookup-manual]').disabled = ['lookup', 'processing', 'uncertain'].includes(state.phase);
+    root.querySelector('[data-start-camera]').disabled = ['lookup', 'processing', 'uncertain'].includes(state.phase);
     root.querySelector('[data-reset-scanner]').disabled = ['processing', 'uncertain'].includes(state.phase);
     root.querySelectorAll('[data-purchase-amount],[data-redeem-amount]').forEach(input => { input.disabled = ['processing', 'uncertain'].includes(state.phase); });
   }
@@ -35,6 +38,8 @@
     updateControls();
   }
   async function stopCamera() {
+    cameraGeneration += 1;
+    cameraLookupLocked = false;
     if (scanner && scanning) { try { await scanner.stop(); } catch (_error) {} }
     scanning = false;
     cameraPanel.classList.add('hidden');
@@ -47,10 +52,11 @@
     return 'No fue posible iniciar la cámara en este navegador.';
   }
   async function startCamera() {
-    if (state.phase === 'processing' || state.phase === 'uncertain') { message('Resuelve primero el movimiento pendiente.', 'error'); return; }
+    if (['lookup', 'processing', 'uncertain'].includes(state.phase)) { message('Espera a que termine la validación o resuelve el movimiento pendiente.', 'error'); return; }
     if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia || !window.Html5Qrcode) { message('La cámara requiere HTTPS y un navegador compatible. Usa el ingreso alternativo.', 'error'); return; }
     root.querySelector('[data-start-camera]').disabled = true;
     message('Solicitando acceso a la cámara…');
+    const generation = ++cameraGeneration;
     try {
       const cameras = await Html5Qrcode.getCameras();
       cameraSelect.replaceChildren();
@@ -58,12 +64,25 @@
       if (!cameras.length) throw Object.assign(new Error('camera missing'), {name:'NotFoundError'});
       cameraPanel.classList.remove('hidden');
       scanner ||= new Html5Qrcode(root.querySelector('[data-qr-reader]').id);
-      await scanner.start(cameraSelect.value || {facingMode:'environment'}, {fps:10, qrbox:{width:240,height:240}}, decoded => lookup(decoded), () => {});
-      scanning = true; message('Cámara activa. Coloca el QR dentro del recuadro.', 'success');
+      scanning = true;
+      await scanner.start(cameraSelect.value || {facingMode:'environment'}, {fps:10, qrbox:{width:240,height:240}}, decoded => cameraDecoded(decoded, generation), () => {});
+      if (generation !== cameraGeneration) { try { await scanner.stop(); } catch (_error) {} return; }
+      message('Cámara activa. Coloca el QR dentro del recuadro.', 'success');
     } catch (error) { await stopCamera(); message(cameraError(error), 'error'); }
-    finally { root.querySelector('[data-start-camera]').disabled = false; }
+    finally { updateControls(); }
   }
   async function restartCamera() { await stopCamera(); await startCamera(); }
+  function cameraDecoded(decoded, generation) {
+    if (generation !== cameraGeneration || cameraLookupLocked || state.phase === 'lookup' || state.phase === 'processing' || state.phase === 'uncertain') return;
+    cameraLookupLocked = true;
+    if (scanner && scanning && typeof scanner.pause === 'function') { try { scanner.pause(true); } catch (_error) {} }
+    lookup(decoded, generation);
+  }
+  function resumeCameraAfterLookup(generation) {
+    if (generation !== cameraGeneration || !scanner || !scanning) return;
+    cameraLookupLocked = false;
+    if (typeof scanner.resume === 'function') { try { scanner.resume(); } catch (_error) {} }
+  }
   function renderSelection() {
     const selection = state.selection;
     if (!selection) { clearSelection(); return; }
@@ -75,7 +94,7 @@
     root.querySelector('[data-customer-panel]').classList.remove('hidden');
     updateControls();
   }
-  async function lookup(rawToken) {
+  async function lookup(rawToken, cameraSourceGeneration = null) {
     const token = String(rawToken || '').trim();
     if (!token) return;
     const version = state.beginLookup();
@@ -88,7 +107,9 @@
       if (version !== state.lookupVersion) return;
       if (!response.ok || !data?.customer || !data?.business) {
         state.finishLookup(version, null); clearSelection();
-        message(data?.message || 'No fue posible validar el código.', 'error'); return;
+        message(data?.message || 'No fue posible validar el código.', 'error');
+        if (cameraSourceGeneration !== null) resumeCameraAfterLookup(cameraSourceGeneration);
+        return;
       }
       state.finishLookup(version, {token, customer:data.customer, business:data.business});
       root.querySelector('[data-manual-token]').value = '';
@@ -98,6 +119,7 @@
       if (version !== state.lookupVersion) return;
       state.finishLookup(version, null); clearSelection();
       message('No fue posible validar el código. No hay ningún cliente seleccionado.', 'error');
+      if (cameraSourceGeneration !== null) resumeCameraAfterLookup(cameraSourceGeneration);
     }
   }
   function balanceText(customer, business = state.selection?.business) { return business?.loyalty_type === 'stamps' ? `${customer.current_stamps} sellos` : `${customer.current_points} puntos`; }
