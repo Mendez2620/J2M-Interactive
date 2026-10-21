@@ -1,8 +1,12 @@
 import base64
 import io
-import unittest
 import os
+import time
+import unittest
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
+from unittest.mock import patch
 
 from app import create_app
 from app.extensions import db
@@ -94,6 +98,28 @@ class AdminSecurityTestCase(unittest.TestCase):
         db.session.commit()
         inactive = self.client.post("/admin/login", data={"email": admin.email, "password": "AdminSeguro123"})
         self.assertEqual(inactive.status_code, 401)
+
+    def test_super_admin_cookie_stays_short_and_old_cookie_is_rejected(self):
+        response = self.client.post(
+            "/admin/login", data={"email":"global@j2m.test", "password":"AdminSeguro123"},
+            base_url="https://localhost",
+        )
+        self.assertEqual(response.status_code, 302)
+        cookie = next(value for value in response.headers.getlist("Set-Cookie") if value.startswith("session="))
+        expires_text = cookie.split("Expires=", 1)[1].split(";", 1)[0]
+        remaining = (parsedate_to_datetime(expires_text) - datetime.now(timezone.utc)).total_seconds()
+        self.assertGreater(remaining, 3500); self.assertLessEqual(remaining, 3600)
+        self.assertEqual(int(self.app.permanent_session_lifetime.total_seconds()), 3600)
+
+        with self.client.session_transaction() as browser_session:
+            data = dict(browser_session)
+        serializer = self.app.session_interface.get_signing_serializer(self.app)
+        with patch("itsdangerous.timed.time.time", return_value=time.time() - 3601):
+            old_cookie = serializer.dumps(data)
+        self.client.set_cookie("session", old_cookie, domain="localhost")
+        denied = self.client.get("/admin", base_url="https://localhost")
+        self.assertIn(denied.status_code, {302, 401})
+        self.assertIn("/admin/login", denied.location or "")
 
     def test_tenant_staff_cannot_become_platform_admin(self):
         staff = Staff(business_id=self.business.id, username="tenant-admin", role="admin", is_active=True)
