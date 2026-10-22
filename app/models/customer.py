@@ -6,6 +6,9 @@ from app.extensions import db
 class Customer(db.Model):
     """Customer Loyalty Account Model."""
     __tablename__ = "customers"
+    __table_args__ = (
+        db.UniqueConstraint("business_id", "id", name="uq_customers_business_id_id"),
+    )
 
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     business_id = db.Column(

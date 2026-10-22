@@ -19,6 +19,7 @@ from app.models.customer_registration import (
     CustomerRegistrationChallenge, CustomerRegistrationIdentityClaim,
 )
 from app.models.registration_email_job import RegistrationEmailJob
+from app.models.promoter import Promoter, PromoterSession, ReferralAttribution
 
 __all__ = [
     "db",
@@ -40,4 +41,5 @@ __all__ = [
     "CustomerRegistrationChallenge",
     "CustomerRegistrationIdentityClaim",
     "RegistrationEmailJob",
+    "Promoter", "PromoterSession", "ReferralAttribution",
 ]

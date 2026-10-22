@@ -4,6 +4,7 @@ import logging
 import os
 import secrets
 import time
+from urllib.parse import urlparse
 from datetime import datetime, timezone
 from flask import Flask, g, jsonify, redirect, render_template, request, url_for
 from sqlalchemy.engine import make_url
@@ -24,6 +25,7 @@ def create_app(config_name=None):
     app = Flask(__name__)
     config_class = config_by_name.get(config_name, config_by_name["default"])
     app.config.from_object(config_class)
+    app.config["APP_ENV"] = config_name
     from app.session_policy import RoleAwareSessionInterface
     app.session_interface = RoleAwareSessionInterface()
 
@@ -71,7 +73,11 @@ def create_app(config_name=None):
         app.config["SQLALCHEMY_DATABASE_URI"] = normalized_database_url
         app.config["SQLALCHEMY_ENGINE_OPTIONS"] = postgres_engine_options(effective_sslmode)
         public_base_url = app.config.get("PUBLIC_BASE_URL", "")
-        if not public_base_url or not public_base_url.startswith("https://"):
+        parsed_public_url = urlparse(public_base_url)
+        if (not public_base_url or parsed_public_url.scheme != "https"
+                or not parsed_public_url.hostname or parsed_public_url.username
+                or parsed_public_url.password or parsed_public_url.query
+                or parsed_public_url.fragment or parsed_public_url.path not in {"", "/"}):
             raise RuntimeError("PUBLIC_BASE_URL debe utilizar HTTPS en producción.")
         proxy_count = app.config.get("TRUSTED_PROXY_COUNT", 0)
         if proxy_count < 0 or proxy_count > 10:
@@ -126,9 +132,20 @@ def create_app(config_name=None):
         protected_staff_path = request.path.startswith("/staff/") or request.path.startswith("/api/web-scanner/")
         protected_recovery_path = request.path.startswith("/recover/")
         protected_join_path = request.path.startswith("/join/")
-        if app.config.get("CSRF_ENABLED", True) and request.method in {"POST", "PUT", "PATCH", "DELETE"} and (request.path.startswith("/admin") or protected_manager_path or protected_staff_path or protected_recovery_path or protected_join_path):
+        protected_promoter_path = request.path.startswith("/promoter/")
+        if app.config.get("CSRF_ENABLED", True) and request.method in {"POST", "PUT", "PATCH", "DELETE"} and (request.path.startswith("/admin") or protected_manager_path or protected_staff_path or protected_recovery_path or protected_join_path or protected_promoter_path):
             if not validate_csrf():
-                if not wants_json() and request.path in {"/staff/logout", "/manager/logout"}:
+                if not wants_json() and request.path in {"/staff/logout", "/manager/logout", "/promoter/logout"}:
+                    if request.path == "/promoter/logout":
+                        from app.promoter_auth import current_promoter
+                        active_session = current_promoter()
+                        if active_session is None:
+                            return redirect(url_for("promoter.promoter_login"), code=303)
+                        return render_template(
+                            "auth/logout_retry.html",
+                            logout_url=url_for("promoter.promoter_logout"),
+                            return_url=url_for("promoter.promoter_portal"),
+                        ), 400
                     from app.manager_auth import current_manager, current_staff_browser_session
 
                     is_staff = request.path.startswith("/staff/")

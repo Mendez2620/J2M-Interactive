@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Acceso de promotores | J2M Interactive{% endblock %}
+{% block content %}
+<main class="min-h-screen bg-slate-950 px-4 py-12 grid place-items-center">
+  <section class="w-full max-w-md rounded-3xl bg-white p-7 shadow-2xl" aria-labelledby="login-title">
+    <p class="text-xs font-bold uppercase tracking-[.2em] text-indigo-600">J2M Interactive</p>
+    <h1 id="login-title" class="mt-2 text-2xl font-extrabold text-slate-900">Portal de promotores</h1>
+    <p class="mt-2 text-sm text-slate-600">Consulta únicamente el resultado agregado de tus referidos verificados.</p>
+    {% if error %}<div class="mt-4 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700" role="alert">{{ error }}</div>{% endif %}
+    <form method="POST" class="mt-6 space-y-4">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <div><label for="business_slug" class="label">Negocio</label><input id="business_slug" name="business_slug" class="field" required autocomplete="organization" placeholder="slug-del-negocio"></div>
+      <div><label for="identity" class="label">Usuario o correo</label><input id="identity" name="identity" class="field" required autocomplete="username"></div>
+      <div><label for="password" class="label">Contraseña</label><input id="password" name="password" type="password" class="field" required autocomplete="current-password"></div>
+      <button class="btn btn-primary w-full" type="submit">Ingresar</button>
+    </form>
+  </section>
+</main>
+{% endblock %}
