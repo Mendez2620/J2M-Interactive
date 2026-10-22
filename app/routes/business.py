@@ -10,7 +10,8 @@ from sqlalchemy.exc import IntegrityError
 
 from app.extensions import db
 from app.models import (Business, Customer, CustomerRegistrationChallenge,
-                        CustomerRegistrationIdentityClaim, RegistrationEmailJob)
+                        CustomerRegistrationIdentityClaim, RegistrationEmailJob,
+                        Promoter, ReferralAttribution)
 from app.phone_numbers import normalize_phone
 from app.routes.customer_recovery import _reserve_rate_limit
 from app.security import valid_email
@@ -138,8 +139,10 @@ def join_business(slug):
             return jsonify({"status": "error", "message": "El servicio para este negocio se encuentra temporalmente suspendido."}), 403
         return render_template("join.html", business=business)
     if request.method == "GET":
+        referral_code = (request.args.get("ref") or "").strip()
         return render_template(
             "join.html", business=business,
+            referral_code=referral_code if len(referral_code) <= 32 else "",
             terms_version=current_app.config["TERMS_VERSION"],
             privacy_version=current_app.config["PRIVACY_NOTICE_VERSION"],
         )
@@ -152,6 +155,12 @@ def join_business(slug):
     except ValueError as exc:
         return jsonify({"status": "error", "message": str(exc)}), 400
     now = _utcnow()
+    referral_code = data.get("referral_code")
+    promoter = None
+    if isinstance(referral_code, str) and referral_code.strip():
+        promoter = Promoter.query.filter_by(
+            business_id=business.id, referral_code=referral_code.strip(), is_active=True
+        ).first()
     email_hash, phone_hash = _identity_hmac(email), _identity_hmac(phone)
     ip_hash = _hmac(request.remote_addr or "unknown", "registration-ip")
     ua_hash = _hmac((request.user_agent.string or "unknown")[:512], "registration-user-agent")
@@ -179,7 +188,10 @@ def join_business(slug):
         return _generic_response(started_at)
     code = f"{secrets.randbelow(100_000_000):08d}"
     challenge = CustomerRegistrationChallenge(
-        business_id=business.id, full_name=name, email=email, email_hash=email_hash,
+        business_id=business.id,
+        promoter_id=(promoter.id if promoter and (promoter.email or "").lower() != email
+                     and (not promoter.phone or promoter.phone != phone) else None),
+        full_name=name, email=email, email_hash=email_hash,
         phone=phone, phone_hash=phone_hash, birthdate=birthdate, code_hash="pending",
         terms_version=current_app.config["TERMS_VERSION"], privacy_version=current_app.config["PRIVACY_NOTICE_VERSION"],
         terms_accepted_at=now, privacy_accepted_at=now,
@@ -275,6 +287,19 @@ def verify_registration(slug):
             CustomerRegistrationIdentityClaim(business_id=business.id, identity_type="email", identity_hash=challenge.email_hash, customer_id=customer.id),
             CustomerRegistrationIdentityClaim(business_id=business.id, identity_type="phone", identity_hash=challenge.phone_hash, customer_id=customer.id),
         ])
+        promoter = (
+            db.session.query(Promoter)
+            .filter(Promoter.id == challenge.promoter_id, Promoter.business_id == business.id)
+            .with_for_update()
+            .one_or_none()
+            if challenge.promoter_id else None
+        )
+        if (promoter and promoter.business_id == business.id and promoter.is_active
+                and (promoter.email or "").lower() != challenge.email
+                and (not promoter.phone or promoter.phone != challenge.phone)):
+            db.session.add(ReferralAttribution(
+                business_id=business.id, promoter_id=promoter.id, customer_id=customer.id,
+            ))
         db.session.commit()
     except IntegrityError:
         db.session.rollback()

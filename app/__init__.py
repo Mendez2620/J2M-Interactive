@@ -126,9 +126,20 @@ def create_app(config_name=None):
         protected_staff_path = request.path.startswith("/staff/") or request.path.startswith("/api/web-scanner/")
         protected_recovery_path = request.path.startswith("/recover/")
         protected_join_path = request.path.startswith("/join/")
-        if app.config.get("CSRF_ENABLED", True) and request.method in {"POST", "PUT", "PATCH", "DELETE"} and (request.path.startswith("/admin") or protected_manager_path or protected_staff_path or protected_recovery_path or protected_join_path):
+        protected_promoter_path = request.path.startswith("/promoter/")
+        if app.config.get("CSRF_ENABLED", True) and request.method in {"POST", "PUT", "PATCH", "DELETE"} and (request.path.startswith("/admin") or protected_manager_path or protected_staff_path or protected_recovery_path or protected_join_path or protected_promoter_path):
             if not validate_csrf():
-                if not wants_json() and request.path in {"/staff/logout", "/manager/logout"}:
+                if not wants_json() and request.path in {"/staff/logout", "/manager/logout", "/promoter/logout"}:
+                    if request.path == "/promoter/logout":
+                        from app.promoter_auth import current_promoter
+                        active_session = current_promoter()
+                        if active_session is None:
+                            return redirect(url_for("promoter.promoter_login"), code=303)
+                        return render_template(
+                            "auth/logout_retry.html",
+                            logout_url=url_for("promoter.promoter_logout"),
+                            return_url=url_for("promoter.promoter_portal"),
+                        ), 400
                     from app.manager_auth import current_manager, current_staff_browser_session
 
                     is_staff = request.path.startswith("/staff/")

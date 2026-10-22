@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Promotores de {{ business.name }}{% endblock %}
+{% block content %}
+<main class="min-h-screen bg-slate-100 px-4 py-8">
+  <div class="mx-auto max-w-6xl space-y-6">
+    <header><a href="{{ url_for('admin.get_business_details', business_id=business.id) }}" class="text-sm font-semibold text-indigo-700">← Volver al negocio</a><h1 class="mt-2 text-2xl font-extrabold text-slate-900">Promotores · {{ business.name }}</h1><p class="text-sm text-slate-600">Accesos independientes y resultados agregados de registros verificados.</p></header>
+    {% if error %}<div class="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700" role="alert">{{ error }}</div>{% endif %}
+    <section class="rounded-2xl bg-white p-6 shadow-sm">
+      <h2 class="text-lg font-bold">Crear promotor</h2>
+      <form method="POST" class="mt-4 grid gap-4 sm:grid-cols-2">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <div><label class="label" for="name">Nombre</label><input class="field" id="name" name="name" required maxlength="120"></div>
+        <div><label class="label" for="username">Usuario</label><input class="field" id="username" name="username" required maxlength="80" autocomplete="off"></div>
+        <div><label class="label" for="email">Correo opcional</label><input class="field" id="email" name="email" type="email"></div>
+        <div><label class="label" for="phone">Teléfono opcional</label><input class="field" id="phone" name="phone" type="tel"></div>
+        <div class="sm:col-span-2"><label class="label" for="password">Contraseña inicial</label><input class="field" id="password" name="password" type="password" required minlength="12" autocomplete="new-password"></div>
+        <button type="submit" class="btn btn-primary sm:col-span-2 sm:justify-self-start">Crear promotor</button>
+      </form>
+    </section>
+    <section class="overflow-hidden rounded-2xl bg-white shadow-sm">
+      <div class="overflow-x-auto"><table class="w-full text-left text-sm"><thead class="bg-slate-50 text-slate-600"><tr><th class="p-4">Promotor</th><th class="p-4">Estado</th><th class="p-4">Referidos</th><th class="p-4">Acciones</th></tr></thead><tbody>
+      {% for item in promoters %}<tr class="border-t border-slate-100"><td class="p-4"><strong>{{ item.name }}</strong><div class="text-xs text-slate-500">{{ item.username }}</div></td><td class="p-4">{{ 'Activo' if item.is_active else 'Suspendido' }}</td><td class="p-4 font-bold">{{ counts.get(item.id, 0) }}</td><td class="p-4"><div class="flex flex-wrap gap-2"><form method="POST" action="{{ url_for('promoter.update_promoter', business_id=business.id, promoter_id=item.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="action" value="toggle"><button class="btn btn-secondary text-xs">{{ 'Suspender' if item.is_active else 'Activar' }}</button></form><details><summary class="btn btn-secondary cursor-pointer text-xs">Editar</summary><form method="POST" action="{{ url_for('promoter.update_promoter', business_id=business.id, promoter_id=item.id) }}" class="mt-2 grid gap-2"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="action" value="edit"><input name="name" value="{{ item.name }}" class="field" required aria-label="Nombre del promotor"><input name="email" value="{{ item.email or '' }}" type="email" class="field" aria-label="Correo del promotor"><button class="btn btn-primary text-xs">Guardar</button></form></details><details><summary class="btn btn-secondary cursor-pointer text-xs">Restablecer contraseña</summary><form method="POST" action="{{ url_for('promoter.update_promoter', business_id=business.id, promoter_id=item.id) }}" class="mt-2 flex gap-2"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="action" value="password"><input name="password" type="password" class="field" minlength="12" required aria-label="Nueva contraseña"><button class="btn btn-primary text-xs">Guardar</button></form></details></div></td></tr>{% else %}<tr><td colspan="4" class="p-8 text-center text-slate-500">Aún no hay promotores en este negocio.</td></tr>{% endfor %}
+      </tbody></table></div>
+    </section>
+  </div>
+</main>
+{% endblock %}

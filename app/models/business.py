@@ -52,6 +52,9 @@ class Business(db.Model):
     staff_members = db.relationship(
         "Staff", back_populates="business", cascade="all, delete-orphan", lazy="dynamic"
     )
+    promoters = db.relationship(
+        "Promoter", back_populates="business", cascade="all, delete-orphan", lazy="dynamic"
+    )
     transactions = db.relationship(
         "Transaction", back_populates="business", cascade="all, delete-orphan", lazy="dynamic"
     )
