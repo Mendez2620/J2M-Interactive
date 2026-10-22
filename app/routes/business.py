@@ -54,7 +54,11 @@ def _set_registration_challenge_session(challenge_id=None):
     decoy uses the same representation but is never persisted, so it cannot be
     verified while the signed session has the same observable shape.
     """
-    session["customer_registration_challenge_id"] = challenge_id or secrets.token_hex(18)
+    stored_id = challenge_id or secrets.token_hex(18)
+    session["customer_registration_challenge_id"] = stored_id
+    session["customer_registration_challenge_proof"] = (
+        _hmac(stored_id, "registration-session") if challenge_id else secrets.token_hex(32)
+    )
 
 
 def _payload():
@@ -213,9 +217,14 @@ def verify_registration(slug):
     if data is None or not isinstance(data.get("code"), (str, int)):
         return jsonify({"status": "error", "message": "El código no es válido o ya expiró."}), 400
     challenge_id, now = session.get("customer_registration_challenge_id"), _utcnow()
+    challenge_proof = session.get("customer_registration_challenge_proof")
     challenge = db.session.get(CustomerRegistrationChallenge, challenge_id) if challenge_id else None
+    proof_valid = challenge_proof is None or (
+        isinstance(challenge_proof, str)
+        and hmac.compare_digest(challenge_proof, _hmac(challenge_id, "registration-session"))
+    )
     valid = bool(
-        challenge and challenge.business_id == business.id and challenge.consumed_at is None
+        challenge and proof_valid and challenge.business_id == business.id and challenge.consumed_at is None
         and challenge.expires_at > now and challenge.attempts < current_app.config["REGISTRATION_MAX_ATTEMPTS"]
         and challenge.terms_accepted_at and challenge.privacy_accepted_at
         and challenge.terms_content_hash and challenge.privacy_content_hash
