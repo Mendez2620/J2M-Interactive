@@ -41,6 +41,14 @@ def create_app(config_name=None):
         if hmac.compare_digest(jwt_secret, secret):
             raise RuntimeError("Producción requiere que JWT_SECRET_KEY sea distinta de SECRET_KEY.")
         app.config["JWT_SECRET_KEY"] = jwt_secret
+        identity_key = os.getenv("REGISTRATION_IDENTITY_HMAC_KEY", "")
+        if len(identity_key) < 32 or identity_key in {secret, jwt_secret}:
+            raise RuntimeError("Producción requiere REGISTRATION_IDENTITY_HMAC_KEY independiente y estable de al menos 32 caracteres.")
+        app.config["REGISTRATION_IDENTITY_HMAC_KEY"] = identity_key
+        email_encryption_key = os.getenv("REGISTRATION_EMAIL_ENCRYPTION_KEY", "")
+        if len(email_encryption_key) < 32 or email_encryption_key in {secret, jwt_secret, identity_key}:
+            raise RuntimeError("Producción requiere REGISTRATION_EMAIL_ENCRYPTION_KEY independiente y estable de al menos 32 caracteres.")
+        app.config["REGISTRATION_EMAIL_ENCRYPTION_KEY"] = email_encryption_key
         if app.config.get("CORS_ORIGINS") == "*":
             raise RuntimeError("Producción requiere CORS_ORIGINS explícito.")
         if app.config.get("RECOVERY_MAIL_BACKEND") == "memory":
@@ -117,7 +125,8 @@ def create_app(config_name=None):
         protected_manager_path = request.path in {"/manager/login", "/manager/logout"} or request.path.startswith("/manager/portal")
         protected_staff_path = request.path.startswith("/staff/") or request.path.startswith("/api/web-scanner/")
         protected_recovery_path = request.path.startswith("/recover/")
-        if app.config.get("CSRF_ENABLED", True) and request.method in {"POST", "PUT", "PATCH", "DELETE"} and (request.path.startswith("/admin") or protected_manager_path or protected_staff_path or protected_recovery_path):
+        protected_join_path = request.path.startswith("/join/")
+        if app.config.get("CSRF_ENABLED", True) and request.method in {"POST", "PUT", "PATCH", "DELETE"} and (request.path.startswith("/admin") or protected_manager_path or protected_staff_path or protected_recovery_path or protected_join_path):
             if not validate_csrf():
                 if not wants_json() and request.path in {"/staff/logout", "/manager/logout"}:
                     from app.manager_auth import current_manager, current_staff_browser_session
@@ -248,4 +257,34 @@ def create_app(config_name=None):
             logger=app.logger,
         )
         app.logger.info("google_wallet_worker_stopped")
+
+    @app.cli.command("process-registration-emails")
+    def process_registration_emails_command():
+        """Process one batch of the persistent registration email outbox."""
+        from app.services.registration_email_service import (
+            cleanup_registration_email_jobs, process_pending_registration_emails,
+            registration_email_counts,
+        )
+        processed = process_pending_registration_emails(limit=app.config["REGISTRATION_EMAIL_BATCH_SIZE"])
+        cleaned = cleanup_registration_email_jobs()
+        print(json.dumps({"processed": processed, "cleaned": cleaned, **registration_email_counts()}, sort_keys=True))
+
+    @app.cli.command("run-registration-email-worker")
+    def run_registration_email_worker_command():
+        """Continuously deliver registration email from the durable outbox."""
+        import signal
+        import threading
+        from app.services.registration_email_service import run_registration_email_worker
+
+        stop_event = threading.Event()
+        for signal_name in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(signal_name, lambda _signum, _frame: stop_event.set())
+        app.logger.info("registration_email_worker_started")
+        run_registration_email_worker(
+            stop_event=stop_event,
+            poll_seconds=app.config["REGISTRATION_EMAIL_POLL_SECONDS"],
+            batch_size=app.config["REGISTRATION_EMAIL_BATCH_SIZE"],
+            logger=app.logger,
+        )
+        app.logger.info("registration_email_worker_stopped")
     return app
