@@ -107,7 +107,11 @@ class StagingReadinessTestCase(unittest.TestCase):
     def test_alembic_upgrades_ephemeral_postgres_to_single_expected_head(self):
         url = os.environ["TEST_POSTGRES_URL"]
         environment = os.environ.copy()
-        environment.update(DATABASE_URL=url, FLASK_ENV="development")
+        environment.update(
+            DATABASE_URL=url,
+            DATABASE_SSLMODE="disable",
+            FLASK_ENV="development",
+        )
         result = subprocess.run(
             [sys.executable, "-m", "flask", "--app", "run.py", "db", "upgrade"],
             cwd=ROOT, env=environment, capture_output=True, text=True,
