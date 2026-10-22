@@ -221,14 +221,90 @@ class PromotersPhase78TestCase(unittest.TestCase):
         first = self.referred_payload(promoter=self.promoter)
         self.assertEqual(self.client.post("/join/uno", json=first).status_code, 202)
         altered = dict(self.payload, referral_context=self.referred_payload(promoter=other)["referral_context"])
-        altered.update(email="nuevo@example.test", phone="55 9999 1111")
         self.assertEqual(self.client.post("/join/uno", json=altered).status_code, 202)
         challenge = CustomerRegistrationChallenge.query.order_by(CustomerRegistrationChallenge.created_at.desc()).first()
         self.assertEqual(challenge.promoter_id, self.promoter.id)
 
-    def test_unsigned_code_field_is_ignored_and_registration_without_referral_works(self):
-        unsigned = dict(self.payload, referral_code=self.promoter.referral_code)
-        _, verified = self.register(unsigned)
+    def test_new_identity_in_shared_browser_uses_its_own_referrer(self):
+        other = Promoter(business_id=self.business.id, name="Otra", username="otra")
+        other.set_password("PromotorSeguro123")
+        db.session.add(other); db.session.commit()
+        self.assertEqual(self.client.post("/join/uno", json=self.referred_payload()).status_code, 202)
+        second = dict(
+            self.payload,
+            email="segunda@example.test",
+            phone="55 9999 1111",
+            referral_context=self.referred_payload(promoter=other)["referral_context"],
+        )
+        self.assertEqual(self.client.post("/join/uno", json=second).status_code, 202)
+        process_pending_registration_emails()
+        code = self.app.extensions["recovery_mailer"].outbox[-1]["code"]
+        self.assertEqual(self.client.post("/join/uno/verify", json={"code": code}).status_code, 201)
+        attribution = ReferralAttribution.query.one()
+        self.assertEqual(attribution.promoter_id, other.id)
+
+    def test_referral_lock_requires_same_complete_identity(self):
+        other = Promoter(business_id=self.business.id, name="Otra", username="otra")
+        other.set_password("PromotorSeguro123")
+        db.session.add(other); db.session.commit()
+        other_context = self.referred_payload(promoter=other)["referral_context"]
+        cases = (
+            {"email": self.payload["email"], "phone": "55 9999 0001"},
+            {"email": "otra-identidad@example.test", "phone": self.payload["phone"]},
+        )
+        for index, changed in enumerate(cases):
+            client = self.app.test_client()
+            first_context = re.search(
+                r'name="referral_context" value="([^"]*)"',
+                client.get(f"/join/uno?ref={self.promoter.referral_code}").get_data(as_text=True),
+            ).group(1)
+            initial = dict(self.payload, email=f"base{index}@example.test", phone=f"55 0000 010{index}", referral_context=first_context)
+            self.assertEqual(client.post("/join/uno", json=initial).status_code, 202)
+            changed = dict(changed, full_name="Identidad Nueva", birthdate="1990-01-02",
+                           terms_accepted=True, privacy_accepted=True, referral_context=other_context)
+            if index == 0:
+                changed["email"] = initial["email"]
+            else:
+                changed["phone"] = initial["phone"]
+            self.assertEqual(client.post("/join/uno", json=changed).status_code, 202)
+            latest = CustomerRegistrationChallenge.query.order_by(CustomerRegistrationChallenge.created_at.desc()).first()
+            self.assertEqual(latest.promoter_id, other.id)
+
+    def test_expired_consumed_exhausted_or_untrusted_challenge_does_not_lock_referral(self):
+        other = Promoter(business_id=self.business.id, name="Otra", username="otra")
+        other.set_password("PromotorSeguro123")
+        db.session.add(other); db.session.commit()
+        states = ("expired", "consumed", "exhausted", "invalid-proof")
+        for state in states:
+            client = self.app.test_client()
+            page = client.get(f"/join/uno?ref={self.promoter.referral_code}").get_data(as_text=True)
+            first_context = re.search(r'name="referral_context" value="([^"]*)"', page).group(1)
+            payload = dict(self.payload, email=f"{state}@example.test", phone=f"55 1000 000{states.index(state)}", referral_context=first_context)
+            self.assertEqual(client.post("/join/uno", json=payload).status_code, 202)
+            challenge = CustomerRegistrationChallenge.query.order_by(CustomerRegistrationChallenge.created_at.desc()).first()
+            if state == "expired":
+                challenge.expires_at -= timedelta(hours=1)
+            elif state == "consumed":
+                challenge.consumed_at = challenge.created_at
+            elif state == "exhausted":
+                challenge.attempts = self.app.config["REGISTRATION_MAX_ATTEMPTS"]
+            else:
+                with client.session_transaction() as browser:
+                    browser["customer_registration_challenge_proof"] = "0" * 64
+            db.session.commit()
+            other_page = client.get(f"/join/uno?ref={other.referral_code}").get_data(as_text=True)
+            other_context = re.search(r'name="referral_context" value="([^"]*)"', other_page).group(1)
+            self.assertEqual(client.post("/join/uno", json=dict(payload, referral_context=other_context)).status_code, 202)
+            latest = CustomerRegistrationChallenge.query.order_by(CustomerRegistrationChallenge.created_at.desc()).first()
+            self.assertEqual(latest.promoter_id, other.id)
+
+    def test_tampered_context_and_unsigned_code_are_ignored(self):
+        tampered = dict(
+            self.payload,
+            referral_code=self.promoter.referral_code,
+            referral_context=self.referred_payload()["referral_context"] + "alterado",
+        )
+        _, verified = self.register(tampered)
         self.assertEqual(verified.status_code, 201)
         self.assertEqual(ReferralAttribution.query.count(), 0)
 
