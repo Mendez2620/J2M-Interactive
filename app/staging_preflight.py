@@ -5,6 +5,7 @@ connectivity and the Alembic revision are checked only with an explicit flag.
 """
 
 import json
+import re
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -33,6 +34,30 @@ def _origin_is_https(value):
         parsed.scheme == "https" and parsed.hostname and not parsed.username
         and not parsed.password and not parsed.query and not parsed.fragment
         and parsed.path in {"", "/"}
+    )
+
+
+def _https_endpoint_url(value):
+    """Validate an HTTPS endpoint URL, allowing the path required by Apple Wallet."""
+    raw = str(value or "").strip()
+    if not raw or any(character.isspace() for character in raw):
+        return False
+    try:
+        parsed = urlparse(raw)
+        port = parsed.port
+        hostname = parsed.hostname or ""
+    except ValueError:
+        return False
+    labels = hostname.split(".")
+    host_ok = all(
+        label and len(label) <= 63 and re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?", label)
+        for label in labels
+    )
+    return bool(
+        parsed.scheme == "https" and parsed.netloc and host_ok
+        and not parsed.username and not parsed.password
+        and not parsed.query and not parsed.fragment
+        and (port is None or 1 <= port <= 65535)
     )
 
 
@@ -139,11 +164,11 @@ def collect_preflight(config, *, check_database=False):
         _result(results, "warning", "apple_wallet", "Apple Wallet no está configurado; permanece como integración opcional pendiente.")
     elif all(apple_values):
         identity_ok = not _placeholder(apple_values[0]) and not _placeholder(apple_values[1])
-        web_url_ok = _origin_is_https(config.get("APPLE_WEB_SERVICE_URL"))
+        web_url_ok = _https_endpoint_url(config.get("APPLE_WEB_SERVICE_URL"))
         missing_files = [path for path in apple_values[2:] if not Path(str(path)).is_file()]
         status = "error" if not identity_ok or not web_url_ok else ("warning" if missing_files else "ok")
         _result(results, status, "apple_wallet",
-                "Apple Wallet contiene placeholders o una URL pública no canónica."
+                "Apple Wallet contiene placeholders o una URL de servicio HTTPS inválida."
                 if status == "error" else
                 "Apple Wallet está configurado, pero faltan archivos montados en este proceso."
                 if missing_files else "Apple Wallet tiene identificadores y archivos disponibles; no se contactó Apple.")

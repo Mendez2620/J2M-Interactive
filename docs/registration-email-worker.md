@@ -7,6 +7,14 @@ El endpoint público guarda el desafío y su trabajo de correo en `registration_
 - Un lote controlado: `flask --app run.py process-registration-emails`
 - Worker continuo: `flask --app run.py run-registration-email-worker`
 
+En un contenedor dedicado configure `J2M_PROCESS_TYPE=registration-worker`. El
+worker no publica HTTP: en Railway retire cualquier `healthcheckPath`, no asigne
+dominio y use reinicio `ON_FAILURE`. La imagen comprobará que PID 1 ejecuta el
+comando esperado cuando el runtime respete el `HEALTHCHECK`; Railway reiniciará
+el contenedor si el comando termina con error. Supervise también la cadencia de
+métricas y la antigüedad del backlog, porque liveness no detecta por sí sola un
+proceso bloqueado.
+
 El transporte en memoria de pruebas funciona sin Railway. En staging, el worker debe ejecutarse como un proceso independiente del servidor web, con la misma base PostgreSQL y las mismas variables de correo y cifrado. No se configuró ni inició ningún servicio real en esta fase.
 
 Variables operativas:

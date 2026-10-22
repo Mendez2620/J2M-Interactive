@@ -72,9 +72,14 @@ Nunca crea tablas ni aplica migraciones. El head esperado es `f9a0b1c2d3e4`.
 4. Confirme `db current` y el preflight con conexión.
 5. No agregue migraciones al `CMD`, health checks ni peticiones web.
 
-`init-db` y `seed-db` están bloqueados en producción. `seed-db` exige además una
-confirmación explícita en desarrollo aislado. Los downgrades destructivos no son
+`init-db` y toda entrada a `seed.py` están bloqueados en staging/producción y
+frente a cualquier PostgreSQL, aunque el entorno se etiquete por error como
+desarrollo. El seed solo admite SQLite dentro del proyecto local y la opción
+`--yes-i-understand-data-will-be-deleted`. Los downgrades destructivos no son
 un rollback: restaure el respaldo y vuelva a la versión compatible.
+El seed local requiere además `J2M_DEMO_SEED_PASSWORD` (mínimo 12 caracteres),
+sin contraseña de demostración incorporada al código ni permitida en servicios
+públicos.
 
 ## 5. Procesos Railway futuros
 
@@ -84,6 +89,13 @@ Configure servicios separados que compartan imagen y base, pero no comando:
 - Registro: `flask --app run.py run-registration-email-worker`.
 - Google Wallet, solo en modo real autorizado:
   `flask --app run.py run-google-wallet-sync-worker`.
+
+Use `J2M_PROCESS_TYPE=web`, `registration-worker` o `google-wallet-worker` según
+el servicio. El `HEALTHCHECK` de la imagen consulta `/api/health` únicamente en
+modo web; en un worker comprueba que PID 1 corresponda al comando esperado. En
+Railway, conserve `healthcheckPath=/api/ready` solo para web. En cada servicio
+worker retire el healthcheck HTTP, no asigne dominio y configure reinicio
+`ON_FAILURE`; Railway detectará la salida del proceso sin exigir un puerto.
 
 Los workers usan outboxes duraderos, reintentos y recuperación de leases;
 reciben SIGTERM/SIGINT y terminan sin mantener transacciones durante llamadas
@@ -97,6 +109,10 @@ vez ante todos los fallos externos.
 - `/api/ready` ejecuta una consulta mínima a PostgreSQL.
 - Ninguno valida migraciones, workers, SMTP ni Wallet.
 - El preflight comprueba configuración; no verifica proveedores externos.
+
+La comprobación de worker es liveness, no una garantía contra bloqueo interno.
+Alértese además por ausencia de ciclos, trabajos pendientes/fallidos y antigüedad
+del backlog; así no se considera sano un proceso vivo que dejó de avanzar.
 
 Configure alertas externas para disponibilidad, errores 5xx, latencia,
 conexiones, trabajos pendientes/reintentados/fallidos y antigüedad del backlog.

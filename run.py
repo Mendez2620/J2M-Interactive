@@ -24,7 +24,10 @@ def seed_db(yes_i_understand_data_will_be_deleted):
     if not yes_i_understand_data_will_be_deleted:
         raise click.ClickException("Este comando elimina datos. Use la confirmación explícita solo en desarrollo aislado.")
     from seed import reset_and_seed_database
-    reset_and_seed_database()
+    try:
+        reset_and_seed_database(confirmed=True)
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 if __name__ == "__main__":

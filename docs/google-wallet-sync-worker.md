@@ -17,6 +17,10 @@ Crear un segundo servicio desde el mismo repositorio y la misma imagen Docker, s
 - `GOOGLE_WALLET_SYNC_ALERT_PENDING=100`
 - `GOOGLE_WALLET_SYNC_ALERT_STALE_SECONDS=300`
 - Política de reinicio ante fallo. El worker no publica un puerto HTTP y no necesita un dominio.
+- `J2M_PROCESS_TYPE=google-wallet-worker`.
+- Sin `healthcheckPath` HTTP en el servicio Railway; el archivo `railway.toml`
+  corresponde al servicio web. La imagen valida que PID 1 ejecute el worker y
+  la política `ON_FAILURE` cubre la terminación del proceso.
 
 Una réplica es suficiente inicialmente. Varias réplicas son compatibles: cada actualización queda cercada por un advisory lock transaccional de PostgreSQL por cliente. Un trabajo abandonado en `processing` vuelve a ser elegible después de cinco minutos. Los fallos temporales usan reintentos con espera exponencial; los fallos permanentes quedan en `failed`. La llamada externa tiene timeout y nunca bloquea la transacción de puntos o sellos.
 
@@ -25,6 +29,10 @@ Una réplica es suficiente inicialmente. Varias réplicas son compatibles: cada 
 Cada ciclo registra solo agregados: procesados, pendientes, procesando, reintentando, completados, fallidos, antigüedad del trabajo más antiguo y fechas de último intento/éxito. No se registran tokens QR, datos de clientes ni credenciales.
 
 Crear alertas sobre los eventos `google_wallet_worker_backlog` y `google_wallet_worker_cycle_failed`. Investigar además cualquier negocio que muestre `con error` o `reintentando` en Super Admin. Códigos 429, 5xx y errores de red son reintentables; 401/403 normalmente requieren corregir credenciales o permisos. Un objeto 404 se recupera mediante la creación segura ya implementada.
+
+El healthcheck de proceso no demuestra progreso. Alerte también por ausencia de
+ciclos y por antigüedad creciente del trabajo más antiguo para detectar un
+worker vivo pero bloqueado.
 
 ## Recuperación controlada del backlog existente
 

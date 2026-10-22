@@ -10,6 +10,7 @@ from werkzeug.datastructures import FileStorage
 
 from app import create_app
 from app.routes.admin import persist_images
+from scripts.container_healthcheck import check_health
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -63,6 +64,25 @@ class StagingDeploymentTestCase(unittest.TestCase):
         self.assertIn("TEST_POSTGRES_URL", workflow)
         self.assertIn("python -m pip check", workflow)
         self.assertNotIn("railway up", workflow.lower())
+
+    def test_container_healthcheck_matches_web_and_each_worker_process(self):
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        self.assertTrue(check_health("web", http_open=lambda *_args, **_kwargs: Response()))
+        self.assertTrue(check_health("registration-worker", commandline="flask --app run.py run-registration-email-worker"))
+        self.assertTrue(check_health("google-wallet-worker", commandline="flask --app run.py run-google-wallet-sync-worker"))
+        self.assertFalse(check_health("registration-worker", commandline="flask --app run.py run-google-wallet-sync-worker"))
+        self.assertFalse(check_health("unknown", commandline="anything"))
+
+        dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("python scripts/container_healthcheck.py", dockerfile)
 
 
 if __name__ == "__main__":

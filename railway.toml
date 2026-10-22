@@ -3,6 +3,8 @@ builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"
 
 [deploy]
+# Este archivo describe el servicio web. Los workers no publican HTTP y deben
+# omitir healthcheckPath en su configuración de servicio (véase la guía).
 healthcheckPath = "/api/ready"
 healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"

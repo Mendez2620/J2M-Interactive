@@ -1,14 +1,17 @@
+import json
 import os
 import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from sqlalchemy import create_engine, text
 
 from app import create_app
 from app.config import normalize_database_url
 from app.extensions import db
+from app.staging_preflight import _https_endpoint_url
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -103,6 +106,82 @@ class StagingReadinessTestCase(unittest.TestCase):
             )
             self.assertNotEqual(blocked.returncode, 0)
             self.assertIn("bloqueado en producción", blocked.stdout + blocked.stderr)
+
+    def test_seed_guard_blocks_direct_function_and_script_on_protected_targets(self):
+        import seed
+
+        original = {
+            "APP_ENV": seed.app.config.get("APP_ENV"),
+            "SQLALCHEMY_DATABASE_URI": seed.app.config.get("SQLALCHEMY_DATABASE_URI"),
+        }
+        protected = (
+            ("production", "sqlite:///:memory:"),
+            ("staging", "sqlite:///:memory:"),
+            ("testing", "sqlite:///:memory:"),
+            ("development", "postgresql+psycopg2://user:secret@remote.invalid/app"),
+            ("development", "sqlite:///../outside-project.db"),
+        )
+        try:
+            with patch.object(seed.db, "drop_all") as drop_all:
+                for environment, database_url in protected:
+                    with self.subTest(environment=environment, database_url=database_url):
+                        seed.app.config.update(APP_ENV=environment, SQLALCHEMY_DATABASE_URI=database_url)
+                        with self.assertRaises(RuntimeError):
+                            seed.reset_and_seed_database(confirmed=True)
+                seed.app.config.update(APP_ENV="development", SQLALCHEMY_DATABASE_URI="sqlite:///:memory:")
+                with self.assertRaises(RuntimeError):
+                    seed.reset_and_seed_database(confirmed=False)
+                seed._assert_safe_seed_target(confirmed=True)
+                with patch.dict(os.environ, {}, clear=True), self.assertRaises(RuntimeError):
+                    seed._development_seed_password()
+                drop_all.assert_not_called()
+        finally:
+            seed.app.config.update(original)
+
+        environment = os.environ.copy()
+        environment.update(
+            FLASK_ENV="development",
+            DATABASE_URL="postgresql://user:secret@remote.invalid/app",
+            DATABASE_SSLMODE="disable",
+        )
+        direct = subprocess.run(
+            [sys.executable, "seed.py", "--yes-i-understand-data-will-be-deleted"],
+            cwd=ROOT, env=environment, capture_output=True, text=True,
+        )
+        self.assertNotEqual(direct.returncode, 0)
+        self.assertIn("solo está permitido sobre SQLite local", direct.stdout + direct.stderr)
+
+    def test_apple_wallet_endpoint_accepts_https_paths_only(self):
+        for value in (
+            "https://api.ejemplo.com/api/apple/v1",
+            "https://wallet.example.test:8443/api/apple/v1/",
+        ):
+            with self.subTest(value=value):
+                self.assertTrue(_https_endpoint_url(value))
+        for value in (
+            "http://api.ejemplo.com/api/apple/v1",
+            "https://user:secret@api.ejemplo.com/api/apple/v1",
+            "https://api.ejemplo.com/api/apple/v1?token=secret",
+            "https://api.ejemplo.com/api/apple/v1#fragment",
+            "https://bad_host.example/api/apple/v1",
+            "https:///api/apple/v1",
+            "not-a-url",
+        ):
+            with self.subTest(value=value):
+                self.assertFalse(_https_endpoint_url(value))
+
+        self.app.config.update(
+            APPLE_PASS_TYPE_ID="pass.com.j2m.loyalty",
+            APPLE_TEAM_ID="TEAM123456",
+            APPLE_CERT_PATH="missing-cert.pem",
+            APPLE_KEY_PATH="missing-key.pem",
+            APPLE_WWDR_PATH="missing-wwdr.pem",
+            APPLE_WEB_SERVICE_URL="https://api.ejemplo.com/api/apple/v1",
+        )
+        result = self.runner.invoke(args=["staging-preflight", "--json-output"])
+        payload = json.loads(result.output.splitlines()[0])
+        apple = next(item for item in payload["checks"] if item["check"] == "apple_wallet")
+        self.assertEqual(apple["status"], "warning")
 
     @unittest.skipUnless(os.getenv("TEST_POSTGRES_URL"), "PostgreSQL efímero no disponible")
     def test_alembic_upgrades_ephemeral_postgres_to_single_expected_head(self):
