@@ -8,13 +8,13 @@ from flask import Blueprint, current_app, jsonify, render_template, request, ses
 from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
 
-from app.email_service import MailDeliveryError
 from app.extensions import db
 from app.models import (Business, Customer, CustomerRegistrationChallenge,
-                        CustomerRegistrationIdentityClaim)
+                        CustomerRegistrationIdentityClaim, RegistrationEmailJob)
 from app.phone_numbers import normalize_phone
 from app.routes.customer_recovery import _reserve_rate_limit
 from app.security import valid_email
+from app.services.registration_email_service import encrypt_registration_code
 from app.wallet_access import issue_wallet_token
 
 business_bp = Blueprint("business", __name__)
@@ -158,14 +158,9 @@ def join_business(slug):
         Customer.business_id == business.id, Customer.phone == phone
     ).first()
     if existing_email or existing_phone:
-        # Only contact an address that is already verified for this business.
-        # Sending a notice to a newly supplied address would disclose that the
-        # accompanying phone number belongs to an existing customer.
-        try:
-            if existing_email:
-                current_app.extensions["recovery_mailer"].send_registration_notice(email, business.name)
-        except MailDeliveryError:
-            pass
+        # Never send registration mail for an existing identity. Historical
+        # records may not have a verified email, and a newly supplied address
+        # must not learn that its accompanying phone belongs to another user.
         session.pop("customer_registration_challenge_id", None)
         return _generic_response(started_at)
     code = f"{secrets.randbelow(100_000_000):08d}"
@@ -189,14 +184,12 @@ def join_business(slug):
         CustomerRegistrationChallenge.id != challenge.id,
         CustomerRegistrationChallenge.consumed_at.is_(None),
     ).update({CustomerRegistrationChallenge.consumed_at: now}, synchronize_session=False)
+    db.session.add(RegistrationEmailJob(
+        business_id=business.id,
+        challenge_id=challenge.id,
+        encrypted_code=encrypt_registration_code(code),
+    ))
     db.session.commit()
-    try:
-        current_app.extensions["recovery_mailer"].send_registration_code(email, code, business.name)
-    except MailDeliveryError:
-        challenge.consumed_at = now
-        db.session.commit()
-        session.pop("customer_registration_challenge_id", None)
-        return _generic_response(started_at)
     session["customer_registration_challenge_id"] = challenge.id
     return _generic_response(started_at)
 

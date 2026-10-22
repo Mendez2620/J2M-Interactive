@@ -4,6 +4,7 @@ from datetime import date
 from app import create_app
 from app.extensions import db
 from app.models import Business, Customer, PlatformAdmin, Staff, Transaction
+from app.services.registration_email_service import process_pending_registration_emails
 
 
 class Phase3TestCase(unittest.TestCase):
@@ -74,6 +75,7 @@ class Phase3TestCase(unittest.TestCase):
         )
         self.assertEqual(res.status_code, 202)
         self.assertIsNone(Customer.query.filter_by(email="valeria@test.com").first())
+        process_pending_registration_emails()
         code = self.app.extensions["recovery_mailer"].outbox[-1]["code"]
         res = self.client.post("/join/cafe-aroma/verify", json={"code": code})
         self.assertEqual(res.status_code, 201)
