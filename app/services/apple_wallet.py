@@ -124,6 +124,13 @@ class AppleWalletService:
                 "value": customer.full_name,
             }
         ]
+        card_text = (business.wallet_card_text or "Tu lealtad merece recompensas").strip()
+        if card_text:
+            secondary_fields.append({
+                "key": "card_message",
+                "label": "MENSAJE",
+                "value": card_text[:60],
+            })
 
         auxiliary_fields = [
             {

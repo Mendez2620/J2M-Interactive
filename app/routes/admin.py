@@ -30,7 +30,6 @@ ALLOWED_IMAGE_FORMATS = {"PNG": "png", "JPEG": "jpg", "WEBP": "webp"}
 VISUAL_THEMES = {"modern", "elegant", "minimal"}
 FONT_STYLES = {"modern", "classic", "geometric"}
 TEXT_SIZES = {"compact", "standard", "large"}
-WALLET_PRESETS = {"classic", "bold", "minimal"}
 HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 CATEGORY_SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
@@ -162,7 +161,9 @@ def parse_wallet_preferences(data, current):
     """Validate portable Wallet copy without accepting markup or free-form styling."""
     specs = {
         "wallet_program_name": (60, f"Club {current.name}"),
-        "wallet_card_text": (120, "Tu lealtad merece recompensas"),
+        # This copy is rendered as an Apple storeCard secondary field. Keep it
+        # short enough to remain useful on the front of a physical device.
+        "wallet_card_text": (60, "Tu lealtad merece recompensas"),
         "wallet_balance_label": (30, "Sellos" if current.loyalty_type == "stamps" else "Puntos"),
         "wallet_instructions": (500, "Presenta tu tarjeta al realizar tu compra."),
         "wallet_terms": (1000, ""),
@@ -185,10 +186,6 @@ def parse_wallet_preferences(data, current):
     if not HEX_COLOR_RE.fullmatch(color):
         raise ValueError("El color de texto debe usar el formato hexadecimal #RRGGBB.")
     values["wallet_text_color"] = color.upper()
-    preset = str(data.get("wallet_preset", current.wallet_preset or "classic")).strip().lower()
-    if preset not in WALLET_PRESETS:
-        raise ValueError("La configuración visual Wallet no es válida.")
-    values["wallet_preset"] = preset
     return values
 
 
@@ -472,7 +469,7 @@ def update_business(business_id: int):
     wallet_keys = {
         "wallet_program_name", "wallet_card_text", "wallet_text_color",
         "wallet_balance_label", "wallet_instructions", "wallet_terms",
-        "wallet_contact", "wallet_preset",
+        "wallet_contact",
     }
     try:
         visual = parse_visual_preferences(data, business)

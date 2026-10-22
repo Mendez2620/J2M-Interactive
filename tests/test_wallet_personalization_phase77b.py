@@ -51,6 +51,7 @@ class WalletPersonalizationPhase77BTestCase(unittest.TestCase):
         db.session.refresh(self.business); db.session.refresh(self.customer); db.session.refresh(self.other)
         self.assertEqual(self.business.wallet_program_name, "Club Café Uno")
         self.assertEqual(self.business.wallet_text_color, "#F8FAFC")
+        self.assertEqual(self.business.wallet_preset, "classic")
         self.assertEqual((self.customer.id, self.customer.qr_code_token, self.customer.current_stamps, self.customer.current_points), before)
         self.assertIsNone(self.other.wallet_program_name)
 
@@ -84,6 +85,10 @@ class WalletPersonalizationPhase77BTestCase(unittest.TestCase):
         self.assertEqual(pass_json["foregroundColor"], "rgb(248, 250, 252)")
         self.assertEqual(pass_json["storeCard"]["primaryFields"][0]["label"], "MIS SELLOS")
         self.assertEqual(pass_json["storeCard"]["primaryFields"][0]["value"], "3 / 8")
+        self.assertEqual(pass_json["storeCard"]["secondaryFields"][0]["value"], "Persona Real")
+        self.assertEqual(pass_json["storeCard"]["secondaryFields"][1], {
+            "key": "card_message", "label": "MENSAJE", "value": "Cada visita cuenta",
+        })
         with zipfile.ZipFile(apple.generate_pkpass(self.customer)) as archive:
             embedded = json.loads(archive.read("pass.json"))
             self.assertEqual(embedded["serialNumber"], serial)
@@ -97,6 +102,20 @@ class WalletPersonalizationPhase77BTestCase(unittest.TestCase):
         self.assertEqual(loyalty_object["barcode"]["value"], "immutable-wallet-qr")
         self.assertEqual(loyalty_object["loyaltyPoints"]["balance"]["string"], "3 / 8")
         self.assertIn("Cada visita cuenta", json.dumps(loyalty_object, ensure_ascii=False))
+        self.assertNotIn("foregroundColor", loyalty_class)
+        self.assertNotIn("textColor", loyalty_class)
+        self.assertNotIn("wallet_preset", json.dumps({"class": loyalty_class, "object": loyalty_object}))
+
+        # Historical preset values cannot alter either platform payload.
+        apple_before = apple.build_pass_json(self.customer)
+        google_before = (google.create_or_update_class(self.business), google.create_loyalty_object(self.customer))
+        self.business.wallet_preset = "minimal"
+        db.session.commit()
+        self.assertEqual(apple.build_pass_json(self.customer), apple_before)
+        self.assertEqual(
+            (google.create_or_update_class(self.business), google.create_loyalty_object(self.customer)),
+            google_before,
+        )
 
     def test_historical_business_defaults_and_editor_preview_are_safe(self):
         page = self.client.get(f"/admin/business/{self.business.id}")
@@ -107,10 +126,16 @@ class WalletPersonalizationPhase77BTestCase(unittest.TestCase):
         self.assertIn("QR FICTICIO", text)
         self.assertIn("data-wallet-preview=\"apple\"", text)
         self.assertIn("data-wallet-preview=\"google\"", text)
+        self.assertIn("data-google-wallet-front", text)
+        self.assertIn("Detalles · Programa", text)
         self.assertIn("grid-cols-1", text)
+        self.assertNotIn("name=\"wallet_preset\"", text)
+        self.assertNotIn("data-wallet-field=\"preset\"", text)
+        self.assertNotIn("preview.dataset.preset", text)
         self.assertNotIn("immutable-wallet-qr", text)
         legacy = AppleWalletService().build_pass_json(self.customer)
         self.assertEqual(legacy["storeCard"]["primaryFields"][0]["label"], "SELLOS")
+        self.assertEqual(legacy["storeCard"]["secondaryFields"][1]["key"], "card_message")
 
 
 if __name__ == "__main__":
