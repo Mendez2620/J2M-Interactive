@@ -7,6 +7,7 @@ from pathlib import Path
 from sqlalchemy import create_engine, text
 
 from app import create_app
+from app.config import normalize_database_url
 from app.extensions import db
 
 
@@ -117,7 +118,10 @@ class StagingReadinessTestCase(unittest.TestCase):
             cwd=ROOT, env=environment, capture_output=True, text=True,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        engine = create_engine(url)
+        engine = create_engine(
+            normalize_database_url(url),
+            connect_args={"sslmode": "disable"},
+        )
         with engine.connect() as connection:
             self.assertEqual(connection.execute(text("SELECT version_num FROM alembic_version")).scalar(), EXPECTED_HEAD)
             self.assertEqual(connection.execute(text("SELECT COUNT(*) FROM businesses")).scalar(), 0)
