@@ -7,6 +7,7 @@ import re
 import uuid
 import unicodedata
 import warnings
+from urllib.parse import urlparse
 from PIL import Image, UnidentifiedImageError
 from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
@@ -29,6 +30,7 @@ ALLOWED_IMAGE_FORMATS = {"PNG": "png", "JPEG": "jpg", "WEBP": "webp"}
 VISUAL_THEMES = {"modern", "elegant", "minimal"}
 FONT_STYLES = {"modern", "classic", "geometric"}
 TEXT_SIZES = {"compact", "standard", "large"}
+WALLET_PRESETS = {"classic", "bold", "minimal"}
 HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 CATEGORY_SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
@@ -156,6 +158,40 @@ def parse_visual_preferences(data, current=None):
     return values
 
 
+def parse_wallet_preferences(data, current):
+    """Validate portable Wallet copy without accepting markup or free-form styling."""
+    specs = {
+        "wallet_program_name": (60, f"Club {current.name}"),
+        "wallet_card_text": (120, "Tu lealtad merece recompensas"),
+        "wallet_balance_label": (30, "Sellos" if current.loyalty_type == "stamps" else "Puntos"),
+        "wallet_instructions": (500, "Presenta tu tarjeta al realizar tu compra."),
+        "wallet_terms": (1000, ""),
+        "wallet_contact": (160, ""),
+    }
+    values = {}
+    for key, (limit, fallback) in specs.items():
+        raw = data.get(key, getattr(current, key, None) or fallback)
+        if not isinstance(raw, str):
+            raise ValueError("Los textos de Wallet no tienen un formato válido.")
+        value = raw.strip()
+        if len(value) > limit:
+            raise ValueError(f"El campo de Wallet '{key}' supera {limit} caracteres.")
+        if re.search(r"<\s*/?\s*[a-zA-Z][^>]*>", value):
+            raise ValueError("Los textos de Wallet no admiten HTML.")
+        if any(ord(char) < 32 and char not in "\n\r\t" for char in value):
+            raise ValueError("Los textos de Wallet contienen caracteres no permitidos.")
+        values[key] = value or None
+    color = str(data.get("wallet_text_color", current.wallet_text_color or "#FFFFFF")).strip()
+    if not HEX_COLOR_RE.fullmatch(color):
+        raise ValueError("El color de texto debe usar el formato hexadecimal #RRGGBB.")
+    values["wallet_text_color"] = color.upper()
+    preset = str(data.get("wallet_preset", current.wallet_preset or "classic")).strip().lower()
+    if preset not in WALLET_PRESETS:
+        raise ValueError("La configuración visual Wallet no es válida.")
+    values["wallet_preset"] = preset
+    return values
+
+
 def parse_category_id(value):
     """Return a real category id or None without passing loose strings to PostgreSQL."""
     if value is None or (isinstance(value, str) and not value.strip()):
@@ -173,6 +209,17 @@ def parse_category_id(value):
     if category_id <= 0 or db.session.get(BusinessCategory, category_id) is None:
         raise ValueError("La categoría seleccionada no existe.")
     return category_id
+
+
+def parse_logo_url(value):
+    if value is None or not str(value).strip():
+        return None
+    if not isinstance(value, str) or len(value.strip()) > 255:
+        raise ValueError("La URL del logo no es válida.")
+    parsed = urlparse(value.strip())
+    if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
+        raise ValueError("La URL del logo debe ser una dirección HTTPS pública.")
+    return value.strip()
 
 
 def category_slug(value):
@@ -309,9 +356,9 @@ def create_business():
         category_id = parse_category_id(data.get("category_id"))
         loyalty_type, points_per_currency, stamps_reward_limit = parse_loyalty(data)
         visual = parse_visual_preferences(data)
+        logo_url = parse_logo_url(data.get("logo_url"))
     except ValueError as exc:
         return jsonify({"status": "error", "message": str(exc)}), 400
-    logo_url = data.get("logo_url") or None
     latitude = float(data.get("latitude")) if data.get("latitude") else None
     longitude = float(data.get("longitude")) if data.get("longitude") else None
     cooldown_minutes = int(data.get("cooldown_minutes") or 60)
@@ -422,9 +469,16 @@ def update_business(business_id: int):
 
     data = request.get_json(silent=True) or request.form.to_dict()
 
+    wallet_keys = {
+        "wallet_program_name", "wallet_card_text", "wallet_text_color",
+        "wallet_balance_label", "wallet_instructions", "wallet_terms",
+        "wallet_contact", "wallet_preset",
+    }
     try:
         visual = parse_visual_preferences(data, business)
+        wallet = parse_wallet_preferences(data, business) if wallet_keys.intersection(data) else {}
         category_id = parse_category_id(data.get("category_id")) if "category_id" in data else business.category_id
+        logo_url = parse_logo_url(data.get("logo_url")) if "logo_url" in data else business.logo_url
     except ValueError as exc:
         return jsonify({"status": "error", "message": str(exc)}), 400
 
@@ -439,12 +493,14 @@ def update_business(business_id: int):
     if "category_id" in data:
         business.category_id = category_id
     if "logo_url" in data:
-        business.logo_url = data["logo_url"].strip() or None
+        business.logo_url = logo_url
     business.primary_color = visual["primary_color"]
     business.secondary_color = visual["secondary_color"]
     business.visual_theme = visual["visual_theme"]
     business.font_style = visual["font_style"]
     business.text_size = visual["text_size"]
+    for key, value in wallet.items():
+        setattr(business, key, value)
     if "latitude" in data:
         try:
             business.latitude = float(data["latitude"]) if str(data["latitude"]).strip() != "" else None
@@ -455,8 +511,6 @@ def update_business(business_id: int):
             business.longitude = float(data["longitude"]) if str(data["longitude"]).strip() != "" else None
         except (ValueError, TypeError):
             business.longitude = None
-    if "wallet_terms" in data:
-        business.wallet_terms = data["wallet_terms"].strip() or None
     if any(key in data for key in ("loyalty_type", "points_per_currency", "stamps_reward_limit")):
         try:
             loyalty_type, points, stamps = parse_loyalty(data, business)
