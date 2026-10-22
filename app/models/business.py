@@ -28,6 +28,13 @@ class Business(db.Model):
     cooldown_minutes = db.Column(db.Integer, default=60, nullable=False)  # anti-fraude cooldown
     reward_description = db.Column(db.String(255), default="Recompensa de lealtad", nullable=True)
     wallet_terms = db.Column(db.Text, nullable=True)
+    wallet_program_name = db.Column(db.String(60), nullable=True)
+    wallet_card_text = db.Column(db.String(120), nullable=True)
+    wallet_text_color = db.Column(db.String(7), nullable=True)
+    wallet_balance_label = db.Column(db.String(30), nullable=True)
+    wallet_instructions = db.Column(db.String(500), nullable=True)
+    wallet_contact = db.Column(db.String(160), nullable=True)
+    wallet_preset = db.Column(db.String(20), default="classic", server_default="classic", nullable=False)
     is_active = db.Column(db.Boolean, default=True, nullable=False)
     web_access_enabled = db.Column(db.Boolean, default=False, nullable=False)
     mobile_access_enabled = db.Column(db.Boolean, default=False, nullable=False)
@@ -72,6 +79,13 @@ class Business(db.Model):
             "cooldown_minutes": self.cooldown_minutes,
             "reward_description": self.reward_description or "Recompensa de lealtad",
             "wallet_terms": self.wallet_terms or f"Presenta esta tarjeta digital en cada visita a {self.name} para acumular beneficios exclusivos.",
+            "wallet_program_name": self.wallet_program_name or f"Club {self.name}",
+            "wallet_card_text": self.wallet_card_text or "Tu lealtad merece recompensas",
+            "wallet_text_color": self.wallet_text_color or "#FFFFFF",
+            "wallet_balance_label": self.wallet_balance_label or ("Sellos" if self.loyalty_type == "stamps" else "Puntos"),
+            "wallet_instructions": self.wallet_instructions or "Presenta tu tarjeta al realizar tu compra.",
+            "wallet_contact": self.wallet_contact,
+            "wallet_preset": self.wallet_preset or "classic",
             "is_active": self.is_active,
             "web_access_enabled": self.web_access_enabled,
             "mobile_access_enabled": self.mobile_access_enabled,

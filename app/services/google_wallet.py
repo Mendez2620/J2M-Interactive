@@ -112,20 +112,24 @@ class GoogleWalletService:
     def get_object_id(self, customer):
         return f"{self.issuer_id}.business_{customer.business_id}_customer_{customer.id}"
 
-    def _logo_uri(self, business):
-        uri = business.logo_url
-        if not uri and business.logo_path and has_app_context():
+    def _image_uri(self, business, *, cover=False):
+        path = business.cover_path if cover else business.logo_path
+        uri = None if cover else business.logo_url
+        if not uri and path and has_app_context():
             base = current_app.config.get("PUBLIC_BASE_URL", "")
             if base.startswith("https://"):
-                uri = f"{base.rstrip('/')}/static/{business.logo_path.lstrip('/')}"
+                uri = f"{base.rstrip('/')}/static/{path.lstrip('/')}"
         parsed = urlparse(uri or "")
         return uri if parsed.scheme == "https" and parsed.netloc else None
+
+    def _logo_uri(self, business):
+        return self._image_uri(business)
 
     def create_or_update_class(self, business):
         self._require_enabled()
         result = {
             "id": self.get_class_id(business), "issuerName": business.name[:20],
-            "programName": f"Club {business.name}"[:20], "reviewStatus": "UNDER_REVIEW",
+            "programName": (business.wallet_program_name or f"Club {business.name}")[:20], "reviewStatus": "UNDER_REVIEW",
             "hexBackgroundColor": business.primary_color or "#1E3A8A",
             "accountNameLabel": "Miembro", "accountIdLabel": "ID",
         }
@@ -133,13 +137,17 @@ class GoogleWalletService:
         if logo_uri:
             result["programLogo"] = {"sourceUri": {"uri": logo_uri}, "contentDescription": {
                 "defaultValue": {"language": "es-419", "value": f"Logo {business.name}"}}}
+        hero_uri = self._image_uri(business, cover=True)
+        if hero_uri:
+            result["heroImage"] = {"sourceUri": {"uri": hero_uri}, "contentDescription": {
+                "defaultValue": {"language": "es-419", "value": f"Imagen de {business.name}"}}}
         return result
 
     def _loyalty_points(self, customer):
         if customer.business.loyalty_type == "stamps":
-            return {"label": "Sellos", "balance": {"string":
+            return {"label": customer.business.wallet_balance_label or "Sellos", "balance": {"string":
                     f"{customer.current_stamps} / {customer.business.stamps_reward_limit}"}}
-        return {"label": "Puntos", "balance": {"string": f"{customer.current_points:.0f} pts"}}
+        return {"label": customer.business.wallet_balance_label or "Puntos", "balance": {"string": f"{customer.current_points:.0f} pts"}}
 
     def create_loyalty_object(self, customer):
         self._require_enabled()
@@ -150,10 +158,16 @@ class GoogleWalletService:
             "barcode": {"type": "QR_CODE", "value": customer.qr_code_token},
             "loyaltyPoints": self._loyalty_points(customer),
             "textModulesData": [{"id": "program", "header": "Programa", "body":
-                "Sellos de recompensa" if business.loyalty_type == "stamps" else "Puntos acumulables"}],
+                business.wallet_card_text or ("Sellos de recompensa" if business.loyalty_type == "stamps" else "Puntos acumulables")}],
         }
+        if business.reward_description:
+            result["textModulesData"].append({"id": "reward", "header": "Recompensa", "body": business.reward_description})
+        if business.wallet_instructions:
+            result["textModulesData"].append({"id": "instructions", "header": "Cómo utilizarla", "body": business.wallet_instructions})
         if business.wallet_terms:
             result["textModulesData"].append({"id": "terms", "header": "Términos", "body": business.wallet_terms})
+        if business.wallet_contact:
+            result["textModulesData"].append({"id": "contact", "header": "Contacto", "body": business.wallet_contact})
         return result
 
     def _request(self, method, resource, *, body=None):
