@@ -21,9 +21,11 @@ Variables operativas:
 
 ## Estados y recuperación
 
-Los trabajos pasan por `pending`, `processing` y `completed`. Un desafío vencido, consumido, reemplazado o perteneciente a un negocio suspendido termina `cancelled`; un payload no descifrable o un trabajo que agota reintentos termina `failed`. Los errores temporales vuelven a `pending` con backoff. Un reclamo `processing` abandonado vuelve a ser elegible tras el umbral de recuperación.
+Los trabajos pasan por `pending`, `processing` y `completed`. Un desafío vencido, consumido, reemplazado o perteneciente a un negocio suspendido termina `cancelled`; un payload no descifrable o un trabajo que agota reintentos termina `failed`. Los errores temporales vuelven a `pending` con backoff. Un reclamo `processing` abandonado vuelve a ser elegible tras el umbral de recuperación. Al terminar en `completed`, `cancelled` o `failed`, se elimina inmediatamente el código cifrado; se conservan estado, conteo de intentos, tipo de error y fechas para auditoría operativa.
 
-La reclamación se realiza mediante actualización condicional, por lo que dos workers no procesan simultáneamente el mismo trabajo. SMTP no ofrece confirmación transaccional de extremo a extremo: si el proceso muere después de que el servidor acepte el mensaje pero antes de confirmar `completed`, puede repetirse el mismo código. El código y su caducidad no cambian, y nunca se genera automáticamente un cliente. Esta entrega al menos una vez es una limitación pendiente de validar con el proveedor real.
+Cada reclamación genera un `lease_token` aleatorio y lo guarda mediante actualización condicional. Completar, cancelar o reprogramar exige simultáneamente el estado `processing` y el token vigente; un worker cuyo lease caducó no puede sobrescribir al nuevo propietario. La transacción de reclamación se confirma antes de SMTP y no queda ninguna transacción abierta durante la llamada externa.
+
+SMTP no ofrece confirmación transaccional de extremo a extremo: el fencing protege el estado del outbox, pero si el proceso pierde el lease durante una llamada lenta o muere después de que el servidor acepte el mensaje, puede repetirse el mismo código. El código y su caducidad no cambian, y nunca se genera automáticamente un cliente. Esta entrega al menos una vez es una limitación pendiente de validar con el proveedor real; no se afirma entrega exactamente una vez.
 
 Los logs y la salida CLI contienen únicamente tipos de error y conteos agregados; no incluyen códigos, destinatarios, tokens ni credenciales. Para diagnóstico, revise conteos de `pending` y `failed` mediante el comando de lote y los logs agregados. No consulte ni copie `encrypted_code`.
 

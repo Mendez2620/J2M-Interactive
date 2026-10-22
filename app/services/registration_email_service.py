@@ -2,6 +2,7 @@ import base64
 import hashlib
 import json
 import logging
+import secrets
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -40,24 +41,43 @@ def _eligible(now):
     )
 
 
-def _finish(job_id, status, *, now, error_type=None, retry=False):
-    job = db.session.get(RegistrationEmailJob, job_id)
-    if job is None:
-        return
-    job.locked_at = None
-    job.last_error_type = error_type
-    if retry:
-        job.attempts += 1
-    if retry and job.attempts < current_app.config["REGISTRATION_EMAIL_MAX_ATTEMPTS"]:
-        delay = min(300, 5 * (2 ** min(job.attempts - 1, 6)))
-        job.status = "pending"
-        job.next_attempt_at = now + timedelta(seconds=delay)
-    else:
-        job.status = status
-        job.next_attempt_at = None
-        if status == "completed":
-            job.sent_at = now
+def _claim_job(job_id, *, now=None, lease_token=None):
+    now = now or _now()
+    lease_token = lease_token or secrets.token_hex(32)
+    claimed = RegistrationEmailJob.query.filter(
+        RegistrationEmailJob.id == job_id, *_eligible(now)
+    ).update({
+        "status": "processing", "locked_at": now, "lease_token": lease_token,
+    }, synchronize_session=False)
     db.session.commit()
+    return lease_token if claimed == 1 else None
+
+
+def _finish(job_id, lease_token, status, *, now, error_type=None, retry=False):
+    job = RegistrationEmailJob.query.filter_by(
+        id=job_id, status="processing", lease_token=lease_token,
+    ).first()
+    if job is None:
+        db.session.rollback()
+        return False
+    attempts = job.attempts + (1 if retry else 0)
+    values = {
+        "locked_at": None, "last_error_type": error_type, "attempts": attempts,
+    }
+    if retry:
+        retry = attempts < current_app.config["REGISTRATION_EMAIL_MAX_ATTEMPTS"]
+    if retry:
+        delay = min(300, 5 * (2 ** min(attempts - 1, 6)))
+        values.update(status="pending", next_attempt_at=now + timedelta(seconds=delay), lease_token=None)
+    else:
+        values.update(status=status, next_attempt_at=None, lease_token=None, encrypted_code=None)
+        if status == "completed":
+            values["sent_at"] = now
+    updated = RegistrationEmailJob.query.filter_by(
+        id=job_id, status="processing", lease_token=lease_token,
+    ).update(values, synchronize_session=False)
+    db.session.commit()
+    return updated == 1
 
 
 def process_pending_registration_emails(limit=50, mailer=None):
@@ -71,33 +91,34 @@ def process_pending_registration_emails(limit=50, mailer=None):
     processed = 0
     for job_id in candidate_ids:
         now = _now()
-        claimed = RegistrationEmailJob.query.filter(
-            RegistrationEmailJob.id == job_id, *_eligible(now)
-        ).update({"status": "processing", "locked_at": now}, synchronize_session=False)
-        db.session.commit()
-        if claimed != 1:
+        lease_token = _claim_job(job_id, now=now)
+        if lease_token is None:
             continue
         job = db.session.get(RegistrationEmailJob, job_id)
         challenge = db.session.get(CustomerRegistrationChallenge, job.challenge_id) if job else None
         business = db.session.get(Business, job.business_id) if job else None
         if not challenge or not business or not business.is_active or challenge.consumed_at is not None or challenge.expires_at <= now:
-            _finish(job_id, "cancelled", now=now)
+            db.session.rollback()
+            _finish(job_id, lease_token, "cancelled", now=now)
             processed += 1
             continue
         try:
             code = _cipher().decrypt(job.encrypted_code.encode()).decode()
         except (InvalidToken, UnicodeError):
-            _finish(job_id, "failed", now=now, error_type="InvalidPayload")
+            db.session.rollback()
+            _finish(job_id, lease_token, "failed", now=now, error_type="InvalidPayload")
             processed += 1
             continue
+        recipient, business_name = challenge.email, business.name
+        db.session.rollback()  # Never hold a database transaction open during SMTP.
         try:
-            mailer.send_registration_code(challenge.email, code, business.name)
+            mailer.send_registration_code(recipient, code, business_name)
         except MailDeliveryError as exc:
-            _finish(job_id, "failed", now=now, error_type=type(exc).__name__, retry=True)
+            _finish(job_id, lease_token, "failed", now=_now(), error_type=type(exc).__name__, retry=True)
         except Exception as exc:
-            _finish(job_id, "failed", now=now, error_type=type(exc).__name__, retry=True)
+            _finish(job_id, lease_token, "failed", now=_now(), error_type=type(exc).__name__, retry=True)
         else:
-            _finish(job_id, "completed", now=now)
+            _finish(job_id, lease_token, "completed", now=_now())
         processed += 1
     return processed
 

@@ -15,7 +15,8 @@ from app.models import (Business, Customer, CustomerRegistrationChallenge,
                         CustomerRegistrationIdentityClaim, RegistrationEmailJob)
 from app.config import TestingConfig
 from app.services.registration_email_service import (
-    process_pending_registration_emails, run_registration_email_worker,
+    _claim_job, _finish, _now, process_pending_registration_emails,
+    run_registration_email_worker,
 )
 
 
@@ -46,7 +47,7 @@ class VerifiedRegistrationTestCase(unittest.TestCase):
         self.assertNotEqual(challenge.code_hash, code)
         self.assertNotIn(code, challenge.code_hash)
         job = RegistrationEmailJob.query.one()
-        self.assertNotIn(code, job.encrypted_code)
+        self.assertIsNone(job.encrypted_code)
         result = self.client.post("/join/uno/verify", json={"code": code})
         self.assertEqual(result.status_code, 201)
         customer = Customer.query.one()
@@ -264,6 +265,30 @@ class VerifiedRegistrationTestCase(unittest.TestCase):
                 db.session.remove()
             self.assertEqual(sum(processed), 1)
             self.assertEqual(len(app.extensions["recovery_mailer"].outbox), 1)
+
+    def test_stale_worker_cannot_finish_newer_lease(self):
+        self.assertEqual(self.client.post("/join/uno", json=self.payload).status_code, 202)
+        job = RegistrationEmailJob.query.one()
+        now = _now()
+        lease_a = _claim_job(job.id, now=now, lease_token="a" * 64)
+        self.assertEqual(lease_a, "a" * 64)
+        RegistrationEmailJob.query.filter_by(id=job.id, lease_token=lease_a).update({
+            "locked_at": now - timedelta(seconds=self.app.config["REGISTRATION_EMAIL_STALE_SECONDS"] + 1)
+        }, synchronize_session=False)
+        db.session.commit()
+        lease_b = _claim_job(job.id, now=now, lease_token="b" * 64)
+        self.assertEqual(lease_b, "b" * 64)
+
+        self.assertFalse(_finish(job.id, lease_a, "completed", now=now))
+        current = db.session.get(RegistrationEmailJob, job.id)
+        self.assertEqual((current.status, current.lease_token), ("processing", lease_b))
+        self.assertIsNotNone(current.encrypted_code)
+
+        self.assertTrue(_finish(job.id, lease_b, "completed", now=now))
+        current = db.session.get(RegistrationEmailJob, job.id)
+        self.assertEqual(current.status, "completed")
+        self.assertIsNone(current.lease_token)
+        self.assertIsNone(current.encrypted_code)
 
     def test_challenge_and_outbox_roll_back_together(self):
         original_commit = db.session.commit
