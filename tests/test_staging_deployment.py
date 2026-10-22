@@ -50,6 +50,20 @@ class StagingDeploymentTestCase(unittest.TestCase):
         self.assertIn('healthcheckPath = "/api/ready"', railway)
         self.assertIn("gunicorn==", requirements)
 
+    def test_container_and_ci_are_hardened_for_staging_validation(self):
+        dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+        dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8")
+        workflow = (ROOT / ".github/workflows/tests.yml").read_text(encoding="utf-8")
+        self.assertIn("USER j2m", dockerfile)
+        self.assertIn("HEALTHCHECK", dockerfile)
+        self.assertNotIn("db upgrade", dockerfile)
+        for pattern in (".env", "certs", "*.pem", "*.key", "*.p12", "*.pfx"):
+            self.assertIn(pattern, dockerignore)
+        self.assertIn("postgres:16-alpine", workflow)
+        self.assertIn("TEST_POSTGRES_URL", workflow)
+        self.assertIn("python -m pip check", workflow)
+        self.assertNotIn("railway up", workflow.lower())
+
 
 if __name__ == "__main__":
     unittest.main()
