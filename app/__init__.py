@@ -117,7 +117,8 @@ def create_app(config_name=None):
         protected_manager_path = request.path in {"/manager/login", "/manager/logout"} or request.path.startswith("/manager/portal")
         protected_staff_path = request.path.startswith("/staff/") or request.path.startswith("/api/web-scanner/")
         protected_recovery_path = request.path.startswith("/recover/")
-        if app.config.get("CSRF_ENABLED", True) and request.method in {"POST", "PUT", "PATCH", "DELETE"} and (request.path.startswith("/admin") or protected_manager_path or protected_staff_path or protected_recovery_path):
+        protected_join_path = request.path.startswith("/join/")
+        if app.config.get("CSRF_ENABLED", True) and request.method in {"POST", "PUT", "PATCH", "DELETE"} and (request.path.startswith("/admin") or protected_manager_path or protected_staff_path or protected_recovery_path or protected_join_path):
             if not validate_csrf():
                 if not wants_json() and request.path in {"/staff/logout", "/manager/logout"}:
                     from app.manager_auth import current_manager, current_staff_browser_session
