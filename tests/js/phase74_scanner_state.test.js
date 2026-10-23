@@ -137,11 +137,11 @@ function element(dataset = {}) {
     setAttribute() {}, focus() { this.focused = true; },
     addEventListener:(name, handler) => { listeners[name] = handler; },
     dispatch:async name => listeners[name]?.({target:this}),
-    replaceChildren() {}, appendChild(option) { if (!this.value) this.value = option.value; },
+    replaceChildren() { this.value = ''; this.options = []; }, appendChild(option) { this.options ||= []; this.options.push(option); if (!this.value) this.value = option.value; },
   };
 }
 
-function scannerHarness(fetchImpl, {mobile = false, startError = null} = {}) {
+function scannerHarness(fetchImpl, {device = 'desktop', startError = null, getCamerasImpl = null, startImpl = null} = {}) {
   const nodes = {
     status:element(), startPanel:element(), cameraPanel:element(), cameraSelect:element(), cameraSelectWrap:element(), start:element(), stop:element(), reader:element(),
     customerPanel:element(), customerName:element(), customerBalance:element(), customerProgram:element(), stamps:element(), points:element(),
@@ -171,22 +171,31 @@ function scannerHarness(fetchImpl, {mobile = false, startError = null} = {}) {
   const instances = [];
   let cameraEnumerationCalls = 0;
   class Html5Qrcode {
-    static async getCameras() { cameraEnumerationCalls += 1; return [{id:'camera-1', label:'Principal'}, {id:'camera-2', label:'Trasera'}]; }
+    static async getCameras() { cameraEnumerationCalls += 1; return getCamerasImpl ? getCamerasImpl() : [{id:'camera-1', label:'Principal'}, {id:'camera-2', label:'Trasera'}]; }
     constructor() { this.paused = false; this.stopped = false; instances.push(this); }
-    async start(camera, _config, callback) { this.startSource = camera; this.callback = callback; if (startError) throw startError; }
+    async start(camera, _config, callback) { this.startSource = camera; this.callback = callback; if (startError) throw startError; if (startImpl) await startImpl(this); }
     pause() { this.paused = true; }
     resume() { this.paused = false; }
     async stop() { this.stopped = true; }
   }
   let assignedUrl = null;
   function CustomEvent(name, options) { this.type = name; this.detail = options?.detail; }
-  const window = {J2MScannerState:{ScannerState}, Html5Qrcode, CustomEvent, isSecureContext:true, matchMedia:query => ({matches:mobile && query.includes('max-width')}), dispatchEvent:() => {}, location:{pathname:'/staff/portal/scanner', assign:url => { assignedUrl = url; }}, addEventListener:(name, handler) => { windowListeners[name] = handler; }};
-  const context = {window, document, navigator:{mediaDevices:{getUserMedia(){}}}, Html5Qrcode, crypto:globalThis.crypto, AbortController, setTimeout, clearTimeout, fetch:fetchImpl};
+  const profiles = {
+    mobile:{userAgent:'Mozilla/5.0 (iPhone)', userAgentData:{mobile:true}, platform:'iPhone', maxTouchPoints:5},
+    narrowDesktop:{userAgent:'Mozilla/5.0 (Windows NT 10.0)', userAgentData:{mobile:false}, platform:'Win32', maxTouchPoints:0},
+    wideDesktop:{userAgent:'Mozilla/5.0 (X11; Linux x86_64)', userAgentData:{mobile:false}, platform:'Linux x86_64', maxTouchPoints:0},
+    hybrid:{userAgent:'Mozilla/5.0 (Windows NT 10.0; Touch)', userAgentData:{mobile:false}, platform:'Win32', maxTouchPoints:10},
+    ipad:{userAgent:'Mozilla/5.0 (Macintosh)', platform:'MacIntel', maxTouchPoints:5},
+  };
+  const navigator = {...profiles[device], mediaDevices:{getUserMedia(){}}};
+  const window = {J2MScannerState:{ScannerState}, Html5Qrcode, CustomEvent, isSecureContext:true, dispatchEvent:() => {}, location:{pathname:'/staff/portal/scanner', assign:url => { assignedUrl = url; }}, addEventListener:(name, handler) => { windowListeners[name] = handler; }};
+  const context = {window, document, navigator, Html5Qrcode, crypto:globalThis.crypto, AbortController, setTimeout, clearTimeout, fetch:fetchImpl};
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../../app/static/js/web-scanner.js'), 'utf8'), context);
   return {nodes, instances, windowListeners, documentListeners, assignedUrl:() => assignedUrl, cameraEnumerationCalls:() => cameraEnumerationCalls};
 }
 
 const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+function deferred() { let resolve; const promise = new Promise(done => { resolve = done; }); return {promise, resolve}; }
 const lookupSuccess = name => new Response(JSON.stringify({customer:{id:1, full_name:name, current_stamps:0}, business:{id:1, loyalty_type:'stamps', stamps_reward_limit:8}}), {status:200, headers:{'Content-Type':'application/json'}});
 
 async function testCameraIntegration() {
@@ -203,15 +212,90 @@ async function testCameraIntegration() {
   assert.equal(slow.nodes.customerName.textContent, 'Cliente correcto');
   assert.equal(slow.nodes.customerPanel.classList.contains('hidden'), false);
 
-  const mobile = scannerHarness(async () => lookupSuccess('Cliente móvil'), {mobile:true});
+  const mobile = scannerHarness(async () => lookupSuccess('Cliente móvil'), {device:'mobile'});
   await mobile.nodes.start.dispatch('click');
   assert.equal(mobile.cameraEnumerationCalls(), 0, 'mobile does not enumerate or expose camera choices');
   assert.equal(mobile.instances[0].startSource.facingMode.exact, 'environment', 'mobile requires the rear camera without a silent front fallback');
 
-  const denied = scannerHarness(async () => lookupSuccess('unused'), {mobile:true, startError:{name:'NotAllowedError'}});
+  for (const device of ['narrowDesktop', 'wideDesktop', 'hybrid']) {
+    const desktop = scannerHarness(async () => lookupSuccess('Escritorio'), {device});
+    await desktop.nodes.start.dispatch('click');
+    assert.equal(desktop.cameraEnumerationCalls(), 1, `${device} uses available desktop cameras regardless of width or touch`);
+    assert.equal(desktop.instances[0].startSource, 'camera-1');
+  }
+  const ipad = scannerHarness(async () => lookupSuccess('iPad'), {device:'ipad'});
+  await ipad.nodes.start.dispatch('click');
+  assert.equal(ipad.cameraEnumerationCalls(), 0); assert.equal(ipad.instances[0].startSource.facingMode.exact, 'environment');
+
+  const selectedCamera = scannerHarness(async () => lookupSuccess('Segunda cámara'));
+  await selectedCamera.nodes.start.dispatch('click');
+  selectedCamera.nodes.cameraSelect.value = 'camera-2';
+  await selectedCamera.nodes.cameraSelect.dispatch('change');
+  assert.equal(selectedCamera.instances.length, 2);
+  assert.equal(selectedCamera.instances[1].startSource, 'camera-2', 'desktop restart uses the explicitly selected camera id');
+  assert.equal(selectedCamera.nodes.cameraSelect.value, 'camera-2', 'rebuilding options preserves the selected device');
+
+  let enumerationRound = 0;
+  const disappearingCamera = scannerHarness(async () => lookupSuccess('Cámara disponible'), {getCamerasImpl:() => {
+    enumerationRound += 1;
+    return enumerationRound === 1 ? [{id:'camera-1'}, {id:'camera-2'}] : [{id:'camera-1'}];
+  }});
+  await disappearingCamera.nodes.start.dispatch('click');
+  disappearingCamera.nodes.cameraSelect.value = 'camera-2';
+  await disappearingCamera.nodes.cameraSelect.dispatch('change');
+  assert.equal(disappearingCamera.instances[1].startSource, 'camera-1', 'a removed device falls back only to another enumerated desktop camera');
+  assert.equal(disappearingCamera.nodes.cameraSelect.value, 'camera-1');
+
+  const enumerationGate = deferred();
+  const cancelEnumeration = scannerHarness(async () => lookupSuccess('unused'), {getCamerasImpl:() => enumerationGate.promise});
+  const enumerationStart = cancelEnumeration.nodes.start.dispatch('click');
+  await Promise.resolve();
+  await cancelEnumeration.nodes.stop.dispatch('click');
+  enumerationGate.resolve([{id:'late-camera', label:'Tardía'}]);
+  await enumerationStart;
+  assert.equal(cancelEnumeration.instances.length, 0, 'cancel during enumeration never starts a stale stream');
+  assert.equal(cancelEnumeration.nodes.cameraPanel.classList.contains('hidden'), true);
+
+  const startGate = deferred();
+  const cancelStart = scannerHarness(async () => lookupSuccess('unused'), {startImpl:() => startGate.promise});
+  const pendingStart = cancelStart.nodes.start.dispatch('click');
+  while (!cancelStart.instances.length) await Promise.resolve();
+  await cancelStart.nodes.stop.dispatch('click');
+  startGate.resolve();
+  await pendingStart;
+  assert.equal(cancelStart.instances[0].stopped, true, 'a stream resolving after cancellation is stopped');
+  assert.equal(cancelStart.nodes.cameraPanel.classList.contains('hidden'), true);
+
+  const navigationGate = deferred();
+  const navigating = scannerHarness(async () => lookupSuccess('unused'), {startImpl:() => navigationGate.promise});
+  const navigationStart = navigating.nodes.start.dispatch('click');
+  while (!navigating.instances.length) await Promise.resolve();
+  await navigating.windowListeners.pagehide();
+  navigationGate.resolve(); await navigationStart;
+  assert.equal(navigating.instances[0].stopped, true, 'leaving the page invalidates pending camera initialization');
+
+  const reopened = scannerHarness(async () => lookupSuccess('Reabierto'));
+  await reopened.nodes.start.dispatch('click'); await reopened.nodes.stop.dispatch('click'); await reopened.nodes.start.dispatch('click');
+  assert.equal(reopened.instances.length, 2); assert.equal(reopened.instances[1].startSource, 'camera-1');
+
+  const staleGate = deferred(); let initializationCount = 0;
+  const reopenDuringStaleStart = scannerHarness(async () => lookupSuccess('Reabierto seguro'), {startImpl:async () => {
+    initializationCount += 1;
+    if (initializationCount === 1) await staleGate.promise;
+  }});
+  const staleStart = reopenDuringStaleStart.nodes.start.dispatch('click');
+  while (!reopenDuringStaleStart.instances.length) await Promise.resolve();
+  await reopenDuringStaleStart.nodes.stop.dispatch('click');
+  await reopenDuringStaleStart.nodes.start.dispatch('click');
+  staleGate.resolve(); await staleStart;
+  assert.equal(reopenDuringStaleStart.instances.length, 2);
+  assert.equal(reopenDuringStaleStart.instances[0].stopped, true);
+  assert.equal(reopenDuringStaleStart.instances[1].stopped, false, 'stale completion cannot stop a later reopened camera');
+
+  const denied = scannerHarness(async () => lookupSuccess('unused'), {device:'mobile', startError:{name:'NotAllowedError'}});
   await denied.nodes.start.dispatch('click');
   assert.match(denied.nodes.status.textContent, /permiso/i); assert.equal(denied.nodes.startPanel.classList.contains('hidden'), false);
-  const unavailable = scannerHarness(async () => lookupSuccess('unused'), {mobile:true, startError:{name:'OverconstrainedError'}});
+  const unavailable = scannerHarness(async () => lookupSuccess('unused'), {device:'mobile', startError:{name:'OverconstrainedError'}});
   await unavailable.nodes.start.dispatch('click');
   assert.match(unavailable.nodes.status.textContent, /cámara trasera/i); assert.equal(unavailable.nodes.startPanel.classList.contains('hidden'), false);
 

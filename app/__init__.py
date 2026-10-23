@@ -24,6 +24,8 @@ def create_app(config_name=None):
     app = Flask(__name__)
     config_class = config_by_name.get(config_name, config_by_name["default"])
     app.config.from_object(config_class)
+    from app.session_policy import RoleAwareSessionInterface
+    app.session_interface = RoleAwareSessionInterface()
 
     if config_name == "production":
         app.config["CORS_ORIGINS"] = os.getenv("CORS_ORIGINS", app.config.get("CORS_ORIGINS", "*"))

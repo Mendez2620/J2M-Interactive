@@ -96,8 +96,9 @@ class Config:
     SESSION_COOKIE_HTTPONLY = True
     SESSION_COOKIE_SAMESITE = "Lax"
     SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "false").lower() == "true"
-    # Flask only persists the signed session cookie when the employee opts in.
-    PERMANENT_SESSION_LIFETIME = int(os.getenv("REMEMBER_SESSION_ABSOLUTE_SECONDS", 7 * 24 * 3600))
+    # Global permanent sessions (notably Super Admin) remain short. Remembered
+    # staff sessions use the role-aware session interface and server expiry.
+    PERMANENT_SESSION_LIFETIME = int(os.getenv("ADMIN_SESSION_ABSOLUTE_SECONDS", 3600))
     BROWSER_SESSION_ABSOLUTE_SECONDS = int(os.getenv("BROWSER_SESSION_ABSOLUTE_SECONDS", 3600))
     REMEMBER_SESSION_ABSOLUTE_SECONDS = int(os.getenv("REMEMBER_SESSION_ABSOLUTE_SECONDS", 7 * 24 * 3600))
     REMEMBER_SESSION_IDLE_SECONDS = int(os.getenv("REMEMBER_SESSION_IDLE_SECONDS", 12 * 3600))

@@ -12,11 +12,17 @@
   const confirmPanel = root.querySelector('[data-confirm-panel]');
   const successPanel = root.querySelector('[data-success-panel]');
   const actionButtons = [...root.querySelectorAll('[data-action]')];
-  const mobileCamera = window.matchMedia?.('(max-width: 767px), (pointer: coarse)')?.matches === true;
+  const mobileCamera = (() => {
+    if (navigator.userAgentData?.mobile === true) return true;
+    const userAgent = navigator.userAgent || '';
+    if (/Android|iPhone|iPad|iPod/i.test(userAgent)) return true;
+    return navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1;
+  })();
   let scanner = null;
   let scanning = false;
   let cameraLookupLocked = false;
   let cameraGeneration = 0;
+  let preferredCameraId = null;
   let pendingConfirmation = null;
 
   function publishPhase() {
@@ -63,11 +69,13 @@
   async function stopCamera({showStart = true} = {}) {
     cameraGeneration += 1;
     cameraLookupLocked = false;
-    if (scanner && scanning) { try { await scanner.stop(); } catch (_error) {} }
+    const activeScanner = scanner;
+    scanner = null;
     scanning = false;
     cameraPanel.classList.add('hidden');
     cameraSelectWrap.classList.add('hidden');
     if (showStart && state.phase === 'idle') startPanel.classList.remove('hidden');
+    if (activeScanner) { try { await activeScanner.stop(); } catch (_error) {} }
   }
   function cameraError(error) {
     const name = error?.name || '';
@@ -77,7 +85,7 @@
     if (name === 'NotReadableError') return 'La cámara está siendo utilizada por otra aplicación.';
     return 'No fue posible iniciar la cámara. Comprueba el permiso y vuelve a intentarlo.';
   }
-  async function startCamera() {
+  async function startCamera(requestedCameraId = null) {
     if (['lookup', 'processing', 'uncertain'].includes(state.phase)) { message('Termina la validación o resuelve el movimiento pendiente antes de escanear.', 'error'); return; }
     if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia || !window.Html5Qrcode) { message('La cámara requiere una conexión HTTPS y un navegador compatible.', 'error'); return; }
     root.querySelector('[data-start-camera]').disabled = true;
@@ -85,32 +93,41 @@
     cameraPanel.classList.remove('hidden');
     message('Preparando la cámara…');
     const generation = ++cameraGeneration;
+    let attemptScanner = null;
     try {
       let source;
       if (mobileCamera) {
         source = {facingMode:{exact:'environment'}};
       } else {
         const cameras = await Html5Qrcode.getCameras();
+        if (generation !== cameraGeneration) return;
         if (!cameras.length) throw Object.assign(new Error('camera missing'), {name:'NotFoundError'});
         cameraSelect.replaceChildren();
         cameras.forEach((camera, index) => { const option = document.createElement('option'); option.value = camera.id; option.textContent = camera.label || `Cámara ${index + 1}`; cameraSelect.appendChild(option); });
         cameraSelectWrap.classList.toggle('hidden', cameras.length < 2);
-        source = cameraSelect.value || cameras[0].id;
+        const availableIds = new Set(cameras.map(camera => camera.id));
+        source = [requestedCameraId, preferredCameraId].find(id => id && availableIds.has(id)) || cameras[0].id;
+        preferredCameraId = source;
+        cameraSelect.value = source;
       }
-      scanner ||= new Html5Qrcode(root.querySelector('[data-qr-reader]').id);
+      if (generation !== cameraGeneration) return;
+      attemptScanner = new Html5Qrcode(root.querySelector('[data-qr-reader]').id);
+      scanner = attemptScanner;
       scanning = true;
-      await scanner.start(source, {fps:10, qrbox:{width:240,height:240}, disableFlip:mobileCamera}, decoded => cameraDecoded(decoded, generation), () => {});
-      if (generation !== cameraGeneration) { try { await scanner.stop(); } catch (_error) {} return; }
+      await attemptScanner.start(source, {fps:10, qrbox:{width:240,height:240}, disableFlip:mobileCamera}, decoded => cameraDecoded(decoded, generation), () => {});
+      if (generation !== cameraGeneration || scanner !== attemptScanner) { try { await attemptScanner.stop(); } catch (_error) {} return; }
       message('Cámara activa. Centra el código QR dentro del recuadro.', 'success');
     } catch (error) {
+      if (generation !== cameraGeneration) { if (attemptScanner) { try { await attemptScanner.stop(); } catch (_error) {} } return; }
       await stopCamera();
       message(cameraError(error), 'error');
     } finally { updateControls(); }
   }
   async function restartCamera() {
     if (mobileCamera || ['lookup', 'processing', 'uncertain'].includes(state.phase)) return;
+    preferredCameraId = cameraSelect.value || preferredCameraId;
     await stopCamera({showStart:false});
-    await startCamera();
+    await startCamera(preferredCameraId);
   }
   function cameraDecoded(decoded, generation) {
     if (generation !== cameraGeneration || cameraLookupLocked || ['lookup', 'processing', 'uncertain'].includes(state.phase)) return;
@@ -246,7 +263,7 @@
     hideMessage();
   }
 
-  root.querySelector('[data-start-camera]').addEventListener('click', startCamera);
+  root.querySelector('[data-start-camera]').addEventListener('click', () => startCamera());
   root.querySelector('[data-stop-camera]').addEventListener('click', () => stopCamera());
   cameraSelect.addEventListener('change', restartCamera);
   actionButtons.forEach(button => button.addEventListener('click', () => prepareOperation(button.dataset.action)));
