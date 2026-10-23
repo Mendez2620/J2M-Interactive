@@ -3,6 +3,7 @@ import re
 import time
 import tempfile
 import logging
+from http.cookies import SimpleCookie
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
@@ -179,6 +180,112 @@ class VerifiedRegistrationTestCase(unittest.TestCase):
         self.assertEqual((fresh.status_code, fresh.get_json()), (limited.status_code, limited.get_json()))
         self.assertTrue(all(value >= 0.01 for value in (fresh_elapsed, duplicate_elapsed, limited_elapsed)))
         self.assertEqual(self.app.extensions["recovery_mailer"].outbox, [])
+
+    def test_registration_eligibility_is_not_observable_in_session_cookie(self):
+        business = Business.query.filter_by(slug="uno").one()
+        db.session.add_all([
+            Customer(
+                business_id=business.id, full_name="Correo existente",
+                email="existing@example.test", phone="+525500000001",
+            ),
+            Customer(
+                business_id=business.id, full_name="Teléfono existente",
+                email="phone-owner@example.test", phone="+525500000002",
+            ),
+        ])
+        db.session.commit()
+
+        cases = [
+            ("new", dict(self.payload, email="new@example.test", phone="55 0000 0010")),
+            ("existing_email", dict(self.payload, email="existing@example.test", phone="55 0000 0011")),
+            ("existing_phone", dict(self.payload, email="other@example.test", phone="55 0000 0002")),
+        ]
+        observed = []
+        clients = {}
+        for index, (name, payload) in enumerate(cases, start=1):
+            client = self.app.test_client()
+            response = client.post(
+                "/join/uno", json=payload,
+                environ_base={"REMOTE_ADDR": f"198.51.100.{index}"},
+            )
+            clients[name] = client
+            observed.append((name, response))
+
+        original_email_limit = self.app.config["REGISTRATION_REQUEST_LIMIT_EMAIL"]
+        self.app.config["REGISTRATION_REQUEST_LIMIT_EMAIL"] = 0
+        limited_client = self.app.test_client()
+        limited = limited_client.post(
+            "/join/uno",
+            json=dict(self.payload, email="limited@example.test", phone="55 0000 0012"),
+            environ_base={"REMOTE_ADDR": "198.51.100.4"},
+        )
+        self.app.config["REGISTRATION_REQUEST_LIMIT_EMAIL"] = original_email_limit
+        clients["limited"] = limited_client
+        observed.append(("limited", limited))
+
+        cookie_name = self.app.config["SESSION_COOKIE_NAME"]
+        serializer = self.app.session_interface.get_signing_serializer(self.app)
+        cookie_lengths, cookie_attributes, session_shapes = [], [], []
+        challenge_ids = {}
+        public_headers = []
+        for name, response in observed:
+            self.assertEqual(response.status_code, 202)
+            self.assertEqual(response.get_json(), observed[0][1].get_json())
+            header = response.headers.get("Set-Cookie")
+            self.assertIsNotNone(header)
+            parsed = SimpleCookie(); parsed.load(header)
+            morsel = parsed[cookie_name]
+            decoded = serializer.loads(morsel.value)
+            challenge_id = decoded["customer_registration_challenge_id"]
+            self.assertRegex(challenge_id, r"^[0-9a-f]{36}$")
+            challenge_ids[name] = challenge_id
+            cookie_lengths.append(len(morsel.value))
+            cookie_attributes.append(tuple(morsel[key] for key in ("path", "secure", "httponly", "samesite")))
+            session_shapes.append(tuple(sorted(decoded)))
+            public_headers.append(tuple(sorted(
+                (key, value) for key, value in response.headers.items()
+                if key.lower() not in {"set-cookie", "x-request-id"}
+            )))
+
+        self.assertEqual(len(set(cookie_lengths)), 1)
+        self.assertEqual(len(set(cookie_attributes)), 1)
+        self.assertEqual(len(set(session_shapes)), 1)
+        self.assertEqual(len(set(public_headers)), 1)
+        persisted_ids = {item.id for item in CustomerRegistrationChallenge.query.all()}
+        self.assertEqual(persisted_ids, {challenge_ids["new"]})
+        self.assertEqual(RegistrationEmailJob.query.count(), 1)
+
+        for name in ("existing_email", "existing_phone", "limited"):
+            self.assertNotIn(challenge_ids[name], persisted_ids)
+            rejected = clients[name].post("/join/uno/verify", json={"code": "00000000"})
+            self.assertEqual(rejected.status_code, 400)
+        self.assertEqual(Customer.query.count(), 2)
+
+        process_pending_registration_emails()
+        self.assertEqual(len(self.app.extensions["recovery_mailer"].outbox), 1)
+        self.assertEqual(self.app.extensions["recovery_mailer"].outbox[0]["to"], "new@example.test")
+
+    def test_accepted_request_replaces_old_challenge_without_cookie_signal(self):
+        self.assertEqual(self.client.post("/join/uno", json=self.payload).status_code, 202)
+        real_challenge = CustomerRegistrationChallenge.query.one()
+        with self.client.session_transaction() as browser:
+            self.assertEqual(browser["customer_registration_challenge_id"], real_challenge.id)
+
+        business = Business.query.filter_by(slug="uno").one()
+        db.session.add(Customer(
+            business_id=business.id, full_name="Existente",
+            email="duplicate@example.test", phone="+525500000099",
+        ))
+        db.session.commit()
+        duplicate = dict(self.payload, email="duplicate@example.test", phone="55 0000 0098")
+        response = self.client.post("/join/uno", json=duplicate)
+        self.assertEqual(response.status_code, 202)
+        with self.client.session_transaction() as browser:
+            decoy_id = browser["customer_registration_challenge_id"]
+        self.assertRegex(decoy_id, r"^[0-9a-f]{36}$")
+        self.assertNotEqual(decoy_id, real_challenge.id)
+        self.assertIsNone(db.session.get(CustomerRegistrationChallenge, decoy_id))
+        self.assertEqual(self.client.post("/join/uno/verify", json={"code": "00000000"}).status_code, 400)
 
     def test_http_request_never_waits_for_or_invokes_smtp(self):
         mailer = self.app.extensions["recovery_mailer"]

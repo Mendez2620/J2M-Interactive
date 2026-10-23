@@ -47,6 +47,16 @@ def _generic_response(started_at):
     return jsonify({"status": "accepted", "message": GENERIC_REGISTRATION_MESSAGE}), 202
 
 
+def _set_registration_challenge_session(challenge_id=None):
+    """Keep accepted registration responses indistinguishable in the cookie.
+
+    Real challenge identifiers are random 36-character hexadecimal strings. A
+    decoy uses the same representation but is never persisted, so it cannot be
+    verified while the signed session has the same observable shape.
+    """
+    session["customer_registration_challenge_id"] = challenge_id or secrets.token_hex(18)
+
+
 def _payload():
     value = request.get_json(silent=True) if request.is_json else request.form.to_dict()
     return value if isinstance(value, dict) else None
@@ -149,7 +159,7 @@ def join_business(slug):
         db.session.commit()
     else:
         db.session.rollback()
-        session.pop("customer_registration_challenge_id", None)
+        _set_registration_challenge_session()
         return _generic_response(started_at)
     existing_email = Customer.query.filter(
         Customer.business_id == business.id, func.lower(Customer.email) == email
@@ -161,7 +171,7 @@ def join_business(slug):
         # Never send registration mail for an existing identity. Historical
         # records may not have a verified email, and a newly supplied address
         # must not learn that its accompanying phone belongs to another user.
-        session.pop("customer_registration_challenge_id", None)
+        _set_registration_challenge_session()
         return _generic_response(started_at)
     code = f"{secrets.randbelow(100_000_000):08d}"
     challenge = CustomerRegistrationChallenge(
@@ -190,7 +200,7 @@ def join_business(slug):
         encrypted_code=encrypt_registration_code(code),
     ))
     db.session.commit()
-    session["customer_registration_challenge_id"] = challenge.id
+    _set_registration_challenge_session(challenge.id)
     return _generic_response(started_at)
 
 
