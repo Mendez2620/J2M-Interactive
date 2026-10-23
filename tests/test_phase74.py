@@ -1,8 +1,11 @@
 import json
 import subprocess
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from PIL import Image
 
@@ -85,6 +88,66 @@ class Phase74TestCase(unittest.TestCase):
         self.staff_login(); session_id = StaffSession.query.filter_by(staff_id=self.cashier.id, channel="browser").one().id
         auth_session = db.session.get(StaffSession, session_id); auth_session.expires_at = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=1); db.session.commit()
         self.assertEqual(self.client.get("/staff/portal/scanner").status_code, 302)
+
+    def test_remembered_staff_session_is_opt_in_bounded_and_revocable(self):
+        normal = self.staff_login()
+        normal_cookie = next(value for value in normal.headers.getlist("Set-Cookie") if value.startswith("session="))
+        self.assertNotIn("Expires=", normal_cookie)
+        normal_row = StaffSession.query.filter_by(staff_id=self.cashier.id, channel="browser").one()
+        normal_seconds = (normal_row.expires_at - datetime.now(timezone.utc).replace(tzinfo=None)).total_seconds()
+        self.assertGreater(normal_seconds, 3500); self.assertLessEqual(normal_seconds, 3600)
+        with self.client.session_transaction() as browser_session:
+            normal_data = dict(browser_session)
+        serializer = self.app.session_interface.get_signing_serializer(self.app)
+        with patch("itsdangerous.timed.time.time", return_value=time.time() - 3601):
+            old_normal_cookie = serializer.dumps(normal_data)
+        self.client.set_cookie("session", old_normal_cookie, domain="localhost")
+        self.assertEqual(self.client.get("/staff/portal/scanner").status_code, 302)
+        normal_row.revoked_at = datetime.now(timezone.utc).replace(tzinfo=None); db.session.commit()
+
+        self.app.config["SESSION_COOKIE_SECURE"] = True
+        remembered = self.client.post(
+            "/staff/login", data={"identity":"cajero", "business_slug":"negocio-web", "password":"PasswordSeguro123", "remember":"1"},
+            base_url="https://localhost",
+        )
+        cookies = remembered.headers.getlist("Set-Cookie")
+        session_cookie = next(value for value in cookies if value.startswith("session="))
+        business_cookie = next(value for value in cookies if value.startswith("j2m_staff_business="))
+        for value in (session_cookie, business_cookie):
+            self.assertIn("Secure", value); self.assertIn("HttpOnly", value); self.assertIn("SameSite=Lax", value)
+        self.assertIn("Expires=", session_cookie)
+        remembered_row = StaffSession.query.filter_by(staff_id=self.cashier.id, channel="browser", revoked_at=None).one()
+        remembered_seconds = (remembered_row.expires_at - datetime.now(timezone.utc).replace(tzinfo=None)).total_seconds()
+        self.assertGreater(remembered_seconds, 6 * 24 * 3600)
+        cookie_expiry = parsedate_to_datetime(session_cookie.split("Expires=", 1)[1].split(";", 1)[0])
+        cookie_seconds = (cookie_expiry - datetime.now(timezone.utc)).total_seconds()
+        self.assertLess(abs(cookie_seconds - remembered_seconds), 5)
+        login_html = self.client.get("/staff/login", base_url="https://localhost").get_data(as_text=True)
+        self.assertIn('value="negocio-web"', login_html); self.assertNotIn("PasswordSeguro123", login_html)
+
+        with self.client.session_transaction() as browser_session:
+            remembered_data = dict(browser_session)
+        with patch("itsdangerous.timed.time.time", return_value=time.time() - 2 * 3600):
+            two_hour_cookie = serializer.dumps(remembered_data)
+        self.client.set_cookie("session", two_hour_cookie, domain="localhost")
+        self.assertEqual(self.client.get("/staff/portal/scanner", base_url="https://localhost").status_code, 200)
+        with patch("itsdangerous.timed.time.time", return_value=time.time() - 7 * 24 * 3600 - 1):
+            expired_cookie = serializer.dumps(remembered_data)
+        self.client.set_cookie("session", expired_cookie, domain="localhost")
+        self.assertEqual(self.client.get("/staff/portal/scanner", base_url="https://localhost").status_code, 302)
+
+        # Restore a current remembered cookie to exercise the independent idle limit.
+        self.client.post(
+            "/staff/login", data={"identity":"cajero", "business_slug":"negocio-web", "password":"PasswordSeguro123", "remember":"1"},
+            base_url="https://localhost",
+        )
+        remembered_row = StaffSession.query.filter_by(staff_id=self.cashier.id, channel="browser", revoked_at=None).order_by(StaffSession.expires_at.desc()).first()
+
+        with self.client.session_transaction() as browser_session:
+            browser_session["staff_last_active_at"] = 0
+        expired = self.client.get("/staff/portal/scanner", base_url="https://localhost")
+        self.assertEqual(expired.status_code, 302)
+        self.assertIsNotNone(db.session.get(StaffSession, remembered_row.id).revoked_at)
         self.staff_login(); revoke_staff_sessions(self.cashier); self.cashier.set_password("NuevaPasswordSegura123"); db.session.commit()
         self.assertEqual(self.client.get("/staff/portal/scanner").status_code, 302)
 
@@ -93,6 +156,29 @@ class Phase74TestCase(unittest.TestCase):
         page = self.client.get("/manager/portal/scanner"); self.assertEqual(page.status_code, 200); self.assertIn(b"Escanear QR", page.data)
         self.client.post("/manager/logout"); self.manager.permissions = "view_stats,scanner_operate"; db.session.commit(); self.manager_login()
         denied = self.client.get("/manager/portal/scanner"); self.assertEqual(denied.status_code, 302); self.assertIn("/manager/portal/account", denied.location)
+
+    def test_manager_may_opt_in_to_a_persistent_revocable_session(self):
+        normal = self.manager_login()
+        normal_cookie = next(value for value in normal.headers.getlist("Set-Cookie") if value.startswith("session="))
+        self.assertNotIn("Expires=", normal_cookie)
+        normal_row = StaffSession.query.filter_by(staff_id=self.manager.id, channel="browser").one()
+        self.assertLessEqual((normal_row.expires_at - datetime.now(timezone.utc).replace(tzinfo=None)).total_seconds(), 3600)
+        self.client.post("/manager/logout")
+        self.app.config["SESSION_COOKIE_SECURE"] = True
+        response = self.client.post(
+            "/manager/login", data={"email":"gerente@j2m.test", "password":"PasswordSeguro123", "remember":"1"},
+            base_url="https://localhost",
+        )
+        self.assertEqual(response.status_code, 302)
+        cookie = next(value for value in response.headers.getlist("Set-Cookie") if value.startswith("session="))
+        self.assertIn("Secure", cookie); self.assertIn("HttpOnly", cookie); self.assertIn("SameSite=Lax", cookie); self.assertIn("Expires=", cookie)
+        manager_session = StaffSession.query.filter_by(staff_id=self.manager.id, channel="browser", revoked_at=None).one()
+        server_seconds = (manager_session.expires_at - datetime.now(timezone.utc).replace(tzinfo=None)).total_seconds()
+        cookie_expiry = parsedate_to_datetime(cookie.split("Expires=", 1)[1].split(";", 1)[0])
+        cookie_seconds = (cookie_expiry - datetime.now(timezone.utc)).total_seconds()
+        self.assertGreater(server_seconds, 6 * 24 * 3600); self.assertLess(abs(cookie_seconds - server_seconds), 5)
+        self.client.post("/manager/logout", base_url="https://localhost")
+        self.assertIsNotNone(db.session.get(StaffSession, manager_session.id).revoked_at)
 
     def test_web_scanner_is_tenant_scoped_idempotent_and_uses_ledger_outbox(self):
         self.app.config["GOOGLE_WALLET_MODE"] = "real"
@@ -174,12 +260,21 @@ class Phase74TestCase(unittest.TestCase):
             self.assertEqual(icon192.size, (192, 192)); self.assertEqual(icon512.size, (512, 512))
         worker = self.client.get("/service-worker.js"); self.assertEqual(worker.status_code, 200); self.assertEqual(worker.headers["Service-Worker-Allowed"], "/")
         source = worker.get_data(as_text=True); worker.close(); self.assertNotIn("/api/", source); self.assertNotIn("localStorage", source); self.assertIn("request.method !== 'GET'", source); self.assertIn("No se guardó ninguna operación", source)
+        self.assertNotIn("then(() => self.skipWaiting())", source); self.assertIn("SKIP_WAITING", source)
         scanner_js = (root / "js/web-scanner.js").read_text(encoding="utf-8")
         self.assertIn("data-start-camera", scanner_js); self.assertIn("Idempotency-Key", scanner_js); self.assertNotIn("console.log", scanner_js); self.assertNotIn("localStorage", scanner_js)
         access = self.client.get("/staff-access"); self.assertEqual(access.status_code, 200); self.assertIn(b"/manager/login", access.data); self.assertIn(b"/staff/login", access.data)
         login = self.client.get("/staff/login").get_data(as_text=True); self.assertIn("manifest.webmanifest", login); self.assertIn("Añadir a pantalla de inicio", login)
         self.admin_login(); self.assertNotIn("manifest.webmanifest", self.client.get("/admin").get_data(as_text=True))
         self.assertNotIn("manifest.webmanifest", self.client.get(f"/join/{self.business.slug}").get_data(as_text=True))
+
+    def test_staff_scanner_has_explicit_confirmation_and_no_manual_qr_entry(self):
+        self.staff_login()
+        html = self.client.get("/staff/portal/scanner").get_data(as_text=True)
+        self.assertIn('data-confirm-panel', html); self.assertIn('data-confirm-operation', html)
+        self.assertIn('data-success-panel', html)
+        self.assertNotIn('data-manual-token', html); self.assertNotIn("Ingreso alternativo", html)
+        self.assertIn("Negocio Web", html); self.assertIn("cajero", html)
 
     def test_javascript_state_machine_and_service_worker_upgrade(self):
         root = Path(__file__).resolve().parents[1]

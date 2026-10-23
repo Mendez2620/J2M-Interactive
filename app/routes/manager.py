@@ -259,7 +259,7 @@ def manager_login():
                     and staff.web_access_enabled and staff.business.web_access_enabled
                     and staff.auth_version == pending_accounts[account_id]):
                 session.pop("manager_account_choice", None)
-                create_manager_browser_session(staff)
+                create_manager_browser_session(staff, remember=bool(pending.get("remember")))
                 return redirect(_portal_destination(staff))
             session.pop("manager_account_choice", None)
             error, status = "No fue posible iniciar sesión con esas credenciales.", 401
@@ -271,6 +271,7 @@ def manager_login():
         # current portal deliberately requests email only.
         identity = (request.form.get("email") or request.form.get("identity") or "").strip().lower()
         password = request.form.get("password") or ""
+        remember = request.form.get("remember") == "1"
         business_slug = (request.form.get("business_slug") or "").strip()
         try:
             reservation = reserve_auth_attempt("manager", f"{business_slug}:{identity}", request.remote_addr)
@@ -299,12 +300,13 @@ def manager_login():
                         for item in eligible
                     ],
                     "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=5)).timestamp(),
+                    "remember": remember,
                 }
                 account_choices = eligible
             else:
                 clear_auth_attempts("manager", reservation)
                 staff = eligible[0]
-                create_manager_browser_session(staff)
+                create_manager_browser_session(staff, remember=remember)
                 return redirect(_portal_destination(staff))
     return render_template("manager/login.html", error=error, account_choices=account_choices), status
 
