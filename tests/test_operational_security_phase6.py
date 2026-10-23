@@ -157,6 +157,7 @@ class OperationalSecurityPhase6TestCase(unittest.TestCase):
     def test_production_csp_local_assets_and_proxy_trust(self):
         env = {"SECRET_KEY": "session-secret-with-more-than-32-characters-a",
                "JWT_SECRET_KEY": "jwt-secret-with-more-than-32-characters-b",
+               "REGISTRATION_IDENTITY_HMAC_KEY": "registration-identity-key-with-more-than-32-characters-c",
                "CORS_ORIGINS": "https://app.example.test",
                "PUBLIC_BASE_URL": "https://app.example.test",
                "DATABASE_URL": "postgresql://user:password@db.example.test:5432/postgres",
@@ -202,6 +203,7 @@ class OperationalSecurityPhase6TestCase(unittest.TestCase):
     def test_production_rejects_invalid_operational_configuration(self):
         env = {"SECRET_KEY": "session-secret-with-more-than-32-characters-a",
                "JWT_SECRET_KEY": "jwt-secret-with-more-than-32-characters-b",
+               "REGISTRATION_IDENTITY_HMAC_KEY": "registration-identity-key-with-more-than-32-characters-c",
                "CORS_ORIGINS": "https://app.example.test",
                "PUBLIC_BASE_URL": "https://app.example.test",
                "DATABASE_URL": "postgresql://user:password@db.example.test:5432/postgres",

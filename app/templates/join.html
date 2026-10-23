@@ -121,11 +121,11 @@
           </div>
           <div class="ml-2.5 text-xs text-slate-500">
             <label for="terms_accepted">
-              He leído y acepto los <a href="/terms" target="_blank" class="text-indigo-600 font-semibold underline hover:text-indigo-500">Términos y Condiciones</a>.
+              He leído y acepto los <a href="/terms" target="_blank" class="text-indigo-600 font-semibold underline hover:text-indigo-500">Términos y Condiciones</a> (versión {{ terms_version }}).
             </label>
           </div>
         </div>
-        <div class="flex items-start"><input id="privacy_accepted" name="privacy_accepted" type="checkbox" required class="mt-0.5 h-4 w-4 rounded border-slate-300 text-indigo-600"><label for="privacy_accepted" class="ml-2.5 text-xs text-slate-500">He leído y acepto el <a href="/privacy" target="_blank" class="font-semibold text-indigo-600 underline">Aviso de Privacidad</a>.</label></div>
+        <div class="flex items-start"><input id="privacy_accepted" name="privacy_accepted" type="checkbox" required class="mt-0.5 h-4 w-4 rounded border-slate-300 text-indigo-600"><label for="privacy_accepted" class="ml-2.5 text-xs text-slate-500">He leído y acepto el <a href="/privacy" target="_blank" class="font-semibold text-indigo-600 underline">Aviso de Privacidad</a> (versión {{ privacy_version }}).</label></div>
         <div class="flex items-start"><input id="marketing_consent" name="marketing_consent" type="checkbox" class="mt-0.5 h-4 w-4 rounded border-slate-300 text-indigo-600"><label for="marketing_consent" class="ml-2.5 text-xs text-slate-500">Quiero recibir promociones por correo. Este consentimiento es opcional y puedo retirarlo.</label></div>
         <div id="join-error" class="hidden rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700" role="alert" aria-live="assertive"></div>
 
@@ -138,12 +138,13 @@
         <a href="{{ url_for('recovery.recover', business_slug=business.slug) }}" class="block text-center text-sm font-semibold text-indigo-700 underline">¿Ya tienes una tarjeta? Recupérala aquí</a>
       </form>
       <form id="verification-form" class="hidden space-y-4" novalidate>
-        <div><h2 class="text-lg font-bold text-slate-900">Confirma tu correo</h2><p id="verification-notice" class="mt-1 text-sm text-slate-600">Ingresa el código que enviamos. Caduca en 10 minutos.</p></div>
+        <div><h2 class="text-lg font-bold text-slate-900">Revisa tu correo</h2><p id="verification-notice" class="mt-1 text-sm text-slate-600">Si recibiste un código, ingrésalo antes de que caduque. Si no llega, tu tarjeta puede existir: utiliza la recuperación verificada.</p></div>
         <label for="verification-code" class="block text-xs font-bold uppercase tracking-wider text-slate-600">Código de verificación</label>
         <input id="verification-code" name="code" required inputmode="numeric" autocomplete="one-time-code" maxlength="8" pattern="[0-9]{8}" class="field" placeholder="00000000">
         <div id="verification-error" class="hidden rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700" role="alert" aria-live="assertive"></div>
         <button id="verify-btn" type="submit" class="w-full rounded-xl px-4 py-3.5 text-sm font-bold text-white" style="background-color: {{ business.primary_color }}; color: {{ contrast_text_color(business.primary_color) }};">Verificar y crear mi tarjeta</button>
         <button id="resend-btn" type="button" class="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm font-semibold text-slate-700">Reenviar código</button>
+        <a href="{{ url_for('recovery.recover', business_slug=business.slug) }}" class="block text-center text-sm font-semibold text-indigo-700 underline">Recuperar una tarjeta existente</a>
       </form>
     </div>
 

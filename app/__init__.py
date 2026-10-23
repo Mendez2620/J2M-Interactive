@@ -41,6 +41,10 @@ def create_app(config_name=None):
         if hmac.compare_digest(jwt_secret, secret):
             raise RuntimeError("Producción requiere que JWT_SECRET_KEY sea distinta de SECRET_KEY.")
         app.config["JWT_SECRET_KEY"] = jwt_secret
+        identity_key = os.getenv("REGISTRATION_IDENTITY_HMAC_KEY", "")
+        if len(identity_key) < 32 or identity_key in {secret, jwt_secret}:
+            raise RuntimeError("Producción requiere REGISTRATION_IDENTITY_HMAC_KEY independiente y estable de al menos 32 caracteres.")
+        app.config["REGISTRATION_IDENTITY_HMAC_KEY"] = identity_key
         if app.config.get("CORS_ORIGINS") == "*":
             raise RuntimeError("Producción requiere CORS_ORIGINS explícito.")
         if app.config.get("RECOVERY_MAIL_BACKEND") == "memory":
