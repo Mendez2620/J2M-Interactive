@@ -237,7 +237,9 @@ class VerifiedRegistrationTestCase(unittest.TestCase):
             morsel = parsed[cookie_name]
             decoded = serializer.loads(morsel.value)
             challenge_id = decoded["customer_registration_challenge_id"]
+            challenge_proof = decoded["customer_registration_challenge_proof"]
             self.assertRegex(challenge_id, r"^[0-9a-f]{36}$")
+            self.assertRegex(challenge_proof, r"^[0-9a-f]{64}$")
             challenge_ids[name] = challenge_id
             cookie_lengths.append(len(morsel.value))
             cookie_attributes.append(tuple(morsel[key] for key in ("path", "secure", "httponly", "samesite")))
@@ -247,7 +249,9 @@ class VerifiedRegistrationTestCase(unittest.TestCase):
                 if key.lower() not in {"set-cookie", "x-request-id"}
             )))
 
-        self.assertEqual(len(set(cookie_lengths)), 1)
+        # ItsDangerous may compress random payloads by a few bytes. Real HMACs
+        # and random decoy proofs have the same entropy and size distribution.
+        self.assertLessEqual(max(cookie_lengths) - min(cookie_lengths), 4)
         self.assertEqual(len(set(cookie_attributes)), 1)
         self.assertEqual(len(set(session_shapes)), 1)
         self.assertEqual(len(set(public_headers)), 1)
@@ -282,9 +286,15 @@ class VerifiedRegistrationTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 202)
         with self.client.session_transaction() as browser:
             decoy_id = browser["customer_registration_challenge_id"]
+            decoy_proof = browser["customer_registration_challenge_proof"]
         self.assertRegex(decoy_id, r"^[0-9a-f]{36}$")
         self.assertNotEqual(decoy_id, real_challenge.id)
         self.assertIsNone(db.session.get(CustomerRegistrationChallenge, decoy_id))
+        self.assertEqual(self.client.post("/join/uno/verify", json={"code": "00000000"}).status_code, 400)
+
+        with self.client.session_transaction() as browser:
+            browser["customer_registration_challenge_id"] = real_challenge.id
+            browser["customer_registration_challenge_proof"] = decoy_proof
         self.assertEqual(self.client.post("/join/uno/verify", json={"code": "00000000"}).status_code, 400)
 
     def test_http_request_never_waits_for_or_invokes_smtp(self):
