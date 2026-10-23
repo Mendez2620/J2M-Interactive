@@ -12,6 +12,7 @@ class ProductionConfigTestCase(unittest.TestCase):
             "SECRET_KEY": "a-robust-production-secret-key-with-entropy-123",
             "JWT_SECRET_KEY": "another-independent-jwt-key-with-entropy-456",
             "REGISTRATION_IDENTITY_HMAC_KEY": "stable-registration-identity-key-with-entropy-789",
+            "REGISTRATION_EMAIL_ENCRYPTION_KEY": "stable-registration-email-encryption-key-456",
             "CORS_ORIGINS": "https://app.example.com",
             "DATABASE_URL": "postgresql://user:password@db.example.test:5432/postgres",
             "DATABASE_SSLMODE": "require",
@@ -40,6 +41,15 @@ class ProductionConfigTestCase(unittest.TestCase):
                  patch.dict(os.environ, self.valid_environment(REGISTRATION_IDENTITY_HMAC_KEY=identity_key), clear=True), \
                  patch.object(ProductionConfig, "PUBLIC_BASE_URL", "https://app.example.com"), \
                  self.assertRaisesRegex(RuntimeError, "REGISTRATION_IDENTITY_HMAC_KEY"):
+                create_app("production")
+
+    def test_production_requires_independent_registration_email_encryption_key(self):
+        valid = self.valid_environment()
+        for encryption_key in ("", "short", valid["SECRET_KEY"], valid["JWT_SECRET_KEY"], valid["REGISTRATION_IDENTITY_HMAC_KEY"]):
+            with self.subTest(encryption_key=encryption_key), \
+                 patch.dict(os.environ, self.valid_environment(REGISTRATION_EMAIL_ENCRYPTION_KEY=encryption_key), clear=True), \
+                 patch.object(ProductionConfig, "PUBLIC_BASE_URL", "https://app.example.com"), \
+                 self.assertRaisesRegex(RuntimeError, "REGISTRATION_EMAIL_ENCRYPTION_KEY"):
                 create_app("production")
 
     def test_production_forces_debug_off_with_robust_secret(self):

@@ -8,10 +8,12 @@ Cada solicitud conserva la fecha UTC de aceptación, la versión visible y un SH
 
 `REGISTRATION_IDENTITY_HMAC_KEY` es una clave dedicada, estable e independiente de `SECRET_KEY` y `JWT_SECRET_KEY`. Producción no arranca si falta, es corta o reutiliza alguna de esas claves. Rotar la clave de sesión Flask no altera las reservas de identidad; la clave de identidad no debe rotarse sin una migración explícita de sus HMAC.
 
-Las respuestas públicas válidas usan siempre HTTP 202 y el mismo cuerpo para identidades nuevas, existentes o limitadas. La entrega SMTP permanece síncrona, por lo que se aplica un tiempo mínimo configurable mediante `REGISTRATION_RESPONSE_MIN_MS`; la latencia real del proveedor debe revisarse en staging.
+Las respuestas públicas válidas usan siempre HTTP 202 y el mismo cuerpo para identidades nuevas, existentes o limitadas. La solicitud HTTP nunca llama a SMTP: el desafío y un trabajo de correo con el código cifrado se confirman en una sola transacción y un worker independiente realiza la entrega. Las identidades existentes, incluidas las cuentas históricas sin `email_verified_at`, no generan correo de registro; la interfaz remite al flujo de recuperación verificada sin confirmar que exista una cuenta.
+
+`REGISTRATION_EMAIL_ENCRYPTION_KEY` protege temporalmente el código del outbox y debe ser estable, exclusiva y distinta de las claves de sesión, JWT e identidad. No debe rotarse mientras existan trabajos pendientes. Consulte [Operación del worker de correos de registro](registration-email-worker.md).
 
 ## Validaciones operativas pendientes
 
-- El transporte SMTP en memoria solo se utiliza en pruebas. Antes del despliegue debe comprobarse la entrega, latencia y reputación del SMTP real con direcciones controladas.
+- El transporte SMTP en memoria solo se utiliza en pruebas. Antes del despliegue debe comprobarse entrega, reintentos y reputación con SMTP real. Las pruebas locales reducen diferencias previsibles, pero no constituyen una garantía absoluta contra análisis temporal en redes reales.
 - La migración debe ejecutarse de forma controlada y validarse en una copia de PostgreSQL antes de Railway. No se ejecuta automáticamente ni se aplicó a Supabase durante esta fase.
 - La experiencia final de correo y Wallet requiere validación manual en dispositivos físicos y con las credenciales externas del entorno de staging.

@@ -86,6 +86,14 @@ class Config:
     REGISTRATION_IDENTITY_HMAC_KEY = os.getenv(
         "REGISTRATION_IDENTITY_HMAC_KEY", "development-registration-identity-key-32-bytes"
     )
+    REGISTRATION_EMAIL_ENCRYPTION_KEY = os.getenv(
+        "REGISTRATION_EMAIL_ENCRYPTION_KEY", "development-registration-email-encryption-key-32-bytes"
+    )
+    REGISTRATION_EMAIL_POLL_SECONDS = int(os.getenv("REGISTRATION_EMAIL_POLL_SECONDS", 5))
+    REGISTRATION_EMAIL_BATCH_SIZE = int(os.getenv("REGISTRATION_EMAIL_BATCH_SIZE", 50))
+    REGISTRATION_EMAIL_MAX_ATTEMPTS = int(os.getenv("REGISTRATION_EMAIL_MAX_ATTEMPTS", 5))
+    REGISTRATION_EMAIL_STALE_SECONDS = int(os.getenv("REGISTRATION_EMAIL_STALE_SECONDS", 300))
+    REGISTRATION_EMAIL_RETENTION_SECONDS = int(os.getenv("REGISTRATION_EMAIL_RETENTION_SECONDS", 7 * 86400))
     TERMS_VERSION = os.getenv("TERMS_VERSION", "2026-10-21")
     PRIVACY_NOTICE_VERSION = os.getenv("PRIVACY_NOTICE_VERSION", "2026-10-21")
     SMTP_HOST = os.getenv("SMTP_HOST")
@@ -148,6 +156,7 @@ class TestingConfig(Config):
     GOOGLE_ISSUER_ID = "3388000000000000000"
     REGISTRATION_RESPONSE_MIN_MS = 0
     REGISTRATION_IDENTITY_HMAC_KEY = "testing-registration-identity-key-32-bytes"
+    REGISTRATION_EMAIL_ENCRYPTION_KEY = "testing-registration-email-encryption-key-32-bytes"
 
 
 config_by_name = {

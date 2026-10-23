@@ -45,6 +45,10 @@ def create_app(config_name=None):
         if len(identity_key) < 32 or identity_key in {secret, jwt_secret}:
             raise RuntimeError("Producción requiere REGISTRATION_IDENTITY_HMAC_KEY independiente y estable de al menos 32 caracteres.")
         app.config["REGISTRATION_IDENTITY_HMAC_KEY"] = identity_key
+        email_encryption_key = os.getenv("REGISTRATION_EMAIL_ENCRYPTION_KEY", "")
+        if len(email_encryption_key) < 32 or email_encryption_key in {secret, jwt_secret, identity_key}:
+            raise RuntimeError("Producción requiere REGISTRATION_EMAIL_ENCRYPTION_KEY independiente y estable de al menos 32 caracteres.")
+        app.config["REGISTRATION_EMAIL_ENCRYPTION_KEY"] = email_encryption_key
         if app.config.get("CORS_ORIGINS") == "*":
             raise RuntimeError("Producción requiere CORS_ORIGINS explícito.")
         if app.config.get("RECOVERY_MAIL_BACKEND") == "memory":
@@ -253,4 +257,34 @@ def create_app(config_name=None):
             logger=app.logger,
         )
         app.logger.info("google_wallet_worker_stopped")
+
+    @app.cli.command("process-registration-emails")
+    def process_registration_emails_command():
+        """Process one batch of the persistent registration email outbox."""
+        from app.services.registration_email_service import (
+            cleanup_registration_email_jobs, process_pending_registration_emails,
+            registration_email_counts,
+        )
+        processed = process_pending_registration_emails(limit=app.config["REGISTRATION_EMAIL_BATCH_SIZE"])
+        cleaned = cleanup_registration_email_jobs()
+        print(json.dumps({"processed": processed, "cleaned": cleaned, **registration_email_counts()}, sort_keys=True))
+
+    @app.cli.command("run-registration-email-worker")
+    def run_registration_email_worker_command():
+        """Continuously deliver registration email from the durable outbox."""
+        import signal
+        import threading
+        from app.services.registration_email_service import run_registration_email_worker
+
+        stop_event = threading.Event()
+        for signal_name in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(signal_name, lambda _signum, _frame: stop_event.set())
+        app.logger.info("registration_email_worker_started")
+        run_registration_email_worker(
+            stop_event=stop_event,
+            poll_seconds=app.config["REGISTRATION_EMAIL_POLL_SECONDS"],
+            batch_size=app.config["REGISTRATION_EMAIL_BATCH_SIZE"],
+            logger=app.logger,
+        )
+        app.logger.info("registration_email_worker_stopped")
     return app

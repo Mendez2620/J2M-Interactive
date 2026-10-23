@@ -2,6 +2,7 @@ import unittest
 import re
 import time
 import tempfile
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
@@ -11,8 +12,11 @@ from app import create_app
 from app.extensions import db
 from app.email_service import MailDeliveryError
 from app.models import (Business, Customer, CustomerRegistrationChallenge,
-                        CustomerRegistrationIdentityClaim)
+                        CustomerRegistrationIdentityClaim, RegistrationEmailJob)
 from app.config import TestingConfig
+from app.services.registration_email_service import (
+    process_pending_registration_emails, run_registration_email_worker,
+)
 
 
 class VerifiedRegistrationTestCase(unittest.TestCase):
@@ -29,6 +33,7 @@ class VerifiedRegistrationTestCase(unittest.TestCase):
 
     def request_code(self, payload=None, slug="uno"):
         response = self.client.post(f"/join/{slug}", json=payload or self.payload)
+        process_pending_registration_emails()
         code = self.app.extensions["recovery_mailer"].outbox[-1].get("code") if self.app.extensions["recovery_mailer"].outbox else None
         return response, code
 
@@ -40,6 +45,8 @@ class VerifiedRegistrationTestCase(unittest.TestCase):
         challenge = CustomerRegistrationChallenge.query.one()
         self.assertNotEqual(challenge.code_hash, code)
         self.assertNotIn(code, challenge.code_hash)
+        job = RegistrationEmailJob.query.one()
+        self.assertNotIn(code, job.encrypted_code)
         result = self.client.post("/join/uno/verify", json={"code": code})
         self.assertEqual(result.status_code, 201)
         customer = Customer.query.one()
@@ -132,26 +139,168 @@ class VerifiedRegistrationTestCase(unittest.TestCase):
         mailer.send_registration_code = lambda *args: (_ for _ in ()).throw(MailDeliveryError("fallo"))
         payload = dict(self.payload); payload.update(email="otra@example.test", phone="55 2222 2222")
         response = self.client.post("/join/uno", json=payload)
+        process_pending_registration_emails()
+        failed_job = RegistrationEmailJob.query.order_by(RegistrationEmailJob.id.desc()).first()
+        self.assertEqual(failed_job.status, "pending")
+        self.assertEqual(failed_job.attempts, 1)
         mailer.send_registration_code = original
+        failed_job.next_attempt_at = None; db.session.commit()
+        process_pending_registration_emails()
+        self.assertEqual(db.session.get(RegistrationEmailJob, failed_job.id).status, "completed")
         self.assertEqual(response.status_code, 202)
         self.assertEqual(Customer.query.count(), 0)
 
+    def test_mail_retries_stop_at_configured_limit(self):
+        self.app.config["REGISTRATION_EMAIL_MAX_ATTEMPTS"] = 2
+        self.assertEqual(self.client.post("/join/uno", json=self.payload).status_code, 202)
+        mailer = self.app.extensions["recovery_mailer"]
+        with patch.object(mailer, "send_registration_code", side_effect=MailDeliveryError("smtp unavailable")) as send:
+            process_pending_registration_emails()
+            job = RegistrationEmailJob.query.one()
+            self.assertEqual((job.status, job.attempts), ("pending", 1))
+            job.next_attempt_at = None; db.session.commit()
+            process_pending_registration_emails()
+            self.assertEqual((job.status, job.attempts), ("failed", 2))
+            process_pending_registration_emails()
+            self.assertEqual(send.call_count, 2)
+
     def test_new_existing_and_limited_requests_have_identical_public_response(self):
         self.app.config["REGISTRATION_RESPONSE_MIN_MS"] = 20
-        started = time.monotonic(); fresh, _ = self.request_code(); fresh_elapsed = time.monotonic() - started
+        started = time.monotonic(); fresh = self.client.post("/join/uno", json=self.payload); fresh_elapsed = time.monotonic() - started
         business = Business.query.filter_by(slug="uno").one()
         db.session.add(Customer(business_id=business.id, full_name="Existe", email="existe@example.test", phone="+525500000001")); db.session.commit()
         duplicate_payload = dict(self.payload); duplicate_payload.update(email="existe@example.test", phone="55 0000 0001")
-        started = time.monotonic(); duplicate, _ = self.request_code(duplicate_payload); duplicate_elapsed = time.monotonic() - started
+        started = time.monotonic(); duplicate = self.client.post("/join/uno", json=duplicate_payload); duplicate_elapsed = time.monotonic() - started
         self.app.config["REGISTRATION_REQUEST_LIMIT_IP"] = 0
         limited_payload = dict(self.payload); limited_payload.update(email="limited@example.test", phone="55 0000 0002")
-        started = time.monotonic(); limited, _ = self.request_code(limited_payload); limited_elapsed = time.monotonic() - started
+        started = time.monotonic(); limited = self.client.post("/join/uno", json=limited_payload); limited_elapsed = time.monotonic() - started
         self.assertEqual((fresh.status_code, fresh.get_json()), (duplicate.status_code, duplicate.get_json()))
         self.assertEqual((fresh.status_code, fresh.get_json()), (limited.status_code, limited.get_json()))
         self.assertTrue(all(value >= 0.01 for value in (fresh_elapsed, duplicate_elapsed, limited_elapsed)))
-        notices = [item for item in self.app.extensions["recovery_mailer"].outbox if item.get("purpose") == "registration_notice"]
-        self.assertEqual(len(notices), 1)
-        self.assertNotIn("code", notices[0])
+        self.assertEqual(self.app.extensions["recovery_mailer"].outbox, [])
+
+    def test_http_request_never_waits_for_or_invokes_smtp(self):
+        mailer = self.app.extensions["recovery_mailer"]
+        original = mailer.send_registration_code
+
+        def slow_send(*args):
+            time.sleep(0.3)
+            return original(*args)
+
+        mailer.send_registration_code = slow_send
+        started = time.monotonic()
+        response = self.client.post("/join/uno", json=self.payload)
+        elapsed = time.monotonic() - started
+        self.assertEqual(response.status_code, 202)
+        self.assertLess(elapsed, 0.15)
+        self.assertEqual(mailer.outbox, [])
+        self.assertEqual(RegistrationEmailJob.query.filter_by(status="pending").count(), 1)
+        process_pending_registration_emails()
+        self.assertEqual(len(mailer.outbox), 1)
+
+    def test_phone_collision_and_unverified_historical_email_send_nothing(self):
+        business = Business.query.filter_by(slug="uno").one()
+        db.session.add_all([
+            Customer(business_id=business.id, full_name="Teléfono", email="old-phone@example.test", phone="+525512345678"),
+            Customer(business_id=business.id, full_name="Correo", email="historical@example.test", phone="+525500000099", email_verified_at=None),
+        ])
+        db.session.commit()
+        phone_payload = dict(self.payload, email="new@example.test")
+        email_payload = dict(self.payload, email="historical@example.test", phone="55 0000 0098")
+        self.assertEqual(self.client.post("/join/uno", json=phone_payload).status_code, 202)
+        self.assertEqual(self.client.post("/join/uno", json=email_payload).status_code, 202)
+        self.assertEqual(RegistrationEmailJob.query.count(), 0)
+        self.assertEqual(self.app.extensions["recovery_mailer"].outbox, [])
+
+    def test_expired_job_is_cancelled_without_sending_and_survives_worker_restart(self):
+        self.assertEqual(self.client.post("/join/uno", json=self.payload).status_code, 202)
+        challenge = CustomerRegistrationChallenge.query.one()
+        challenge.expires_at -= timedelta(hours=1); db.session.commit()
+        process_pending_registration_emails()
+        job = RegistrationEmailJob.query.one()
+        self.assertEqual(job.status, "cancelled")
+        self.assertEqual(self.app.extensions["recovery_mailer"].outbox, [])
+
+        payload = dict(self.payload, email="restart@example.test", phone="55 9999 9999")
+        self.assertEqual(self.client.post("/join/uno", json=payload).status_code, 202)
+        pending = RegistrationEmailJob.query.filter_by(status="pending").one()
+        pending.status = "processing"
+        pending.locked_at = pending.created_at - timedelta(hours=1)
+        db.session.commit()
+        process_pending_registration_emails()
+        self.assertEqual(db.session.get(RegistrationEmailJob, pending.id).status, "completed")
+        self.assertEqual(len(self.app.extensions["recovery_mailer"].outbox), 1)
+
+    def test_resend_cancels_old_job_and_only_latest_code_is_delivered(self):
+        self.assertEqual(self.client.post("/join/uno", json=self.payload).status_code, 202)
+        first_challenge = CustomerRegistrationChallenge.query.one()
+        self.assertEqual(self.client.post("/join/uno", json=self.payload).status_code, 202)
+        process_pending_registration_emails()
+        jobs = RegistrationEmailJob.query.order_by(RegistrationEmailJob.id).all()
+        self.assertEqual([job.status for job in jobs], ["cancelled", "completed"])
+        self.assertEqual(len(self.app.extensions["recovery_mailer"].outbox), 1)
+        delivered_code = self.app.extensions["recovery_mailer"].outbox[0]["code"]
+        db.session.refresh(first_challenge)
+        self.assertIsNotNone(first_challenge.consumed_at)
+        self.assertEqual(self.client.post("/join/uno/verify", json={"code": delivered_code}).status_code, 201)
+
+    def test_two_workers_claim_one_job_once(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            uri = f"sqlite:///{Path(directory, 'registration-workers.sqlite').as_posix()}"
+            with patch.object(TestingConfig, "SQLALCHEMY_DATABASE_URI", uri):
+                app = create_app("testing")
+            with app.app_context():
+                db.create_all(); db.session.add(Business(name="Workers", slug="workers")); db.session.commit()
+            self.assertEqual(app.test_client().post("/join/workers", json=self.payload).status_code, 202)
+
+            def work(_):
+                with app.app_context():
+                    return process_pending_registration_emails()
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                processed = list(executor.map(work, range(2)))
+            with app.app_context():
+                self.assertEqual(RegistrationEmailJob.query.filter_by(status="completed").count(), 1)
+                db.session.remove()
+            self.assertEqual(sum(processed), 1)
+            self.assertEqual(len(app.extensions["recovery_mailer"].outbox), 1)
+
+    def test_challenge_and_outbox_roll_back_together(self):
+        original_commit = db.session.commit
+        commits = 0
+
+        def fail_final_commit():
+            nonlocal commits
+            commits += 1
+            if commits == 2:
+                raise RuntimeError("forced commit failure")
+            return original_commit()
+
+        with patch.object(db.session, "commit", side_effect=fail_final_commit):
+            with self.assertRaises(RuntimeError):
+                self.client.post("/join/uno", json=self.payload)
+        db.session.rollback()
+        self.assertEqual(CustomerRegistrationChallenge.query.count(), 0)
+        self.assertEqual(RegistrationEmailJob.query.count(), 0)
+
+    def test_worker_logs_never_include_mail_payload_or_identity(self):
+        self.assertEqual(self.client.post("/join/uno", json=self.payload).status_code, 202)
+        logger = logging.getLogger("registration-email-test")
+        with patch("app.services.registration_email_service.process_pending_registration_emails",
+                   side_effect=RuntimeError("ana@example.test 12345678 smtp-password")), \
+             self.assertLogs(logger, level="ERROR") as captured:
+            run_registration_email_worker(max_cycles=1, logger=logger)
+        output = " ".join(captured.output)
+        self.assertIn("RuntimeError", output)
+        self.assertNotIn("ana@example.test", output)
+        self.assertNotIn("12345678", output)
+        self.assertNotIn("smtp-password", output)
+
+    def test_worker_cli_handles_empty_queue_without_sensitive_output(self):
+        result = self.app.test_cli_runner().invoke(args=["process-registration-emails"])
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn('"processed": 0', result.output)
+        self.assertNotIn("@", result.output)
 
     def test_suspension_after_code_request_blocks_completion(self):
         _, code = self.request_code()
@@ -181,6 +330,8 @@ class VerifiedRegistrationTestCase(unittest.TestCase):
             source = app.test_client()
             response = source.post("/join/concurrente", json=self.payload)
             self.assertEqual(response.status_code, 202)
+            with app.app_context():
+                process_pending_registration_emails()
             code = app.extensions["recovery_mailer"].outbox[-1]["code"]
             with source.session_transaction() as browser:
                 challenge_id = browser["customer_registration_challenge_id"]
@@ -214,6 +365,8 @@ class VerifiedRegistrationTestCase(unittest.TestCase):
                 payload = dict(self.payload, email=f"persona{index}@example.test")
                 response = client.post("/join/concurrente", json=payload)
                 self.assertEqual(response.status_code, 202)
+                with app.app_context():
+                    process_pending_registration_emails()
                 code = app.extensions["recovery_mailer"].outbox[-1]["code"]
                 with client.session_transaction() as browser:
                     challenge_id = browser["customer_registration_challenge_id"]

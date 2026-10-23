@@ -18,6 +18,7 @@ from app.models.google_wallet_sync_job import GoogleWalletSyncJob
 from app.models.customer_registration import (
     CustomerRegistrationChallenge, CustomerRegistrationIdentityClaim,
 )
+from app.models.registration_email_job import RegistrationEmailJob
 
 __all__ = [
     "db",
@@ -38,4 +39,5 @@ __all__ = [
     "GoogleWalletSyncJob",
     "CustomerRegistrationChallenge",
     "CustomerRegistrationIdentityClaim",
+    "RegistrationEmailJob",
 ]
