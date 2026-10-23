@@ -92,10 +92,21 @@ Configure servicios separados que compartan imagen y base, pero no comando:
 
 Use `J2M_PROCESS_TYPE=web`, `registration-worker` o `google-wallet-worker` según
 el servicio. El `HEALTHCHECK` de la imagen consulta `/api/health` únicamente en
-modo web; en un worker comprueba que PID 1 corresponda al comando esperado. En
-Railway, conserve `healthcheckPath=/api/ready` solo para web. En cada servicio
-worker retire el healthcheck HTTP, no asigne dominio y configure reinicio
-`ON_FAILURE`; Railway detectará la salida del proceso sin exigir un puerto.
+modo web; en un worker comprueba que PID 1 corresponda al comando esperado.
+
+`railway.toml` no declara un healthcheck HTTP compartido. Configure desde el
+servicio web de Railway la ruta `/api/ready` y un timeout acorde al arranque.
+Los servicios worker no deben tener `healthcheckPath`, dominio ni puerto; deben
+conservar reinicio `ON_FAILURE`. Así un worker nunca hereda una comprobación
+HTTP que no puede responder.
+
+En servicios legacy, Railway continúa leyendo Config as Code y cualquier valor
+presente en `railway.toml` prevalece sobre el panel, aunque no actualice lo que
+el panel muestra. El mecanismo está deprecado: servicios nuevos no pueden
+adoptarlo y los archivos dejan de aplicarse el 1 de diciembre de 2026. Antes de
+esa fecha, migre de forma controlada a Infrastructure as Code a nivel de
+proyecto (`.railway/railway.ts`), comenzando con `railway config pull` y
+revisando `railway config plan`; esta fase no crea ni aplica esa infraestructura.
 
 Los workers usan outboxes duraderos, reintentos y recuperación de leases;
 reciben SIGTERM/SIGINT y terminan sin mantener transacciones durante llamadas
@@ -113,6 +124,11 @@ vez ante todos los fallos externos.
 La comprobación de worker es liveness, no una garantía contra bloqueo interno.
 Alértese además por ausencia de ciclos, trabajos pendientes/fallidos y antigüedad
 del backlog; así no se considera sano un proceso vivo que dejó de avanzar.
+
+Tras cada cambio de configuración, revise en los detalles del deployment el
+origen efectivo de cada valor: el icono de archivo identifica ajustes heredados
+de Config as Code. Verifique explícitamente `/api/ready` en web y ausencia de
+healthcheck HTTP en ambos workers.
 
 Configure alertas externas para disponibilidad, errores 5xx, latencia,
 conexiones, trabajos pendientes/reintentados/fallidos y antigüedad del backlog.

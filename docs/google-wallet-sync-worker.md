@@ -18,9 +18,10 @@ Crear un segundo servicio desde el mismo repositorio y la misma imagen Docker, s
 - `GOOGLE_WALLET_SYNC_ALERT_STALE_SECONDS=300`
 - Política de reinicio ante fallo. El worker no publica un puerto HTTP y no necesita un dominio.
 - `J2M_PROCESS_TYPE=google-wallet-worker`.
-- Sin `healthcheckPath` HTTP en el servicio Railway; el archivo `railway.toml`
-  corresponde al servicio web. La imagen valida que PID 1 ejecute el worker y
-  la política `ON_FAILURE` cubre la terminación del proceso.
+- Sin `healthcheckPath` HTTP en el servicio Railway. El `railway.toml`
+  compartido omite la ruta para que ningún worker la herede; `/api/ready` se
+  configura solo en el servicio web. La imagen valida que PID 1 ejecute el
+  worker y la política `ON_FAILURE` cubre la terminación del proceso.
 
 Una réplica es suficiente inicialmente. Varias réplicas son compatibles: cada actualización queda cercada por un advisory lock transaccional de PostgreSQL por cliente. Un trabajo abandonado en `processing` vuelve a ser elegible después de cinco minutos. Los fallos temporales usan reintentos con espera exponencial; los fallos permanentes quedan en `failed`. La llamada externa tiene timeout y nunca bloquea la transacción de puntos o sellos.
 

@@ -48,7 +48,12 @@ class StagingDeploymentTestCase(unittest.TestCase):
         self.assertIn("npm ci", dockerfile)
         self.assertIn("npm run build:css", dockerfile)
         self.assertIn("gunicorn --bind 0.0.0.0:${PORT:-8000}", dockerfile)
-        self.assertIn('healthcheckPath = "/api/ready"', railway)
+        self.assertNotIn("healthcheckPath", railway)
+        self.assertIn("Configure /api/ready únicamente en el servicio web", railway)
+        readiness = (ROOT / "docs" / "staging-readiness.md").read_text(encoding="utf-8")
+        self.assertIn("ruta `/api/ready`", readiness)
+        self.assertIn("servicios worker no deben tener `healthcheckPath`", readiness)
+        self.assertIn("Infrastructure as Code", readiness)
         self.assertIn("gunicorn==", requirements)
 
     def test_container_and_ci_are_hardened_for_staging_validation(self):

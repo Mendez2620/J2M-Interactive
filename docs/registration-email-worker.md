@@ -8,8 +8,9 @@ El endpoint público guarda el desafío y su trabajo de correo en `registration_
 - Worker continuo: `flask --app run.py run-registration-email-worker`
 
 En un contenedor dedicado configure `J2M_PROCESS_TYPE=registration-worker`. El
-worker no publica HTTP: en Railway retire cualquier `healthcheckPath`, no asigne
-dominio y use reinicio `ON_FAILURE`. La imagen comprobará que PID 1 ejecuta el
+worker no publica HTTP: no configure `healthcheckPath`, no asigne dominio y use
+reinicio `ON_FAILURE`. El `railway.toml` compartido omite expresamente la ruta
+HTTP; `/api/ready` se configura únicamente en el servicio web. La imagen comprobará que PID 1 ejecuta el
 comando esperado cuando el runtime respete el `HEALTHCHECK`; Railway reiniciará
 el contenedor si el comando termina con error. Supervise también la cadencia de
 métricas y la antigüedad del backlog, porque liveness no detecta por sí sola un
