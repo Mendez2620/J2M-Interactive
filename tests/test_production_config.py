@@ -52,16 +52,35 @@ class ProductionConfigTestCase(unittest.TestCase):
                  self.assertRaisesRegex(RuntimeError, "REGISTRATION_EMAIL_ENCRYPTION_KEY"):
                 create_app("production")
 
-    def test_production_forces_debug_off_with_robust_secret(self):
+    def test_production_rejects_debug_and_runs_safely_when_disabled(self):
         with patch.dict(os.environ, self.valid_environment(FLASK_DEBUG="true"), clear=True), \
+             patch.object(ProductionConfig, "PUBLIC_BASE_URL", "https://app.example.com"), \
+             self.assertRaisesRegex(RuntimeError, "FLASK_DEBUG"):
+            create_app("production")
+        with patch.dict(os.environ, self.valid_environment(FLASK_DEBUG="false"), clear=True), \
              patch.object(ProductionConfig, "PUBLIC_BASE_URL", "https://app.example.com"):
             app = create_app("production")
             self.assertFalse(app.debug)
+            self.assertEqual(app.config["CORS_ORIGINS"], ["https://app.example.com"])
             client = app.test_client()
             self.assertEqual(client.get("/api/health").status_code, 200)
             self.assertEqual(client.get("/admin/login").status_code, 200)
             self.assertEqual(client.get("/scanner").status_code, 404)
             self.assertIn("max-age=31536000", client.get("/api/health").headers["Strict-Transport-Security"])
+
+    def test_production_rejects_placeholders_insecure_cors_and_cookie(self):
+        cases = (
+            ({"SECRET_KEY": "change-this-placeholder-secret-with-32-characters"}, "SECRET_KEY"),
+            ({"CORS_ORIGINS": "http://app.example.com"}, "CORS_ORIGINS"),
+            ({"CORS_ORIGINS": "https://app.example.com/path"}, "CORS_ORIGINS"),
+            ({"SESSION_COOKIE_SECURE": "false"}, "SESSION_COOKIE_SECURE"),
+        )
+        for overrides, message in cases:
+            with self.subTest(overrides=overrides), \
+                 patch.dict(os.environ, self.valid_environment(**overrides), clear=True), \
+                 patch.object(ProductionConfig, "PUBLIC_BASE_URL", "https://app.example.com"), \
+                 self.assertRaisesRegex(RuntimeError, message):
+                create_app("production")
 
     def test_production_requires_explicit_postgresql_database_url(self):
         for database_url, message in ((None, "explícita"), ("sqlite:///ephemeral.db", "SQLite")):
