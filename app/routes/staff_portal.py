@@ -26,10 +26,12 @@ def staff_private_cache(response):
 def staff_login():
     error = "La sesión de seguridad cambió. Inicia sesión nuevamente." if request.args.get("csrf_error") else None
     status = 200
+    remembered_business = (request.cookies.get("j2m_staff_business") or "").strip().lower()
     if request.method == "POST":
         identity = (request.form.get("identity") or "").strip().lower()
         password = request.form.get("password") or ""
         business_slug = (request.form.get("business_slug") or "").strip().lower()
+        remember = request.form.get("remember") == "1"
         try:
             reservation = reserve_auth_attempt("staff-web", f"{business_slug}:{identity}", request.remote_addr)
         except AuthRateLimitUnavailable:
@@ -54,9 +56,21 @@ def staff_login():
                 error, status = "No fue posible iniciar sesión con esas credenciales.", 401
             else:
                 clear_auth_attempts("staff-web", reservation)
-                create_staff_browser_session(staff)
-                return redirect(url_for("staff_portal.staff_scanner"))
-    return render_template("staff/login.html", error=error), status
+                create_staff_browser_session(staff, remember=remember)
+                response = redirect(url_for("staff_portal.staff_scanner"))
+                if remember:
+                    response.set_cookie(
+                        "j2m_staff_business", business_slug,
+                        max_age=current_app.config["REMEMBER_SESSION_ABSOLUTE_SECONDS"],
+                        httponly=True, secure=current_app.config["SESSION_COOKIE_SECURE"],
+                        samesite="Lax",
+                    )
+                else:
+                    response.delete_cookie("j2m_staff_business", samesite="Lax")
+                return response
+    return render_template(
+        "staff/login.html", error=error, remembered_business=remembered_business,
+    ), status
 
 
 @staff_portal_bp.route("/logout", methods=["POST"])

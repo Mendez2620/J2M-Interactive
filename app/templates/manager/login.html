@@ -31,6 +31,7 @@
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
           <div><label for="login-email" class="text-sm font-semibold">Correo electrónico</label><input id="login-email" type="email" name="email" autocomplete="username" required class="mt-1 field" placeholder="gerente@negocio.com"></div>
           <div><label for="login-password" class="text-sm font-semibold">Contraseña</label><input id="login-password" type="password" name="password" autocomplete="current-password" required class="mt-1 field"></div>
+          <label class="flex items-start gap-3 rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm"><input type="checkbox" name="remember" value="1" class="mt-1 h-4 w-4"><span><strong class="block text-slate-800">Mantener sesión iniciada</strong><span class="text-xs text-slate-500">Solo en un dispositivo personal. La sesión vence y continúa siendo revocable.</span></span></label>
           <button class="w-full btn btn-primary py-3">Entrar al panel</button>
         </form>
       {% endif %}
