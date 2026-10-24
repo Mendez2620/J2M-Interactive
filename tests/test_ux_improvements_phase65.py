@@ -5,6 +5,7 @@ from urllib.parse import parse_qs, urlparse
 from app import create_app
 from app.extensions import db
 from app.models import Business, Customer, PlatformAdmin, Staff, Transaction
+from app.services.registration_email_service import process_pending_registration_emails
 
 
 class UXImprovementsPhase65TestCase(unittest.TestCase):
@@ -30,15 +31,22 @@ class UXImprovementsPhase65TestCase(unittest.TestCase):
         staff.set_password(password); db.session.add(staff); db.session.commit(); return staff
 
     def test_public_join_normalizes_supported_phone_numbers(self):
-        response = self.client.post("/join/marca-uno", json={"full_name": "Cliente MX", "email": "mx@example.test", "phone_country": "+52", "phone": "55 1234 5678"})
-        self.assertEqual(response.status_code, 201)
+        base = {"birthdate": "1990-01-01", "terms_accepted": True, "privacy_accepted": True}
+        response = self.client.post("/join/marca-uno", json={"full_name": "Cliente MX", "email": "mx@example.test", "phone_country": "+52", "phone": "55 1234 5678", **base})
+        self.assertEqual(response.status_code, 202)
+        process_pending_registration_emails()
+        code = self.app.extensions["recovery_mailer"].outbox[-1]["code"]
+        self.assertEqual(self.client.post("/join/marca-uno/verify", json={"code": code}).status_code, 201)
         self.assertEqual(Customer.query.filter_by(email="mx@example.test").one().phone, "+525512345678")
-        response = self.client.post("/join/marca-uno", json={"full_name": "Cliente ES", "email": "es@example.test", "phone_country": "+34", "phone": "612 345 678"})
-        self.assertEqual(response.status_code, 201)
+        response = self.client.post("/join/marca-uno", json={"full_name": "Cliente ES", "email": "es@example.test", "phone_country": "+34", "phone": "612 345 678", **base})
+        self.assertEqual(response.status_code, 202)
+        process_pending_registration_emails()
+        code = self.app.extensions["recovery_mailer"].outbox[-1]["code"]
+        self.assertEqual(self.client.post("/join/marca-uno/verify", json={"code": code}).status_code, 201)
         self.assertEqual(Customer.query.filter_by(email="es@example.test").one().phone, "+34612345678")
 
     def test_invalid_phone_is_rejected_without_customer(self):
-        response = self.client.post("/join/marca-uno", json={"full_name": "Inválido", "email": "bad@example.test", "phone_country": "+52", "phone": "abc123"})
+        response = self.client.post("/join/marca-uno", json={"full_name": "Inválido", "email": "bad@example.test", "phone_country": "+52", "phone": "abc123", "birthdate": "1990-01-01", "terms_accepted": True, "privacy_accepted": True})
         self.assertEqual(response.status_code, 400)
         self.assertIsNone(Customer.query.filter_by(email="bad@example.test").first())
 

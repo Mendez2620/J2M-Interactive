@@ -247,8 +247,11 @@ class SecurityPhase1TestCase(unittest.TestCase):
 
     def test_existing_customer_cannot_be_claimed_or_changed(self):
         response = self.client.post("/join/a", json={"full_name": "Atacante", "email": "a@test.com",
-                                                       "phone": "999"})
-        self.assertEqual(response.status_code, 409)
+                                                       "phone_country": "+52", "phone": "55 1111 1111",
+                                                       "birthdate": "1990-01-01", "terms_accepted": True,
+                                                       "privacy_accepted": True})
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.get_json()["status"], "accepted")
         db.session.refresh(self.customer_a)
         self.assertEqual(self.customer_a.full_name, "Cliente A")
         self.assertEqual(self.customer_a.phone, "111")

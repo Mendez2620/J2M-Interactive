@@ -4,6 +4,7 @@ from datetime import date
 from app import create_app
 from app.extensions import db
 from app.models import Business, Customer, PlatformAdmin, Staff, Transaction
+from app.services.registration_email_service import process_pending_registration_emails
 
 
 class Phase3TestCase(unittest.TestCase):
@@ -63,6 +64,8 @@ class Phase3TestCase(unittest.TestCase):
             "email": "valeria@test.com",
             "phone": "+525598765432",
             "birthdate": "1998-05-15",
+            "terms_accepted": True,
+            "privacy_accepted": True,
         }
         res = self.client.post(
             "/join/cafe-aroma",
@@ -70,12 +73,16 @@ class Phase3TestCase(unittest.TestCase):
             content_type="application/json",
             headers={"Accept": "application/json"},
         )
+        self.assertEqual(res.status_code, 202)
+        self.assertIsNone(Customer.query.filter_by(email="valeria@test.com").first())
+        process_pending_registration_emails()
+        code = self.app.extensions["recovery_mailer"].outbox[-1]["code"]
+        res = self.client.post("/join/cafe-aroma/verify", json={"code": code})
         self.assertEqual(res.status_code, 201)
         data = res.get_json()
         self.assertEqual(data["status"], "success")
         self.assertIn("google_wallet_url", data)
         self.assertIn("apple_wallet_url", data)
-        self.assertEqual(data["customer"]["birthdate"], "1998-05-15")
 
         # Verify DB customer
         customer = Customer.query.filter_by(email="valeria@test.com").first()

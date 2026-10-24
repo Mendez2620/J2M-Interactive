@@ -83,7 +83,7 @@
 
         <div>
           <label for="phone" class="block text-xs font-bold uppercase tracking-wider text-slate-600 mb-1">
-            Teléfono Móvil
+            Teléfono Móvil <span class="text-rose-500">*</span>
           </label>
           <div class="grid grid-cols-[8.5rem_1fr] gap-2">
             <select id="phone_country" name="phone_country" aria-label="País y código telefónico" class="field">
@@ -93,7 +93,7 @@
               <option value="+54">Argentina +54</option>
               <option value="+34">España +34</option>
             </select>
-            <input type="tel" id="phone" name="phone" inputmode="tel" autocomplete="tel-national" placeholder="55 1234 5678"
+            <input type="tel" id="phone" name="phone" inputmode="tel" autocomplete="tel-national" required placeholder="55 1234 5678"
                    class="field">
           </div>
           <p class="mt-1 text-xs text-slate-500">Selecciona el país e ingresa únicamente tu número local.</p>
@@ -101,13 +101,13 @@
 
         <div>
           <label for="birthdate" class="block text-xs font-bold uppercase tracking-wider text-slate-600 mb-1">
-            Fecha de nacimiento <span class="font-normal text-slate-400">(opcional)</span>
+            Fecha de nacimiento <span class="font-normal text-rose-500">*</span>
           </label>
           <div class="relative rounded-xl shadow-sm">
             <div class="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
               {{ icon('calendar') }}
             </div>
-            <input type="date" id="birthdate" name="birthdate"
+            <input type="date" id="birthdate" name="birthdate" required
                    class="block w-full pl-10 pr-3 py-3 border border-slate-200 rounded-xl text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent text-sm">
           </div>
           <p class="mt-1 text-xs text-slate-400">¡Recibe promociones y regalos en tu mes de cumpleaños!</p>
@@ -121,11 +121,13 @@
           </div>
           <div class="ml-2.5 text-xs text-slate-500">
             <label for="terms_accepted">
-              He leído y acepto los <a href="/terms" target="_blank" class="text-indigo-600 font-semibold underline hover:text-indigo-500">Términos y Condiciones</a> 
-              y el <a href="/privacy" target="_blank" class="text-indigo-600 font-semibold underline hover:text-indigo-500">Aviso de Privacidad</a>.
+              He leído y acepto los <a href="/terms" target="_blank" class="text-indigo-600 font-semibold underline hover:text-indigo-500">Términos y Condiciones</a> (versión {{ terms_version }}).
             </label>
           </div>
         </div>
+        <div class="flex items-start"><input id="privacy_accepted" name="privacy_accepted" type="checkbox" required class="mt-0.5 h-4 w-4 rounded border-slate-300 text-indigo-600"><label for="privacy_accepted" class="ml-2.5 text-xs text-slate-500">He leído y acepto el <a href="/privacy" target="_blank" class="font-semibold text-indigo-600 underline">Aviso de Privacidad</a> (versión {{ privacy_version }}).</label></div>
+        <div class="flex items-start"><input id="marketing_consent" name="marketing_consent" type="checkbox" class="mt-0.5 h-4 w-4 rounded border-slate-300 text-indigo-600"><label for="marketing_consent" class="ml-2.5 text-xs text-slate-500">Quiero recibir promociones por correo. Este consentimiento es opcional y puedo retirarlo.</label></div>
+        <div id="join-error" class="hidden rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700" role="alert" aria-live="assertive"></div>
 
         <button type="submit" id="submit-btn"
                 class="w-full flex justify-center items-center py-3.5 px-4 border border-transparent rounded-xl shadow-md text-sm font-bold text-white transition duration-150 transform hover:-translate-y-0.5 active:translate-y-0"
@@ -134,6 +136,15 @@
           {{ icon('arrow-right') }}
         </button>
         <a href="{{ url_for('recovery.recover', business_slug=business.slug) }}" class="block text-center text-sm font-semibold text-indigo-700 underline">¿Ya tienes una tarjeta? Recupérala aquí</a>
+      </form>
+      <form id="verification-form" class="hidden space-y-4" novalidate>
+        <div><h2 class="text-lg font-bold text-slate-900">Revisa tu correo</h2><p id="verification-notice" class="mt-1 text-sm text-slate-600">Si recibiste un código, ingrésalo antes de que caduque. Si no llega, tu tarjeta puede existir: utiliza la recuperación verificada.</p></div>
+        <label for="verification-code" class="block text-xs font-bold uppercase tracking-wider text-slate-600">Código de verificación</label>
+        <input id="verification-code" name="code" required inputmode="numeric" autocomplete="one-time-code" maxlength="8" pattern="[0-9]{8}" class="field" placeholder="00000000">
+        <div id="verification-error" class="hidden rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700" role="alert" aria-live="assertive"></div>
+        <button id="verify-btn" type="submit" class="w-full rounded-xl px-4 py-3.5 text-sm font-bold text-white" style="background-color: {{ business.primary_color }}; color: {{ contrast_text_color(business.primary_color) }};">Verificar y crear mi tarjeta</button>
+        <button id="resend-btn" type="button" class="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm font-semibold text-slate-700">Reenviar código</button>
+        <a href="{{ url_for('recovery.recover', business_slug=business.slug) }}" class="block text-center text-sm font-semibold text-indigo-700 underline">Recuperar una tarjeta existente</a>
       </form>
     </div>
 
@@ -177,51 +188,48 @@
 {% block scripts %}
 {% if business.is_active %}
 <script nonce="{{ csp_nonce() }}">
-  document.getElementById('join-form').addEventListener('submit', async function(e) {
-    e.preventDefault();
-    const checkbox = document.getElementById('terms_accepted');
-    if (!checkbox.checked) {
-      alert('Debes aceptar los Términos y Condiciones y el Aviso de Privacidad para continuar.');
-      return;
-    }
-
+  const joinForm = document.getElementById('join-form');
+  const verifyForm = document.getElementById('verification-form');
+  const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
+  let registrationPayload = null;
+  const showError = (id, message) => { const box = document.getElementById(id); box.textContent = message; box.classList.toggle('hidden', !message); };
+  async function requestRegistration() {
+    showError('join-error', '');
     const submitBtn = document.getElementById('submit-btn');
     submitBtn.disabled = true;
-    submitBtn.textContent = 'Generando tarjeta…';
-
-    const formData = new FormData(this);
-    const payload = Object.fromEntries(formData.entries());
-
+    submitBtn.querySelector('span').textContent = 'Enviando código…';
     try {
-      const response = await fetch('/join/{{ business.slug }}', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json'
-        },
-        body: JSON.stringify(payload)
-      });
-
-      const data = await response.json();
+      const response = await fetch(joinForm.action, {method:'POST', headers:{'Content-Type':'application/json','Accept':'application/json','X-CSRFToken':csrfToken}, body:JSON.stringify(registrationPayload)});
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.message || 'No fue posible iniciar el registro.');
+      joinForm.classList.add('hidden'); verifyForm.classList.remove('hidden'); document.getElementById('verification-code').focus();
+    } catch (error) { showError('join-error', error.message || 'Error de conexión.'); }
+    finally { submitBtn.disabled = false; submitBtn.querySelector('span').textContent = 'Obtener mi Tarjeta de Lealtad'; }
+  }
+  joinForm.addEventListener('submit', async function(e) {
+    e.preventDefault();
+    if (!this.reportValidity()) return;
+    registrationPayload = Object.fromEntries(new FormData(this).entries());
+    await requestRegistration();
+  });
+  document.getElementById('resend-btn').addEventListener('click', requestRegistration);
+  verifyForm.addEventListener('submit', async function(e) {
+    e.preventDefault(); showError('verification-error', '');
+    const verifyBtn = document.getElementById('verify-btn'); verifyBtn.disabled = true; verifyBtn.textContent = 'Validando…';
+    try {
+      const response = await fetch('/join/{{ business.slug }}/verify', {method:'POST', headers:{'Content-Type':'application/json','Accept':'application/json','X-CSRFToken':csrfToken}, body:JSON.stringify({code:document.getElementById('verification-code').value})});
+      const data = await response.json().catch(() => ({}));
       if (response.ok && data.status === 'success') {
         document.getElementById('registration-section').classList.add('hidden');
         document.getElementById('wallet-success-section').classList.remove('hidden');
-
         document.getElementById('customer-greeting').textContent = `¡Hola ${data.customer.full_name}! Guarda tu tarjeta digital en tu billetera móvil:`;
         const googleButton = document.getElementById('google-wallet-btn');
         if (data.google_wallet_url) googleButton.href = data.google_wallet_url;
         else googleButton.classList.add('hidden');
         document.getElementById('apple-wallet-btn').href = data.apple_wallet_url;
-      } else {
-        alert(data.message || 'Ocurrió un error al registrarte. Intenta nuevamente.');
-        submitBtn.disabled = false;
-        submitBtn.textContent = 'Obtener mi Tarjeta de Lealtad';
-      }
-    } catch (err) {
-      alert('Error de conexión con el servidor. Revisa tu red.');
-      submitBtn.disabled = false;
-      submitBtn.textContent = 'Obtener mi Tarjeta de Lealtad';
-    }
+      } else throw new Error(data.message || 'No fue posible verificar el código.');
+    } catch (error) { showError('verification-error', error.message || 'Error de conexión.'); }
+    finally { verifyBtn.disabled = false; verifyBtn.textContent = 'Verificar y crear mi tarjeta'; }
   });
 </script>
 {% endif %}
