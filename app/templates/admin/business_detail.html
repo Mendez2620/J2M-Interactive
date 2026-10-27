@@ -104,7 +104,7 @@
           <p class="text-xs text-slate-500 mt-0.5">Configura colores, logotipo, ubicación geográfica y textos al reverso de la tarjeta (Apple &amp; Google Wallet).</p>
         </div>
 
-        <form method="POST" action="/admin/business/{{ business.id }}/update" enctype="multipart/form-data" class="space-y-5 max-w-3xl">
+        <form method="POST" action="/admin/business/{{ business.id }}/update" enctype="multipart/form-data" class="space-y-5" data-wallet-editor>
           <div class="relative h-44 sm:h-56 overflow-hidden rounded-2xl border border-slate-200" style="background: linear-gradient(135deg, {{ business.primary_color }}, {{ business.secondary_color }});">
             {% if business.cover_path %}<img src="{{ url_for('static', filename=business.cover_path) }}" alt="Portada actual" class="h-full w-full object-cover">{% endif %}
             <div class="absolute inset-0 bg-slate-950/20"></div>
@@ -124,6 +124,28 @@
                      class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900 focus:outline-none focus:bg-white focus:ring-2 focus:ring-slate-900">
             </div>
           </div>
+
+          <section class="rounded-2xl border border-slate-200 bg-slate-50 p-4 sm:p-5 space-y-5" aria-labelledby="walletEditorTitle">
+            <div>
+              <h4 id="walletEditorTitle" class="text-sm font-bold text-slate-900">Diseño profesional Wallet</h4>
+              <p class="mt-1 text-xs text-slate-600">Las vistas son aproximaciones HTML con datos ficticios. Apple y Google controlan la presentación final y pueden reorganizar campos.</p>
+            </div>
+            <div class="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_minmax(320px,1fr)] gap-6">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 content-start">
+                <div><label class="label" for="wallet_program_name">Nombre del programa</label><input id="wallet_program_name" name="wallet_program_name" maxlength="60" class="field" value="{{ business.wallet_program_name or ('Club ' ~ business.name) }}" data-wallet-field="program"></div>
+                <div class="sm:col-span-2"><label class="label" for="wallet_card_text">Mensaje de la tarjeta</label><input id="wallet_card_text" name="wallet_card_text" maxlength="60" class="field" value="{{ business.wallet_card_text or 'Tu lealtad merece recompensas' }}" data-wallet-field="cardText"><p class="mt-1 text-xs text-slate-500">Apple lo muestra en el frente como campo secundario. Google lo muestra en la sección de detalles, no en el encabezado.</p></div>
+                <div><label class="label" for="wallet_balance_label">Etiqueta de saldo</label><input id="wallet_balance_label" name="wallet_balance_label" maxlength="30" class="field" value="{{ business.wallet_balance_label or ('Sellos' if business.loyalty_type == 'stamps' else 'Puntos') }}" data-wallet-field="balanceLabel"></div>
+                <div><label class="label" for="wallet_text_color">Color de texto <span class="text-slate-400">(Apple)</span></label><div class="flex gap-2" data-color-control><input type="color" value="{{ business.wallet_text_color or '#FFFFFF' }}" data-color-picker class="h-10 w-12 rounded border"><input id="wallet_text_color" name="wallet_text_color" maxlength="7" pattern="#[0-9A-Fa-f]{6}" class="field font-mono uppercase" value="{{ business.wallet_text_color or '#FFFFFF' }}" data-color-text data-wallet-field="textColor"></div></div>
+                <div class="sm:col-span-2"><label class="label" for="wallet_instructions">Instrucciones</label><textarea id="wallet_instructions" name="wallet_instructions" maxlength="500" rows="2" class="field" data-wallet-field="instructions">{{ business.wallet_instructions or 'Presenta tu tarjeta al realizar tu compra.' }}</textarea></div>
+                <div class="sm:col-span-2"><label class="label" for="wallet_contact">Contacto público</label><input id="wallet_contact" name="wallet_contact" maxlength="160" class="field" value="{{ business.wallet_contact or '' }}" placeholder="soporte@negocio.com o +52…"></div>
+                <div class="sm:col-span-2 rounded-lg border border-blue-200 bg-blue-50 p-3 text-xs text-blue-900">El color de texto es compatible con PassKit. Google Wallet decide automáticamente el contraste. La portada se usa como <em>hero image</em> únicamente cuando existe una URL HTTPS pública.</div>
+              </div>
+              <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-1 gap-4" aria-live="polite">
+                <div><p class="mb-2 text-xs font-semibold text-slate-700">Apple Wallet · aproximación</p><div class="rounded-[1.7rem] p-5 shadow-xl min-h-56 overflow-hidden" data-wallet-preview="apple" style="background-color:{{ business.primary_color }};color:{{ business.wallet_text_color or '#FFFFFF' }}"><div class="flex justify-between gap-3 items-center"><div class="flex items-center gap-2">{% if business.logo_path or business.logo_url %}<img src="{{ url_for('static', filename=business.logo_path) if business.logo_path else business.logo_url }}" alt="" class="h-8 w-12 object-contain rounded bg-white/90">{% endif %}<strong data-preview-program>{{ business.wallet_program_name or ('Club ' ~ business.name) }}</strong></div><span class="text-xs">APPLE WALLET</span></div><div class="mt-8 grid grid-cols-2 gap-4"><div><span class="text-[10px] uppercase opacity-75">Titular</span><p class="text-sm">Cliente de ejemplo</p></div><div><span class="text-[10px] uppercase opacity-75">Mensaje</span><p class="text-sm" data-preview-card-text>{{ business.wallet_card_text or 'Tu lealtad merece recompensas' }}</p></div></div><div class="mt-5 flex justify-between items-end"><div><span class="text-xs uppercase" data-preview-balance-label>{{ business.wallet_balance_label or ('Sellos' if business.loyalty_type == 'stamps' else 'Puntos') }}</span><p class="text-3xl font-bold">{{ '6 / ' ~ business.stamps_reward_limit if business.loyalty_type == 'stamps' else '250' }}</p></div><div class="h-16 w-16 bg-white p-2 text-[8px] text-slate-900 grid place-items-center">QR FICTICIO</div></div></div></div>
+                <div><p class="mb-2 text-xs font-semibold text-slate-700">Google Wallet · aproximación</p><div class="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-lg"><div class="p-5 min-h-44" data-wallet-preview="google" data-google-wallet-front style="background-color:{{ business.primary_color }}"><span class="text-[10px] uppercase opacity-75">Google Wallet</span><h5 class="mt-2 text-lg font-bold" data-preview-program>{{ business.wallet_program_name or ('Club ' ~ business.name) }}</h5><div class="mt-6 flex justify-between items-end"><div><span class="text-xs" data-preview-balance-label>{{ business.wallet_balance_label or ('Sellos' if business.loyalty_type == 'stamps' else 'Puntos') }}</span><p class="text-3xl font-bold">{{ '6 / ' ~ business.stamps_reward_limit if business.loyalty_type == 'stamps' else '250 pts' }}</p></div><div class="h-16 w-16 bg-white p-2 text-[8px] text-slate-900 grid place-items-center">QR FICTICIO</div></div></div><div class="border-t border-slate-200 p-4 text-slate-900"><span class="text-[10px] font-semibold uppercase text-slate-500">Detalles · Programa</span><p class="mt-1 text-sm" data-preview-card-text>{{ business.wallet_card_text or 'Tu lealtad merece recompensas' }}</p></div></div></div>
+              </div>
+            </div>
+          </section>
 
           {% if uploads_enabled %}
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -224,7 +246,8 @@
           </div>
 
           <div class="pt-2">
-            <button type="submit"
+            <div class="hidden mb-3 rounded-lg px-3 py-2 text-sm" role="status" aria-live="polite" data-wallet-status></div>
+            <button type="submit" data-wallet-save
                     class="px-5 py-2.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold rounded-lg shadow-sm transition">
               Guardar Cambios de Identidad &amp; Wallet
             </button>
@@ -732,6 +755,47 @@
     });
     document.querySelectorAll('[data-file-control]').forEach((control) => { const input=control.querySelector('input[type=file]'); input.addEventListener('change',()=>updateFileControl(input)); control.querySelector('[data-clear-file]').addEventListener('click',()=>{input.value='';updateFileControl(input);}); });
     document.querySelectorAll('[data-color-control]').forEach((control) => { const picker=control.querySelector('[data-color-picker]');const text=control.querySelector('[data-color-text]');picker.addEventListener('input',()=>{text.value=picker.value.toUpperCase();});text.addEventListener('input',()=>{text.value=text.value.toUpperCase();if(/^#[0-9A-F]{6}$/.test(text.value))picker.value=text.value;}); });
+    const walletEditor = document.querySelector('[data-wallet-editor]');
+    function updateWalletPreviews() {
+      if (!walletEditor) return;
+      const value = (name, fallback='') => walletEditor.querySelector(`[data-wallet-field="${name}"]`)?.value.trim() || fallback;
+      const primary = walletEditor.querySelector('input[name="primary_color"]')?.value || '#1E3A8A';
+      const textColor = value('textColor', '#FFFFFF');
+      walletEditor.querySelectorAll('[data-wallet-preview]').forEach((preview) => {
+        if (/^#[0-9A-Fa-f]{6}$/.test(primary)) preview.style.backgroundColor = primary;
+        if (preview.dataset.walletPreview === 'apple' && /^#[0-9A-Fa-f]{6}$/.test(textColor)) preview.style.color = textColor;
+      });
+      const googleFront = walletEditor.querySelector('[data-google-wallet-front]');
+      if (googleFront && /^#[0-9A-Fa-f]{6}$/.test(primary)) {
+        const rgb = [1, 3, 5].map((index) => parseInt(primary.slice(index, index + 2), 16));
+        const luminance = (0.2126 * rgb[0]) + (0.7152 * rgb[1]) + (0.0722 * rgb[2]);
+        googleFront.style.color = luminance > 160 ? '#202124' : '#FFFFFF';
+      }
+      walletEditor.querySelectorAll('[data-preview-program]').forEach((node) => node.textContent = value('program', 'Programa de lealtad'));
+      walletEditor.querySelectorAll('[data-preview-card-text]').forEach((node) => node.textContent = value('cardText', 'Tu lealtad merece recompensas'));
+      walletEditor.querySelectorAll('[data-preview-balance-label]').forEach((node) => node.textContent = value('balanceLabel', 'Saldo'));
+    }
+    walletEditor?.querySelectorAll('input, textarea, select').forEach((input) => input.addEventListener('input', updateWalletPreviews));
+    updateWalletPreviews();
+    walletEditor?.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const button = walletEditor.querySelector('[data-wallet-save]');
+      const status = walletEditor.querySelector('[data-wallet-status]');
+      button.disabled = true; button.setAttribute('aria-busy', 'true'); button.textContent = 'Guardando…';
+      status.classList.add('hidden');
+      try {
+        const response = await fetch(walletEditor.action, {method: 'POST', headers: {'Accept':'application/json','X-CSRFToken':document.querySelector('meta[name="csrf-token"]').content}, body: new FormData(walletEditor)});
+        const data = await response.json().catch(() => ({message: 'El servidor devolvió una respuesta inválida.'}));
+        if (!response.ok) throw new Error(data.message || 'No fue posible guardar el diseño.');
+        status.textContent = 'Diseño Wallet guardado correctamente.';
+        status.className = 'mb-3 rounded-lg bg-emerald-50 px-3 py-2 text-sm text-emerald-800';
+      } catch (error) {
+        status.textContent = error.message;
+        status.className = 'mb-3 rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-800';
+      } finally {
+        button.disabled = false; button.removeAttribute('aria-busy'); button.textContent = 'Guardar Cambios de Identidad & Wallet';
+      }
+    });
     document.querySelector('[data-loyalty-toggle]')?.addEventListener('change', toggleLoyaltyFields);
     const pointsInput = document.getElementById('pointsPerCurrency');
     function updatePointsExample() { if (pointsInput) document.getElementById('pointsExample').textContent = `Ejemplo: una compra de $100 MXN otorga ${((Number(pointsInput.value) || 0) * 100).toLocaleString('es-MX')} puntos.`; }

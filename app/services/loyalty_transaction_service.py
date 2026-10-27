@@ -54,7 +54,7 @@ def process_loyalty_transaction(*, business, customer_id, staff_id, action, tx_t
     conditions = [table.c.id == customer_id, table.c.business_id == business.id]
     values = {}
 
-    if action.startswith("earn"):
+    if action.startswith("earn") and business.cooldown_minutes > 0:
         cutoff = now - timedelta(minutes=business.cooldown_minutes)
         recent_earn = exists().where(and_(
             Transaction.business_id == business.id,

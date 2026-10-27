@@ -90,29 +90,32 @@ class AppleWalletService:
 
         bg_color = hex_to_rgb(business.primary_color, "rgb(30, 58, 138)")
         label_color = hex_to_rgb(business.secondary_color, "rgb(255, 255, 255)")
-        foreground_color = "rgb(255, 255, 255)"
+        foreground_color = hex_to_rgb(business.wallet_text_color, "rgb(255, 255, 255)")
+        balance_label = business.wallet_balance_label or (
+            "Sellos" if business.loyalty_type == "stamps" else "Puntos"
+        )
 
         # Primary field based on loyalty type
         if business.loyalty_type == "stamps":
             primary_fields = [
                 {
                     "key": "stamps_balance",
-                    "label": "SELLOS",
+                    "label": balance_label.upper(),
                     "value": f"{customer.current_stamps} / {business.stamps_reward_limit}",
                     "changeMessage": "¡Tu saldo de sellos se actualizó a %@!",
                 }
             ]
-            program_label = "Sellos de Lealtad"
+            program_label = business.wallet_program_name or "Sellos de Lealtad"
         else:
             primary_fields = [
                 {
                     "key": "points_balance",
-                    "label": "PUNTOS",
+                    "label": balance_label.upper(),
                     "value": f"{customer.current_points:.0f}",
                     "changeMessage": "¡Tu saldo de puntos se actualizó a %@ pts!",
                 }
             ]
-            program_label = "Puntos Acumulables"
+            program_label = business.wallet_program_name or "Puntos Acumulables"
 
         secondary_fields = [
             {
@@ -121,6 +124,13 @@ class AppleWalletService:
                 "value": customer.full_name,
             }
         ]
+        card_text = (business.wallet_card_text or "Tu lealtad merece recompensas").strip()
+        if card_text:
+            secondary_fields.append({
+                "key": "card_message",
+                "label": "MENSAJE",
+                "value": card_text[:60],
+            })
 
         auxiliary_fields = [
             {
@@ -142,6 +152,11 @@ class AppleWalletService:
 
         back_fields = [
             {
+                "key": "instructions",
+                "label": "Cómo utilizarla",
+                "value": business.wallet_instructions or "Presenta tu tarjeta al realizar tu compra.",
+            },
+            {
                 "key": "terms",
                 "label": "Términos y Condiciones",
                 "value": terms_text,
@@ -149,7 +164,7 @@ class AppleWalletService:
             {
                 "key": "customer_support",
                 "label": "Atención al Cliente",
-                "value": customer.email or "soporte@j2minteractive.com",
+                "value": business.wallet_contact or "J2M Interactive",
             },
         ]
 
@@ -166,8 +181,8 @@ class AppleWalletService:
             "serialNumber": serial_number,
             "teamIdentifier": self.team_id,
             "organizationName": business.name,
-            "description": f"Tarjeta de Lealtad {business.name}",
-            "logoText": business.name,
+            "description": business.wallet_card_text or f"Tarjeta de Lealtad {business.name}",
+            "logoText": business.wallet_program_name or business.name,
             "foregroundColor": foreground_color,
             "backgroundColor": bg_color,
             "labelColor": label_color,
