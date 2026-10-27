@@ -63,6 +63,15 @@ def _set_registration_challenge_session(challenge_id=None):
     )
 
 
+def _session_owns_registration_challenge(challenge_id):
+    proof = session.get("customer_registration_challenge_proof")
+    return bool(
+        isinstance(challenge_id, str)
+        and isinstance(proof, str)
+        and hmac.compare_digest(proof, _hmac(challenge_id, "registration-session"))
+    )
+
+
 def _referral_serializer():
     return URLSafeTimedSerializer(current_app.config["SECRET_KEY"], salt="customer-referral-context-v1")
 
@@ -184,12 +193,19 @@ def join_business(slug):
     except ValueError as exc:
         return jsonify({"status": "error", "message": str(exc)}), 400
     now = _utcnow()
+    email_hash, phone_hash = _identity_hmac(email), _identity_hmac(phone)
     previous_challenge_id = session.get("customer_registration_challenge_id")
     previous_challenge = db.session.get(CustomerRegistrationChallenge, previous_challenge_id) if previous_challenge_id else None
     promoter = None
     referral_locked = bool(
-        previous_challenge and previous_challenge.business_id == business.id
+        previous_challenge
+        and _session_owns_registration_challenge(previous_challenge_id)
+        and previous_challenge.business_id == business.id
+        and previous_challenge.email_hash == email_hash
+        and previous_challenge.phone_hash == phone_hash
         and previous_challenge.consumed_at is None
+        and previous_challenge.expires_at > now
+        and previous_challenge.attempts < current_app.config["REGISTRATION_MAX_ATTEMPTS"]
     )
     if referral_locked and previous_challenge.promoter_id:
         promoter = Promoter.query.filter_by(
@@ -197,7 +213,6 @@ def join_business(slug):
         ).first()
     if not referral_locked:
         promoter = _promoter_from_context(data.get("referral_context"), business.id)
-    email_hash, phone_hash = _identity_hmac(email), _identity_hmac(phone)
     ip_hash = _hmac(request.remote_addr or "unknown", "registration-ip")
     ua_hash = _hmac((request.user_agent.string or "unknown")[:512], "registration-user-agent")
     cutoff = now - timedelta(seconds=current_app.config["REGISTRATION_CHALLENGE_RETENTION"])
