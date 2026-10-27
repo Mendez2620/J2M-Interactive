@@ -34,25 +34,40 @@ def create_app(config_name=None):
         secret = os.getenv("SECRET_KEY", app.config.get("SECRET_KEY") or "")
         app.config["SECRET_KEY"] = secret
         forbidden = {"default-dev-secret-key-j2m", "change-this-secret-key-in-production-j2m-loyalty"}
-        if secret in forbidden or len(secret) < 32:
+        obvious_placeholders = ("change", "replace", "redacted", "placeholder", "example")
+        if secret in forbidden or len(secret) < 32 or any(value in secret.lower() for value in obvious_placeholders):
             raise RuntimeError("Producción requiere SECRET_KEY aleatoria de al menos 32 caracteres.")
+        if os.getenv("FLASK_DEBUG", "false").strip().lower() in {"1", "true", "yes", "on"}:
+            raise RuntimeError("Producción no permite FLASK_DEBUG habilitado.")
         app.config["DEBUG"] = False
         jwt_secret = os.getenv("JWT_SECRET_KEY", app.config.get("JWT_SECRET_KEY") or "")
-        if jwt_secret in {"default-jwt-secret-key", "change-jwt-secret-key-in-production"} or len(jwt_secret) < 32:
+        if (jwt_secret in {"default-jwt-secret-key", "change-jwt-secret-key-in-production"}
+                or len(jwt_secret) < 32 or any(value in jwt_secret.lower() for value in obvious_placeholders)):
             raise RuntimeError("Producción requiere JWT_SECRET_KEY independiente y aleatoria de al menos 32 caracteres.")
         if hmac.compare_digest(jwt_secret, secret):
             raise RuntimeError("Producción requiere que JWT_SECRET_KEY sea distinta de SECRET_KEY.")
         app.config["JWT_SECRET_KEY"] = jwt_secret
         identity_key = os.getenv("REGISTRATION_IDENTITY_HMAC_KEY", "")
-        if len(identity_key) < 32 or identity_key in {secret, jwt_secret}:
+        if (len(identity_key) < 32 or identity_key in {secret, jwt_secret}
+                or any(value in identity_key.lower() for value in obvious_placeholders)):
             raise RuntimeError("Producción requiere REGISTRATION_IDENTITY_HMAC_KEY independiente y estable de al menos 32 caracteres.")
         app.config["REGISTRATION_IDENTITY_HMAC_KEY"] = identity_key
         email_encryption_key = os.getenv("REGISTRATION_EMAIL_ENCRYPTION_KEY", "")
-        if len(email_encryption_key) < 32 or email_encryption_key in {secret, jwt_secret, identity_key}:
+        if (len(email_encryption_key) < 32 or email_encryption_key in {secret, jwt_secret, identity_key}
+                or any(value in email_encryption_key.lower() for value in obvious_placeholders)):
             raise RuntimeError("Producción requiere REGISTRATION_EMAIL_ENCRYPTION_KEY independiente y estable de al menos 32 caracteres.")
         app.config["REGISTRATION_EMAIL_ENCRYPTION_KEY"] = email_encryption_key
-        if app.config.get("CORS_ORIGINS") == "*":
-            raise RuntimeError("Producción requiere CORS_ORIGINS explícito.")
+        cors_origins = [item.strip() for item in str(app.config.get("CORS_ORIGINS") or "").split(",") if item.strip()]
+        if not cors_origins or any(
+            item == "*" or (lambda parsed: parsed.scheme != "https" or not parsed.hostname
+                            or parsed.username or parsed.password or parsed.query or parsed.fragment
+                            or parsed.path not in {"", "/"})(urlparse(item))
+            for item in cors_origins
+        ):
+            raise RuntimeError("Producción requiere CORS_ORIGINS con orígenes HTTPS explícitos.")
+        app.config["CORS_ORIGINS"] = cors_origins
+        if os.getenv("SESSION_COOKIE_SECURE", "true").strip().lower() not in {"1", "true", "yes", "on"}:
+            raise RuntimeError("Producción requiere SESSION_COOKIE_SECURE=true.")
         if app.config.get("RECOVERY_MAIL_BACKEND") == "memory":
             raise RuntimeError("Producción no permite el proveedor de correo en memoria.")
         raw_database_url = os.getenv("DATABASE_URL", "").strip()
@@ -213,6 +228,9 @@ def create_app(config_name=None):
         return response
 
     # Register CLI commands
+    from app.staging_preflight import register_staging_preflight
+    register_staging_preflight(app)
+
     @app.cli.command('check-birthdays')
     def check_birthdays():
         """Execute the daily birthday campaign."""
