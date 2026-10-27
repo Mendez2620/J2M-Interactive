@@ -6,13 +6,14 @@ from urllib.request import urlopen
 
 
 WORKER_COMMANDS = {
-    "registration-worker": "run-registration-email-worker",
     "google-wallet-worker": "run-google-wallet-sync-worker",
 }
 
 
 def _detect_process_type(commandline):
     """Fail closed on ambiguous PID 1; detect legacy Railway services without env."""
+    if "run-registration-email-worker" in commandline:
+        return None
     matches = [kind for kind, command in WORKER_COMMANDS.items() if command in commandline]
     if len(matches) == 1:
         return matches[0]

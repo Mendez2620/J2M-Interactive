@@ -1,29 +1,26 @@
 import hashlib
 import hmac
-import secrets
 from datetime import datetime, timedelta, timezone
 
 from flask import (
     Blueprint, current_app, jsonify, redirect, render_template, request,
     send_file, session, url_for,
 )
-from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from app.email_service import MailDeliveryError
 from app.extensions import db
 from app.models import (
     Business, Customer, CustomerRecoveryAuthorization,
-    CustomerRecoveryChallenge, CustomerRecoveryRateLimit,
+    CustomerRecoveryRateLimit,
 )
-from app.security import valid_email, wants_json
+from app.security import wants_json
 from app.services import AppleWalletService, GoogleWalletService
 from app.services.google_wallet import GoogleWalletAPIError, GoogleWalletConfigurationError
 
 
 recovery_bp = Blueprint("recovery", __name__)
-GENERIC_REQUEST_MESSAGE = "Si existe una tarjeta asociada a ese correo, recibirás instrucciones para recuperarla."
+GENERIC_REQUEST_MESSAGE = "La recuperación pública está deshabilitada. Solicita asistencia autorizada directamente al negocio."
 
 
 def _utcnow():
@@ -75,16 +72,6 @@ def _business_or_404(slug):
     return Business.query.filter_by(slug=slug).first_or_404()
 
 
-def _generic_request_response(business):
-    if wants_json():
-        return jsonify({"status": "accepted", "message": GENERIC_REQUEST_MESSAGE}), 200
-    return render_template(
-        "recover.html", business=business, customer=None,
-        challenge_pending=False, google_mock=False,
-        notice=GENERIC_REQUEST_MESSAGE,
-    ), 200
-
-
 def _reserve_rate_limit(scope, business_scope, key_hash, limit, now, window_seconds):
     """Atomically claim one persistent quota slot, including under concurrency."""
     table = CustomerRecoveryRateLimit.__table__
@@ -125,7 +112,7 @@ def recover(business_slug):
     google_mode = current_app.config.get("GOOGLE_WALLET_MODE", "mock") if customer else "disabled"
     return render_template(
         "recover.html", business=business, customer=customer,
-        challenge_pending=bool(session.get("customer_recovery_challenge_id")),
+        challenge_pending=False,
         google_enabled=google_mode != "disabled",
         google_mock=google_mode == "mock",
         notice=GENERIC_REQUEST_MESSAGE if request.args.get("requested") else None,
@@ -135,136 +122,19 @@ def recover(business_slug):
 @recovery_bp.route("/recover/<business_slug>/request", methods=["POST"])
 def request_recovery(business_slug):
     business = _business_or_404(business_slug)
-    _clear_recovery_session(revoke=True)
-    email = (request.get_json(silent=True) or request.form).get("email", "").strip().lower()
-    now = _utcnow()
-    retention_start = now - timedelta(seconds=current_app.config["RECOVERY_CHALLENGE_RETENTION"])
-    CustomerRecoveryChallenge.query.filter(CustomerRecoveryChallenge.created_at < retention_start).delete(synchronize_session=False)
-    email_hash = _hmac(email, "recovery-email")
-    ip_hash = _hmac(request.remote_addr or "unknown", "recovery-ip")
-    allowed = business.is_active and valid_email(email)
-    if allowed:
-        allowed = _reserve_rate_limit(
-            "email", business.id, email_hash,
-            current_app.config["RECOVERY_REQUEST_LIMIT_EMAIL"], now,
-            current_app.config["RECOVERY_RATE_WINDOW"],
-        ) and _reserve_rate_limit(
-            "ip", 0, ip_hash,
-            current_app.config["RECOVERY_REQUEST_LIMIT_IP"], now,
-            current_app.config["RECOVERY_RATE_WINDOW"],
-        )
-        if allowed:
-            db.session.commit()
-        else:
-            db.session.rollback()
-    if not allowed:
-        return _generic_request_response(business)
-    customers = []
-    if allowed:
-        customers = Customer.query.filter(
-            Customer.business_id == business.id,
-            func.lower(Customer.email) == email,
-        ).limit(2).all()
-
-    code = f"{secrets.randbelow(100_000_000):08d}"
-    challenge_id = secrets.token_hex(18)
-    challenge = CustomerRecoveryChallenge(
-        id=challenge_id,
-        business_id=business.id,
-        customer_id=customers[0].id if len(customers) == 1 else None,
-        email_hash=email_hash,
-        ip_hash=ip_hash,
-        code_hash=_hmac(f"{challenge_id}:{code}", "recovery-code"),
-        expires_at=now + timedelta(seconds=current_app.config["RECOVERY_CODE_MAX_AGE"]),
-    )
-    db.session.add(challenge)
-    CustomerRecoveryChallenge.query.filter(
-        CustomerRecoveryChallenge.business_id == business.id,
-        CustomerRecoveryChallenge.email_hash == email_hash,
-        CustomerRecoveryChallenge.id != challenge.id,
-        CustomerRecoveryChallenge.consumed_at.is_(None),
-    ).update({CustomerRecoveryChallenge.consumed_at: now}, synchronize_session=False)
-
-    if allowed and len(customers) == 1:
-        try:
-            current_app.extensions["recovery_mailer"].send_recovery_code(email, code, business.name)
-        except MailDeliveryError:
-            db.session.rollback()
-            CustomerRecoveryChallenge.query.filter(
-                CustomerRecoveryChallenge.business_id == business.id,
-                CustomerRecoveryChallenge.email_hash == email_hash,
-                CustomerRecoveryChallenge.consumed_at.is_(None),
-            ).update({CustomerRecoveryChallenge.consumed_at: now}, synchronize_session=False)
-            challenge = CustomerRecoveryChallenge(
-                id=secrets.token_hex(18), business_id=business.id, customer_id=None,
-                email_hash=email_hash, ip_hash=ip_hash,
-                code_hash=_hmac(secrets.token_urlsafe(32), "recovery-code"),
-                expires_at=now + timedelta(seconds=current_app.config["RECOVERY_CODE_MAX_AGE"]),
-            )
-            db.session.add(challenge)
-
-    db.session.commit()
-    session["customer_recovery_challenge_id"] = challenge.id
     if wants_json():
-        return jsonify({"status": "accepted", "message": GENERIC_REQUEST_MESSAGE}), 200
-    return redirect(url_for("recovery.recover", business_slug=business.slug, requested="1"))
+        return jsonify({"status": "unavailable", "message": GENERIC_REQUEST_MESSAGE}), 410
+    return render_template(
+        "recover.html", business=business, customer=None,
+        challenge_pending=False, google_mock=False,
+        notice=GENERIC_REQUEST_MESSAGE,
+    ), 410
 
 
 @recovery_bp.route("/recover/<business_slug>/verify", methods=["POST"])
 def verify_recovery(business_slug):
     business = _business_or_404(business_slug)
-    challenge_id = session.get("customer_recovery_challenge_id")
-    code = str((request.get_json(silent=True) or request.form).get("code", "")).strip()
-    challenge = db.session.get(CustomerRecoveryChallenge, challenge_id) if challenge_id else None
-    now = _utcnow()
-    valid_challenge = bool(
-        challenge and challenge.business_id == business.id and challenge.customer_id
-        and challenge.consumed_at is None and challenge.expires_at > now
-        and challenge.attempts < current_app.config["RECOVERY_MAX_ATTEMPTS"]
-    )
-    supplied_hash = _hmac(f"{challenge.id}:{code}", "recovery-code") if challenge else _hmac(code, "recovery-code")
-    code_matches = bool(valid_challenge and hmac.compare_digest(challenge.code_hash, supplied_hash))
-    if not code_matches:
-        if challenge and challenge.business_id == business.id and challenge.consumed_at is None and challenge.expires_at > now:
-            CustomerRecoveryChallenge.query.filter(
-                CustomerRecoveryChallenge.id == challenge.id,
-                CustomerRecoveryChallenge.consumed_at.is_(None),
-                CustomerRecoveryChallenge.attempts < current_app.config["RECOVERY_MAX_ATTEMPTS"],
-            ).update({CustomerRecoveryChallenge.attempts: CustomerRecoveryChallenge.attempts + 1}, synchronize_session=False)
-            db.session.commit()
-        message = "El código no es válido o ya expiró."
-        return (jsonify({"status": "error", "message": message}), 400) if wants_json() else (
-            render_template("recover.html", business=business, customer=None, challenge_pending=True, google_mock=False, error=message), 400
-        )
-
-    consumed = CustomerRecoveryChallenge.query.filter(
-        CustomerRecoveryChallenge.id == challenge.id,
-        CustomerRecoveryChallenge.business_id == business.id,
-        CustomerRecoveryChallenge.customer_id == challenge.customer_id,
-        CustomerRecoveryChallenge.code_hash == supplied_hash,
-        CustomerRecoveryChallenge.consumed_at.is_(None),
-        CustomerRecoveryChallenge.expires_at > now,
-        CustomerRecoveryChallenge.attempts < current_app.config["RECOVERY_MAX_ATTEMPTS"],
-    ).update({CustomerRecoveryChallenge.consumed_at: now}, synchronize_session=False)
-    if consumed != 1:
-        db.session.rollback()
-        return jsonify({"status": "error", "message": "El código no es válido o ya expiró."}), 409
-
-    token = secrets.token_urlsafe(32)
-    authorization = CustomerRecoveryAuthorization(
-        business_id=business.id,
-        customer_id=challenge.customer_id,
-        token_hash=_token_hash(token),
-        expires_at=now + timedelta(seconds=current_app.config["RECOVERY_SESSION_MAX_AGE"]),
-    )
-    db.session.add(authorization)
-    db.session.commit()
-    session.pop("customer_recovery_challenge_id", None)
-    session["customer_recovery_authorization_id"] = authorization.id
-    session["customer_recovery_authorization_token"] = token
-    if wants_json():
-        return jsonify({"status": "success", "redirect_url": url_for("recovery.recover", business_slug=business.slug)}), 200
-    return redirect(url_for("recovery.recover", business_slug=business.slug))
+    return jsonify({"status": "error", "message": "La recuperación por código ya no está disponible."}), 410
 
 
 @recovery_bp.route("/recover/<business_slug>/end", methods=["POST"])
