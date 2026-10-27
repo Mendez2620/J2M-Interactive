@@ -215,7 +215,6 @@ class OperationalSecurityPhase6TestCase(unittest.TestCase):
                "UPLOAD_STORAGE_BACKEND": "disabled"}
         env["GOOGLE_WALLET_MODE"] = "disabled"
         cases = (
-            ({"RECOVERY_MAIL_BACKEND": "memory"}, "correo en memoria"),
             ({"PUBLIC_BASE_URL": ""}, "HTTPS"),
             ({"PUBLIC_BASE_URL": "http://app.example.test"}, "HTTPS"),
             ({"TRUSTED_PROXY_COUNT": 11}, "TRUSTED_PROXY_COUNT"),

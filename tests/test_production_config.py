@@ -43,14 +43,13 @@ class ProductionConfigTestCase(unittest.TestCase):
                  self.assertRaisesRegex(RuntimeError, "REGISTRATION_IDENTITY_HMAC_KEY"):
                 create_app("production")
 
-    def test_production_requires_independent_registration_email_encryption_key(self):
-        valid = self.valid_environment()
-        for encryption_key in ("", "short", valid["SECRET_KEY"], valid["JWT_SECRET_KEY"], valid["REGISTRATION_IDENTITY_HMAC_KEY"]):
-            with self.subTest(encryption_key=encryption_key), \
-                 patch.dict(os.environ, self.valid_environment(REGISTRATION_EMAIL_ENCRYPTION_KEY=encryption_key), clear=True), \
-                 patch.object(ProductionConfig, "PUBLIC_BASE_URL", "https://app.example.com"), \
-                 self.assertRaisesRegex(RuntimeError, "REGISTRATION_EMAIL_ENCRYPTION_KEY"):
-                create_app("production")
+    def test_production_no_longer_depends_on_registration_email_encryption_key(self):
+        environment = self.valid_environment()
+        environment.pop("REGISTRATION_EMAIL_ENCRYPTION_KEY")
+        with patch.dict(os.environ, environment, clear=True), \
+             patch.object(ProductionConfig, "PUBLIC_BASE_URL", "https://app.example.com"):
+            app = create_app("production")
+        self.assertEqual(app.config["APP_ENV"], "production")
 
     def test_production_rejects_debug_and_runs_safely_when_disabled(self):
         with patch.dict(os.environ, self.valid_environment(FLASK_DEBUG="true"), clear=True), \
