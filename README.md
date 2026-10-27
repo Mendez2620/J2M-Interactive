@@ -127,11 +127,15 @@ La aplicación estará disponible en:
 
 ## 🧪 Ejecución de Pruebas Unitarias
 
-El proyecto cuenta con una suite completa de **92 pruebas unitarias e integración**. El mismo comando se ejecuta automáticamente en GitHub Actions para pushes y pull requests:
+El proyecto mantiene una suite creciente de pruebas unitarias e integración. El mismo comando se ejecuta automáticamente en GitHub Actions para pushes y pull requests:
 
 ```bash
 python -m unittest discover tests -v
 ```
+
+Antes de autorizar un staging, ejecute el diagnóstico de solo lectura descrito en
+[`docs/staging-readiness.md`](docs/staging-readiness.md). El comando no aplica
+migraciones, no inicia workers y no contacta proveedores externos.
 
 ---
 
