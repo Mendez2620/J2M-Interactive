@@ -85,6 +85,11 @@ class StagingDeploymentTestCase(unittest.TestCase):
         self.assertTrue(check_health("google-wallet-worker", commandline="flask --app run.py run-google-wallet-sync-worker"))
         self.assertFalse(check_health("registration-worker", commandline="flask --app run.py run-google-wallet-sync-worker"))
         self.assertFalse(check_health("unknown", commandline="anything"))
+        self.assertTrue(check_health("auto", commandline="flask --app run.py run-google-wallet-sync-worker"))
+        self.assertTrue(check_health("auto", commandline="flask --app run.py run-registration-email-worker"))
+        self.assertTrue(check_health("auto", commandline="gunicorn --bind 0.0.0.0:8000 run:app", http_open=lambda *_a, **_k: Response()))
+        self.assertFalse(check_health("auto", commandline="unrelated-worker-command"))
+        self.assertFalse(check_health("auto", commandline="run-google-wallet-sync-worker run-registration-email-worker"))
 
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
         self.assertIn("python scripts/container_healthcheck.py", dockerfile)
