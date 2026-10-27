@@ -23,6 +23,7 @@ EXPECTED_TABLES = {
     "auth_rate_limit_slots",
     "customer_registration_challenges", "customer_registration_identity_claims",
     "registration_email_jobs",
+    "promoters", "promoter_sessions", "referral_attributions",
 }
 
 
@@ -92,7 +93,7 @@ class MigrationTestCase(unittest.TestCase):
                 self.assertEqual(connection.execute("SELECT id, name, slug FROM businesses").fetchall(), [(1, "Negocio existente", "existente")])
                 columns = {row[1] for row in connection.execute("PRAGMA table_info(businesses)")}
                 self.assertTrue({"logo_path", "cover_path"} <= columns)
-                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "e8f9a0b1c2d3")
+                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "f9a0b1c2d3e4")
                 self.assertEqual(connection.execute("SELECT web_access_enabled, mobile_access_enabled FROM businesses WHERE id = 1").fetchone(), (0, 0))
                 self.assertEqual(connection.execute("SELECT visual_theme, font_style, text_size FROM businesses WHERE id = 1").fetchone(), ("modern", "modern", "standard"))
 
@@ -109,7 +110,7 @@ class MigrationTestCase(unittest.TestCase):
                 self.assertEqual(connection.execute("SELECT name FROM businesses WHERE id = 1").fetchone()[0], "Conservar")
                 columns = {row[1] for row in connection.execute("PRAGMA table_info(businesses)")}
                 self.assertTrue({"logo_path", "cover_path"} <= columns)
-                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "e8f9a0b1c2d3")
+                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "f9a0b1c2d3e4")
 
     def test_idempotency_migration_preserves_rows_and_scopes_keys_by_business(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
@@ -158,7 +159,7 @@ class MigrationTestCase(unittest.TestCase):
                 self.assertEqual(connection.execute("SELECT username, auth_version, permissions FROM staff WHERE id = 1").fetchone(), ("gerente", 3, "view_stats,manage_cashiers"))
                 audit_columns = {row[1]: row[3] for row in connection.execute("PRAGMA table_info(access_audits)")}
                 self.assertEqual(audit_columns["affected_staff_id"], 0)
-                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "e8f9a0b1c2d3")
+                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "f9a0b1c2d3e4")
 
     def test_customer_recovery_migration_preserves_customer_wallet_identity_and_transactions(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
