@@ -23,3 +23,7 @@ Los modos Google Wallet `disabled`, `mock` y `real` se conservan. Un `.pkpass` g
 - Apple obtiene el diseño vigente cuando se descarga o vuelve a solicitar el `.pkpass`. Un pase ya instalado requiere que Wallet consulte una actualización después de una notificación PassKit/APNs; guardar el diseño por sí solo no envía esa notificación.
 - Google actualiza la clase y los metadatos del objeto cuando el flujo real vuelve a ejecutar `ensure_resources`, por ejemplo durante una nueva emisión o recuperación. Guardar el diseño por sí solo no hace el `PATCH` remoto ni garantiza cuándo un pase instalado reflejará el cambio.
 - La entrega efectiva en pases instalados depende de credenciales, servicios externos, conectividad y notificaciones reales. No se validó con dispositivos físicos en esta fase.
+
+## Vista previa de las instrucciones
+
+El editor diferencia «Mensaje de la tarjeta» de «Cómo utilizar la tarjeta (detalles)». Las instrucciones se previsualizan en tiempo real en secciones de detalles: el reverso de Apple y los módulos de información de Google, no en el frente. Se renderizan como texto con `textContent`, no como HTML. Las vistas previas son aproximaciones: guardar no hace `PATCH` de tarjetas instaladas ni envía una notificación de actualización.
