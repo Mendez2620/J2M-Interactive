@@ -24,7 +24,10 @@ class Promoter(db.Model):
     business = db.relationship("Business", back_populates="promoters")
     sessions = db.relationship("PromoterSession", back_populates="promoter", cascade="all, delete-orphan", passive_deletes=True)
 
-    __table_args__ = (db.UniqueConstraint("business_id", "username", name="uq_promoter_business_username"),)
+    __table_args__ = (
+        db.UniqueConstraint("business_id", "username", name="uq_promoter_business_username"),
+        db.UniqueConstraint("business_id", "id", name="uq_promoters_business_id_id"),
+    )
 
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
@@ -51,13 +54,21 @@ class ReferralAttribution(db.Model):
 
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     business_id = db.Column(db.Integer, db.ForeignKey("businesses.id", ondelete="CASCADE"), nullable=False, index=True)
-    promoter_id = db.Column(db.Integer, db.ForeignKey("promoters.id", ondelete="RESTRICT"), nullable=False, index=True)
-    customer_id = db.Column(db.Integer, db.ForeignKey("customers.id", ondelete="RESTRICT"), nullable=False, unique=True)
+    promoter_id = db.Column(db.Integer, nullable=False, index=True)
+    customer_id = db.Column(db.Integer, nullable=False, unique=True)
     created_at = db.Column(db.DateTime, nullable=False, default=lambda: datetime.now(timezone.utc), index=True)
 
-    promoter = db.relationship("Promoter")
-    customer = db.relationship("Customer")
+    promoter = db.relationship("Promoter", overlaps="customer")
+    customer = db.relationship("Customer", overlaps="promoter")
     __table_args__ = (
         db.CheckConstraint("business_id > 0", name="ck_referral_business_positive"),
         db.UniqueConstraint("business_id", "customer_id", name="uq_referral_business_customer"),
+        db.ForeignKeyConstraint(
+            ["business_id", "promoter_id"], ["promoters.business_id", "promoters.id"],
+            ondelete="RESTRICT", name="fk_referral_promoter_tenant",
+        ),
+        db.ForeignKeyConstraint(
+            ["business_id", "customer_id"], ["customers.business_id", "customers.id"],
+            ondelete="RESTRICT", name="fk_referral_customer_tenant",
+        ),
     )

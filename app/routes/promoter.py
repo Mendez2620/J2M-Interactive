@@ -6,6 +6,7 @@ from reportlab.graphics.barcode.qr import QrCodeWidget
 from reportlab.graphics.shapes import Drawing
 from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
+from urllib.parse import urlparse
 
 from app.access_audit import access_audit
 from app.extensions import db
@@ -27,7 +28,23 @@ def _utcnow():
 
 
 def _referral_url(promoter):
-    base = (current_app.config.get("PUBLIC_BASE_URL") or request.url_root.rstrip("/")).rstrip("/")
+    configured = (current_app.config.get("PUBLIC_BASE_URL") or "").strip().rstrip("/")
+    parsed = urlparse(configured)
+    valid_configured = bool(
+        parsed.scheme in {"http", "https"} and parsed.hostname and not parsed.username
+        and not parsed.password and not parsed.query and not parsed.fragment
+        and parsed.path in {"", "/"}
+    )
+    if current_app.config.get("APP_ENV") == "production":
+        if not valid_configured or parsed.scheme != "https":
+            raise RuntimeError("El origen público canónico no está configurado de forma segura.")
+        base = configured
+    elif valid_configured:
+        base = configured
+    else:
+        request_origin = urlparse(request.url_root)
+        local_hosts = {"localhost", "127.0.0.1", "::1"}
+        base = request.url_root.rstrip("/") if request_origin.hostname in local_hosts else "http://localhost"
     return f"{base}/join/{promoter.business.slug}?ref={promoter.referral_code}"
 
 
@@ -86,12 +103,25 @@ def promoter_portal():
 @promoter_bp.route("/promoter/referral-qr.svg")
 @promoter_required
 def promoter_qr():
-    qr = QrCodeWidget(_referral_url(g.promoter))
+    return _qr_response(g.promoter)
+
+
+def _qr_response(promoter):
+    qr = QrCodeWidget(_referral_url(promoter))
     bounds = qr.getBounds()
     drawing = Drawing(240, 240, transform=[240 / (bounds[2] - bounds[0]), 0, 0, 240 / (bounds[3] - bounds[1]), 0, 0])
     drawing.add(qr)
-    output = BytesIO(renderSVG.drawToString(drawing).encode("utf-8"))
-    return send_file(output, mimetype="image/svg+xml", download_name="codigo-referido.svg")
+    return send_file(
+        BytesIO(renderSVG.drawToString(drawing).encode("utf-8")),
+        mimetype="image/svg+xml", download_name="codigo-referido.svg",
+    )
+
+
+@promoter_bp.route("/admin/business/<int:business_id>/promoters/<int:promoter_id>/qr.svg")
+@platform_admin_required
+def admin_promoter_qr(business_id, promoter_id):
+    promoter = Promoter.query.filter_by(id=promoter_id, business_id=business_id).first_or_404()
+    return _qr_response(promoter)
 
 
 @promoter_bp.route("/admin/business/<int:business_id>/promoters", methods=["GET", "POST"])
@@ -136,8 +166,25 @@ def admin_promoters(business_id):
                 db.session.rollback()
                 error, status = "Ya existe un promotor con ese usuario.", 409
     promoters = Promoter.query.filter_by(business_id=business.id).order_by(Promoter.created_at.desc()).all()
-    counts = dict(db.session.query(ReferralAttribution.promoter_id, func.count(ReferralAttribution.id)).filter_by(business_id=business.id).group_by(ReferralAttribution.promoter_id).all())
-    return render_template("admin/promoters.html", business=business, promoters=promoters, counts=counts, error=error), status
+    period = request.args.get("period", "30")
+    if period not in {"7", "30", "90", "all"}:
+        period = "30"
+    start = None if period == "all" else _utcnow() - timedelta(days=int(period))
+    scoped = ReferralAttribution.query.filter_by(business_id=business.id)
+    period_scoped = scoped if start is None else scoped.filter(ReferralAttribution.created_at >= start)
+    counts = dict(period_scoped.with_entities(
+        ReferralAttribution.promoter_id, func.count(ReferralAttribution.id)
+    ).group_by(ReferralAttribution.promoter_id).all())
+    trend = period_scoped.with_entities(
+        func.date(ReferralAttribution.created_at), func.count(ReferralAttribution.id)
+    ).group_by(func.date(ReferralAttribution.created_at)).order_by(func.date(ReferralAttribution.created_at)).all()
+    links = {item.id: _referral_url(item) for item in promoters}
+    return render_template(
+        "admin/promoters.html", business=business, promoters=promoters, counts=counts,
+        links=links, error=error, period=period, period_total=sum(counts.values()),
+        all_total=scoped.count(), active_total=sum(1 for item in promoters if item.is_active),
+        suspended_total=sum(1 for item in promoters if not item.is_active), trend=trend,
+    ), status
 
 
 @promoter_bp.route("/admin/business/<int:business_id>/promoters/<int:promoter_id>", methods=["POST"])

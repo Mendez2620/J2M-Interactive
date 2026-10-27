@@ -1,4 +1,5 @@
 import hashlib
+import hmac
 import secrets
 import time
 from datetime import datetime, timedelta, timezone
@@ -27,6 +28,7 @@ def create_promoter_session(promoter):
     session.permanent = False
     session["promoter_id"] = promoter.id
     session["promoter_session_id"] = session_id
+    session["promoter_session_verifier"] = verifier
     session["promoter_auth_version"] = promoter.auth_version
     session["promoter_last_active_at"] = time.time()
     csrf_token()
@@ -34,10 +36,13 @@ def create_promoter_session(promoter):
 
 def current_promoter():
     promoter_id, session_id = session.get("promoter_id"), session.get("promoter_session_id")
-    if not promoter_id or not session_id:
+    verifier = session.get("promoter_session_verifier")
+    if not promoter_id or not session_id or not isinstance(verifier, str):
         return None
     promoter, auth_session = db.session.get(Promoter, promoter_id), db.session.get(PromoterSession, session_id)
+    verifier_hash = hashlib.sha256(verifier.encode()).hexdigest()
     if (not promoter or not auth_session or auth_session.promoter_id != promoter.id
+            or not hmac.compare_digest(auth_session.verifier_hash, verifier_hash)
             or auth_session.revoked_at or auth_session.expires_at <= _now()
             or promoter.auth_version != session.get("promoter_auth_version")
             or not promoter.is_active or not promoter.business or not promoter.business.is_active):
@@ -58,7 +63,8 @@ def revoke_current_promoter_session():
     if auth_session and not auth_session.revoked_at:
         auth_session.revoked_at = _now()
         db.session.commit()
-    for key in ("promoter_id", "promoter_session_id", "promoter_auth_version", "promoter_last_active_at"):
+    for key in ("promoter_id", "promoter_session_id", "promoter_session_verifier",
+                "promoter_auth_version", "promoter_last_active_at"):
         session.pop(key, None)
 
 

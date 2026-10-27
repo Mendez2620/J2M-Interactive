@@ -4,6 +4,7 @@ import logging
 import os
 import secrets
 import time
+from urllib.parse import urlparse
 from datetime import datetime, timezone
 from flask import Flask, g, jsonify, redirect, render_template, request, url_for
 from sqlalchemy.engine import make_url
@@ -24,6 +25,7 @@ def create_app(config_name=None):
     app = Flask(__name__)
     config_class = config_by_name.get(config_name, config_by_name["default"])
     app.config.from_object(config_class)
+    app.config["APP_ENV"] = config_name
     from app.session_policy import RoleAwareSessionInterface
     app.session_interface = RoleAwareSessionInterface()
 
@@ -71,7 +73,11 @@ def create_app(config_name=None):
         app.config["SQLALCHEMY_DATABASE_URI"] = normalized_database_url
         app.config["SQLALCHEMY_ENGINE_OPTIONS"] = postgres_engine_options(effective_sslmode)
         public_base_url = app.config.get("PUBLIC_BASE_URL", "")
-        if not public_base_url or not public_base_url.startswith("https://"):
+        parsed_public_url = urlparse(public_base_url)
+        if (not public_base_url or parsed_public_url.scheme != "https"
+                or not parsed_public_url.hostname or parsed_public_url.username
+                or parsed_public_url.password or parsed_public_url.query
+                or parsed_public_url.fragment or parsed_public_url.path not in {"", "/"}):
             raise RuntimeError("PUBLIC_BASE_URL debe utilizar HTTPS en producción.")
         proxy_count = app.config.get("TRUSTED_PROXY_COUNT", 0)
         if proxy_count < 0 or proxy_count > 10:

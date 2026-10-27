@@ -33,6 +33,7 @@ def upgrade():
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("referral_code"),
         sa.UniqueConstraint("business_id", "username", name="uq_promoter_business_username"),
+        sa.UniqueConstraint("business_id", "id", name="uq_promoters_business_id_id"),
         )
         op.create_index("ix_promoters_business_id", "promoters", ["business_id"])
     if not inspector.has_table("promoter_sessions"):
@@ -54,6 +55,9 @@ def upgrade():
             batch.add_column(sa.Column("promoter_id", sa.Integer(), nullable=True))
             batch.create_foreign_key("fk_registration_challenge_promoter", "promoters", ["promoter_id"], ["id"], ondelete="SET NULL")
             batch.create_index("ix_registration_challenge_promoter_id", ["promoter_id"])
+    customer_indexes = {index["name"] for index in inspector.get_indexes("customers")}
+    if "uq_customers_business_id_id" not in customer_indexes:
+        op.create_index("uq_customers_business_id_id", "customers", ["business_id", "id"], unique=True)
     if not inspector.has_table("referral_attributions"):
         op.create_table(
         "referral_attributions",
@@ -64,8 +68,14 @@ def upgrade():
         sa.Column("created_at", sa.DateTime(), nullable=False),
         sa.CheckConstraint("business_id > 0", name="ck_referral_business_positive"),
         sa.ForeignKeyConstraint(["business_id"], ["businesses.id"], ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(["customer_id"], ["customers.id"], ondelete="RESTRICT"),
-        sa.ForeignKeyConstraint(["promoter_id"], ["promoters.id"], ondelete="RESTRICT"),
+        sa.ForeignKeyConstraint(
+            ["business_id", "customer_id"], ["customers.business_id", "customers.id"],
+            ondelete="RESTRICT", name="fk_referral_customer_tenant",
+        ),
+        sa.ForeignKeyConstraint(
+            ["business_id", "promoter_id"], ["promoters.business_id", "promoters.id"],
+            ondelete="RESTRICT", name="fk_referral_promoter_tenant",
+        ),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("customer_id"),
         sa.UniqueConstraint("business_id", "customer_id", name="uq_referral_business_customer"),

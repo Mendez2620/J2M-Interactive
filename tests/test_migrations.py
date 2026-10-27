@@ -60,6 +60,9 @@ class MigrationTestCase(unittest.TestCase):
                 email_job_columns = {row[1]: row for row in connection.execute("PRAGMA table_info(registration_email_jobs)")}
                 self.assertTrue({"challenge_id", "encrypted_code", "status", "attempts", "next_attempt_at", "lease_token"} <= email_job_columns.keys())
                 self.assertEqual(email_job_columns["encrypted_code"][3], 0)
+                referral_fks = connection.execute("PRAGMA foreign_key_list(referral_attributions)").fetchall()
+                self.assertGreaterEqual(sum(1 for row in referral_fks if row[2] == "promoters"), 2)
+                self.assertGreaterEqual(sum(1 for row in referral_fks if row[2] == "customers"), 2)
 
     def test_upgrade_preserves_existing_business_data(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
