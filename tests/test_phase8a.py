@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from app import create_app
 from app.extensions import db
@@ -51,6 +52,53 @@ class Phase8ATestCase(unittest.TestCase):
         self.assertNotIn('name="email"', html)
         self.assertNotIn("verification-form", html)
         self.assertNotIn('name="birthdate" required', html)
+        self.assertIn("Solicita ayuda directamente al negocio", html)
+        self.assertNotIn("Recupérala aquí", html)
+
+    def test_wallet_delivery_can_resume_only_in_creating_session(self):
+        created = self.client.post("/join/uno", json=self.payload()).get_json()
+        delivery_url = created["wallet_delivery_url"]
+        first = self.client.get(delivery_url)
+        second = self.client.get(delivery_url)
+        self.assertEqual((first.status_code, second.status_code), (200, 200))
+        self.assertEqual(first.get_json()["customer"]["id"], Customer.query.one().id)
+        self.assertTrue(first.get_json()["apple_wallet_url"].startswith("/api/customers/1/wallet/apple?token="))
+        self.assertTrue(second.get_json()["apple_wallet_url"].startswith("/api/customers/1/wallet/apple?token="))
+        self.assertEqual(Customer.query.count(), 1)
+
+        other_browser = self.app.test_client()
+        self.assertEqual(other_browser.get(delivery_url).status_code, 403)
+        cross_tenant = delivery_url.replace("/join/uno/", "/join/dos/")
+        self.assertEqual(self.client.get(cross_tenant).status_code, 403)
+
+    def test_wallet_delivery_expires_and_reload_offers_active_delivery(self):
+        created = self.client.post("/join/uno", json=self.payload()).get_json()
+        page = self.client.get("/join/uno").get_data(as_text=True)
+        self.assertIn(created["wallet_delivery_url"].replace("&", "\\u0026"), page)
+        with self.client.session_transaction() as browser:
+            delivery = dict(browser["customer_wallet_delivery"])
+            delivery["expires_at"] = 0
+            browser["customer_wallet_delivery"] = delivery
+        self.assertEqual(self.client.get(created["wallet_delivery_url"]).status_code, 403)
+        self.assertNotIn("wallet-delivery?credential=", self.client.get("/join/uno").get_data(as_text=True))
+
+    def test_wallet_provider_failure_does_not_consume_delivery_credential(self):
+        created = self.client.post("/join/uno", json=self.payload()).get_json()
+        with patch("app.routes.customer.AppleWalletService.generate_pkpass", side_effect=RuntimeError("provider unavailable")):
+            self.assertEqual(self.client.get(created["apple_wallet_url"]).status_code, 500)
+        resumed = self.client.get(created["wallet_delivery_url"])
+        self.assertEqual(resumed.status_code, 200)
+        self.assertEqual(resumed.get_json()["customer"]["id"], Customer.query.one().id)
+
+    def test_duplicate_attempts_persistently_consume_phone_and_ip_limits(self):
+        self.app.config.update(REGISTRATION_REQUEST_LIMIT_PHONE=2, REGISTRATION_REQUEST_LIMIT_IP=3)
+        self.assertEqual(self.client.post("/join/uno", json=self.payload()).status_code, 201)
+        duplicate = self.client.post("/join/uno", json=self.payload())
+        limited = self.client.post("/join/uno", json=self.payload())
+        self.assertEqual((duplicate.status_code, limited.status_code), (409, 429))
+        self.assertNotIn("existe", duplicate.get_data(as_text=True).lower())
+        self.assertEqual(Customer.query.count(), 1)
+        self.assertEqual(CustomerRegistrationIdentityClaim.query.count(), 1)
 
     def test_duplicate_is_rejected_without_mutation_and_claim_is_tenant_scoped(self):
         self.assertEqual(self.client.post("/join/uno", json=self.payload()).status_code, 201)

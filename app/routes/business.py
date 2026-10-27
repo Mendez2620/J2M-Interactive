@@ -1,8 +1,9 @@
 import hashlib
 import hmac
+import secrets
 from datetime import date, datetime, timezone
 
-from flask import Blueprint, current_app, jsonify, render_template, request
+from flask import Blueprint, current_app, jsonify, render_template, request, session, url_for
 from sqlalchemy.exc import IntegrityError
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
@@ -14,6 +15,7 @@ from app.routes.customer_recovery import _reserve_rate_limit
 from app.wallet_access import issue_wallet_token
 
 business_bp = Blueprint("business", __name__)
+_WALLET_DELIVERY_SESSION_KEY = "customer_wallet_delivery"
 
 
 def _utcnow():
@@ -27,6 +29,54 @@ def _hmac(value, purpose):
 def _identity_hmac(value):
     key = current_app.config["REGISTRATION_IDENTITY_HMAC_KEY"].encode()
     return hmac.new(key, value.encode(), hashlib.sha256).hexdigest()
+
+
+def _start_wallet_delivery(customer):
+    credential = secrets.token_urlsafe(32)
+    session[_WALLET_DELIVERY_SESSION_KEY] = {
+        "business_id": customer.business_id,
+        "customer_id": customer.id,
+        "credential": credential,
+        "expires_at": int(datetime.now(timezone.utc).timestamp())
+        + current_app.config["WALLET_DELIVERY_MAX_AGE"],
+    }
+    return credential
+
+
+def _active_wallet_delivery(business, credential=None):
+    delivery = session.get(_WALLET_DELIVERY_SESSION_KEY)
+    now = int(datetime.now(timezone.utc).timestamp())
+    if not isinstance(delivery, dict) or delivery.get("expires_at", 0) <= now:
+        session.pop(_WALLET_DELIVERY_SESSION_KEY, None)
+        return None
+    expected = delivery.get("credential")
+    if (
+        delivery.get("business_id") != business.id
+        or not isinstance(expected, str)
+        or (credential is not None and not hmac.compare_digest(expected, credential))
+    ):
+        return None
+    customer = db.session.get(Customer, delivery.get("customer_id"))
+    if not customer or customer.business_id != business.id:
+        session.pop(_WALLET_DELIVERY_SESSION_KEY, None)
+        return None
+    return delivery, customer
+
+
+def _wallet_delivery_payload(business, customer, credential):
+    token = issue_wallet_token(customer)
+    google_url = None
+    if current_app.config.get("GOOGLE_WALLET_MODE") != "disabled":
+        google_url = f"/api/customers/{customer.id}/wallet/google?token={token}&format=redirect"
+    return {
+        "status": "success",
+        "customer": {"id": customer.id, "full_name": customer.full_name},
+        "google_wallet_url": google_url,
+        "apple_wallet_url": f"/api/customers/{customer.id}/wallet/apple?token={token}",
+        "wallet_delivery_url": url_for(
+            "business.resume_wallet_delivery", slug=business.slug, credential=credential
+        ),
+    }
 
 
 def _legal_document_hash(template_name, version):
@@ -140,11 +190,21 @@ def join_business(slug):
         promoter = Promoter.query.filter_by(
             business_id=business.id, referral_code=referral_code, is_active=True
         ).first() if referral_code and len(referral_code) <= 32 else None
+        active_delivery = _active_wallet_delivery(business)
+        wallet_delivery_url = None
+        if active_delivery:
+            delivery, _ = active_delivery
+            wallet_delivery_url = url_for(
+                "business.resume_wallet_delivery",
+                slug=business.slug,
+                credential=delivery["credential"],
+            )
         return render_template(
             "join.html", business=business,
             referral_context=_referral_context(promoter) if promoter else "",
             terms_version=current_app.config["TERMS_VERSION"],
             privacy_version=current_app.config["PRIVACY_NOTICE_VERSION"],
+            wallet_delivery_url=wallet_delivery_url,
         )
     data = _payload()
     if data is None:
@@ -156,16 +216,20 @@ def join_business(slug):
     now = _utcnow()
     phone_hash = _identity_hmac(phone)
     ip_hash = _hmac(request.remote_addr or "unknown", "registration-ip")
-    allowed = _reserve_rate_limit(
+    phone_allowed = _reserve_rate_limit(
         "reg_phone", business.id, phone_hash,
         current_app.config["REGISTRATION_REQUEST_LIMIT_PHONE"], now,
         current_app.config["REGISTRATION_RATE_WINDOW"],
-    ) and _reserve_rate_limit(
+    )
+    ip_allowed = _reserve_rate_limit(
         "reg_ip", 0, ip_hash,
         current_app.config["REGISTRATION_REQUEST_LIMIT_IP"], now,
         current_app.config["REGISTRATION_RATE_WINDOW"],
     )
-    if not allowed:
+    # Quota reservations must survive every later outcome, including duplicate
+    # identities and integrity conflicts.
+    db.session.commit()
+    if not (phone_allowed and ip_allowed):
         db.session.rollback()
         return jsonify({"status": "error", "message": "Demasiadas solicitudes. Intenta nuevamente más tarde."}), 429
 
@@ -191,7 +255,7 @@ def join_business(slug):
             return jsonify({"status": "error", "message": "El programa no está disponible en este momento."}), 403
         if Customer.query.filter_by(business_id=business.id, phone=phone).first():
             db.session.rollback()
-            return jsonify({"status": "error", "message": "Ya existe una tarjeta para este teléfono. Solicita asistencia al negocio."}), 409
+            return jsonify({"status": "error", "message": "No fue posible completar el registro. Solicita asistencia al negocio."}), 409
         db.session.add(customer)
         db.session.flush()
         db.session.add(CustomerRegistrationIdentityClaim(
@@ -211,16 +275,28 @@ def join_business(slug):
         db.session.commit()
     except IntegrityError:
         db.session.rollback()
-        return jsonify({"status": "error", "message": "Ya existe una tarjeta para este teléfono. Solicita asistencia al negocio."}), 409
+        return jsonify({"status": "error", "message": "No fue posible completar el registro. Solicita asistencia al negocio."}), 409
 
-    token = issue_wallet_token(customer)
-    google_url = f"/api/customers/{customer.id}/wallet/google?token={token}&format=redirect" if current_app.config.get("GOOGLE_WALLET_MODE") != "disabled" else None
-    return jsonify({
-        "status": "success", "message": "Tarjeta creada.",
-        "customer": {"id": customer.id, "full_name": customer.full_name},
-        "google_wallet_url": google_url,
-        "apple_wallet_url": f"/api/customers/{customer.id}/wallet/apple?token={token}",
-    }), 201
+    credential = _start_wallet_delivery(customer)
+    payload = _wallet_delivery_payload(business, customer, credential)
+    payload["message"] = "Tarjeta creada."
+    return jsonify(payload), 201
+
+
+@business_bp.get("/join/<slug>/wallet-delivery")
+def resume_wallet_delivery(slug):
+    business, error = _business(slug)
+    if error:
+        return error
+    credential = request.args.get("credential", "")
+    active_delivery = _active_wallet_delivery(business, credential)
+    if not active_delivery:
+        return jsonify({"status": "error", "message": "El acceso temporal a la tarjeta venció o no es válido."}), 403
+    _, customer = active_delivery
+    response = jsonify(_wallet_delivery_payload(business, customer, credential))
+    response.headers["Cache-Control"] = "no-store, private"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
 
 
 

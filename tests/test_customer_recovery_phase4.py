@@ -263,7 +263,8 @@ class CustomerRecoveryPhase4TestCase(unittest.TestCase):
 
     def test_join_link_and_phone_only_account_do_not_expose_secrets(self):
         join = self.client.get("/join/cafe-uno").get_data(as_text=True)
-        self.assertIn("¿Ya tienes una tarjeta? Recupérala aquí", join)
+        self.assertIn("¿Ya tienes una tarjeta? Solicita ayuda directamente al negocio.", join)
+        self.assertNotIn("Recupérala aquí", join)
         self.assertNotIn("customer-token-display", join)
         recovery = self.client.get("/recover/cafe-uno").get_data(as_text=True)
         self.assertNotIn("localStorage", recovery)

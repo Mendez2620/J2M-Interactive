@@ -14,4 +14,8 @@ Las columnas de correo, desafíos y trabajos del outbox se conservan para no des
 
 La recuperación pública está deshabilitada: nombre, fecha de nacimiento, teléfono y el QR operativo de caja no prueban legítima posesión. Los clientes históricos no pierden saldos, movimientos ni identificadores Wallet. Quien necesite recuperar una tarjeta debe acudir al negocio; una fase futura diseñará un flujo asistido con permisos explícitos, motivo obligatorio, auditoría persistente y revocación de sesiones.
 
+Después de un alta correcta, el mismo navegador conserva durante un periodo corto una credencial aleatoria de entrega. Mientras siga vigente, una recarga puede volver a obtener enlaces temporales para el mismo cliente y los mismos identificadores Wallet. La credencial está ligada a la sesión firmada, no crea clientes ni pases nuevos y no constituye recuperación pública.
+
+Los intentos de alta reservan cuota por teléfono y por IP antes de comprobar duplicados. Las reservas se confirman antes de la transacción del cliente para que los conflictos y rollbacks posteriores no permitan intentos ilimitados.
+
 La experiencia Wallet debe validarse manualmente en dispositivos físicos. No se ejecutaron migraciones ni se modificaron Railway o Supabase reales.

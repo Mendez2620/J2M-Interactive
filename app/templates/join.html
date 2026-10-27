@@ -123,7 +123,7 @@
           <span>Obtener mi Tarjeta de Lealtad</span>
           {{ icon('arrow-right') }}
         </button>
-        <a href="{{ url_for('recovery.recover', business_slug=business.slug) }}" class="block text-center text-sm font-semibold text-indigo-700 underline">¿Ya tienes una tarjeta? Recupérala aquí</a>
+        <p class="text-center text-sm text-slate-600">¿Ya tienes una tarjeta? Solicita ayuda directamente al negocio.</p>
       </form>
     </div>
 
@@ -170,6 +170,22 @@
   const joinForm = document.getElementById('join-form');
   const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
   const showError = (id, message) => { const box = document.getElementById(id); box.textContent = message; box.classList.toggle('hidden', !message); };
+  const showWallet = (data) => {
+    document.getElementById('registration-section').classList.add('hidden');
+    document.getElementById('wallet-success-section').classList.remove('hidden');
+    document.getElementById('customer-greeting').textContent = `¡Hola ${data.customer.full_name}! Guarda tu tarjeta digital en tu billetera móvil:`;
+    const googleButton = document.getElementById('google-wallet-btn');
+    googleButton.classList.toggle('hidden', !data.google_wallet_url);
+    if (data.google_wallet_url) googleButton.href = data.google_wallet_url;
+    document.getElementById('apple-wallet-btn').href = data.apple_wallet_url;
+  };
+  const resumeWalletUrl = {{ wallet_delivery_url|default(none)|tojson }};
+  if (resumeWalletUrl) {
+    fetch(resumeWalletUrl, {headers:{'Accept':'application/json'}})
+      .then(response => response.ok ? response.json() : Promise.reject())
+      .then(showWallet)
+      .catch(() => {});
+  }
   joinForm.addEventListener('submit', async function(e) {
     e.preventDefault();
     if (!this.reportValidity()) return;
@@ -182,13 +198,7 @@
       const response = await fetch(joinForm.action, {method:'POST', headers:{'Content-Type':'application/json','Accept':'application/json','X-CSRFToken':csrfToken}, body:JSON.stringify(payload)});
       const data = await response.json().catch(() => ({}));
       if (!response.ok || data.status !== 'success') throw new Error(data.message || 'No fue posible crear la tarjeta.');
-      document.getElementById('registration-section').classList.add('hidden');
-      document.getElementById('wallet-success-section').classList.remove('hidden');
-      document.getElementById('customer-greeting').textContent = `¡Hola ${data.customer.full_name}! Guarda tu tarjeta digital en tu billetera móvil:`;
-      const googleButton = document.getElementById('google-wallet-btn');
-      if (data.google_wallet_url) googleButton.href = data.google_wallet_url;
-      else googleButton.classList.add('hidden');
-      document.getElementById('apple-wallet-btn').href = data.apple_wallet_url;
+      showWallet(data);
     } catch (error) { showError('join-error', error.message || 'Error de conexión.'); }
     finally { submitBtn.disabled = false; submitBtn.querySelector('span').textContent = 'Obtener mi Tarjeta de Lealtad'; }
   });
