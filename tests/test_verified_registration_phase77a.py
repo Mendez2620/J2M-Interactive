@@ -121,6 +121,11 @@ class VerifiedRegistrationTestCase(unittest.TestCase):
         allowed = self.client.post("/join/uno", json=self.payload, headers={"X-CSRFToken": token})
         self.assertEqual(allowed.status_code, 201)
         self.assertEqual(Customer.query.count(), 1)
+        self.assertEqual(self.client.post("/join/uno/wallet-delivery/end").status_code, 400)
+        self.assertEqual(
+            self.client.post("/join/uno/wallet-delivery/end", headers={"X-CSRFToken": token}).status_code,
+            200,
+        )
 
     def test_database_claim_prevents_duplicate_identity_completion(self):
         business = Business.query.filter_by(slug="uno").one()

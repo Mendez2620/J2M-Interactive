@@ -1,4 +1,5 @@
 import unittest
+import re
 from unittest.mock import patch
 
 from app import create_app
@@ -6,7 +7,7 @@ from app.extensions import db
 from app.models import (
     Business, Customer, CustomerRecoveryAuthorization,
     CustomerRegistrationChallenge, CustomerRegistrationIdentityClaim,
-    RegistrationEmailJob,
+    Promoter, ReferralAttribution, RegistrationEmailJob,
 )
 
 
@@ -75,12 +76,60 @@ class Phase8ATestCase(unittest.TestCase):
         created = self.client.post("/join/uno", json=self.payload()).get_json()
         page = self.client.get("/join/uno").get_data(as_text=True)
         self.assertIn(created["wallet_delivery_url"].replace("&", "\\u0026"), page)
+        self.assertIn("Continuar con mi tarjeta", page)
+        self.assertIn("Registrar otra persona", page)
+        self.assertNotIn("¡Hola Cliente Nuevo!", page)
+        self.assertNotIn("if (resumeWalletUrl) {", page)
+        self.assertIn("continueWallet.addEventListener('click'", page)
         with self.client.session_transaction() as browser:
             delivery = dict(browser["customer_wallet_delivery"])
             delivery["expires_at"] = 0
             browser["customer_wallet_delivery"] = delivery
         self.assertEqual(self.client.get(created["wallet_delivery_url"]).status_code, 403)
         self.assertNotIn("wallet-delivery?credential=", self.client.get("/join/uno").get_data(as_text=True))
+
+    def test_shared_browser_keeps_new_referral_form_and_registers_second_customer(self):
+        first_promoter = Promoter(business_id=self.one.id, name="Primero", username="primero", referral_code="PROMO-A")
+        second_promoter = Promoter(business_id=self.one.id, name="Segundo", username="segundo", referral_code="PROMO-B")
+        first_promoter.set_password("Seguro12345")
+        second_promoter.set_password("Seguro12345")
+        db.session.add_all([first_promoter, second_promoter]); db.session.commit()
+
+        first_page = self.client.get("/join/uno?ref=PROMO-A").get_data(as_text=True)
+        first_context = re.search(r'name="referral_context" value="([^"]*)"', first_page).group(1)
+        first = self.client.post("/join/uno", json=self.payload(referral_context=first_context))
+        self.assertEqual(first.status_code, 201)
+
+        second_page = self.client.get("/join/uno?ref=PROMO-B").get_data(as_text=True)
+        second_context = re.search(r'name="referral_context" value="([^"]*)"', second_page).group(1)
+        self.assertNotEqual(first_context, second_context)
+        self.assertIn('id="join-form"', second_page)
+        self.assertNotIn("Continuar con mi tarjeta", second_page)
+        self.assertNotIn("Cliente Nuevo", second_page)
+        self.assertNotIn("wallet-delivery?credential=", second_page)
+
+        second = self.client.post("/join/uno", json=self.payload(
+            phone="55 1234 5679", full_name="Segunda Persona",
+            referral_context=second_context,
+        ))
+        self.assertEqual(second.status_code, 201)
+        self.assertEqual(Customer.query.count(), 2)
+        attributions = ReferralAttribution.query.order_by(ReferralAttribution.customer_id).all()
+        self.assertEqual([item.promoter_id for item in attributions], [first_promoter.id, second_promoter.id])
+
+    def test_new_customer_action_clears_only_same_tenant_delivery(self):
+        created = self.client.post("/join/uno", json=self.payload()).get_json()
+        self.assertEqual(self.client.get("/join/uno/wallet-delivery/end").status_code, 405)
+        self.assertEqual(self.client.post("/join/dos/wallet-delivery/end").status_code, 200)
+        self.assertEqual(self.client.get(created["wallet_delivery_url"]).status_code, 200)
+        self.assertEqual(self.client.post("/join/uno/wallet-delivery/end").status_code, 200)
+        self.assertEqual(self.client.get(created["wallet_delivery_url"]).status_code, 403)
+
+    def test_suspended_business_blocks_pending_wallet_delivery(self):
+        created = self.client.post("/join/uno", json=self.payload()).get_json()
+        self.one.is_active = False
+        db.session.commit()
+        self.assertEqual(self.client.get(created["wallet_delivery_url"]).status_code, 403)
 
     def test_wallet_provider_failure_does_not_consume_delivery_credential(self):
         created = self.client.post("/join/uno", json=self.payload()).get_json()

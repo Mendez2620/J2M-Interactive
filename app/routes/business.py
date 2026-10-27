@@ -190,7 +190,9 @@ def join_business(slug):
         promoter = Promoter.query.filter_by(
             business_id=business.id, referral_code=referral_code, is_active=True
         ).first() if referral_code and len(referral_code) <= 32 else None
-        active_delivery = _active_wallet_delivery(business)
+        # A referral link is an explicit new-registration context. Never expose
+        # a previous browser user's delivery capability on that page.
+        active_delivery = None if referral_code else _active_wallet_delivery(business)
         wallet_delivery_url = None
         if active_delivery:
             delivery, _ = active_delivery
@@ -205,6 +207,7 @@ def join_business(slug):
             terms_version=current_app.config["TERMS_VERSION"],
             privacy_version=current_app.config["PRIVACY_NOTICE_VERSION"],
             wallet_delivery_url=wallet_delivery_url,
+            wallet_delivery_end_url=url_for("business.end_wallet_delivery", slug=business.slug),
         )
     data = _payload()
     if data is None:
@@ -288,6 +291,8 @@ def resume_wallet_delivery(slug):
     business, error = _business(slug)
     if error:
         return error
+    if not business.is_active:
+        return jsonify({"status": "error", "message": "El programa no está disponible en este momento."}), 403
     credential = request.args.get("credential", "")
     active_delivery = _active_wallet_delivery(business, credential)
     if not active_delivery:
@@ -297,6 +302,17 @@ def resume_wallet_delivery(slug):
     response.headers["Cache-Control"] = "no-store, private"
     response.headers["Referrer-Policy"] = "no-referrer"
     return response
+
+
+@business_bp.post("/join/<slug>/wallet-delivery/end")
+def end_wallet_delivery(slug):
+    business, error = _business(slug)
+    if error:
+        return error
+    delivery = session.get(_WALLET_DELIVERY_SESSION_KEY)
+    if isinstance(delivery, dict) and delivery.get("business_id") == business.id:
+        session.pop(_WALLET_DELIVERY_SESSION_KEY, None)
+    return jsonify({"status": "success"})
 
 
 
