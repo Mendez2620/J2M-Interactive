@@ -27,4 +27,7 @@ RUN addgroup --system j2m \
 USER j2m
 EXPOSE 8000
 
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD python scripts/container_healthcheck.py
+
 CMD ["sh", "-c", "exec gunicorn --bind 0.0.0.0:${PORT:-8000} --workers ${WEB_CONCURRENCY:-2} --threads ${GUNICORN_THREADS:-4} --timeout ${GUNICORN_TIMEOUT:-60} --access-logfile - --error-logfile - run:app"]

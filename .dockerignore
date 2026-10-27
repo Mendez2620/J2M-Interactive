@@ -14,5 +14,9 @@ tests
 docs
 certs
 certificates
+*.pem
+*.key
+*.p12
+*.pfx
 app/static/uploads/*
 !app/static/uploads/.gitkeep

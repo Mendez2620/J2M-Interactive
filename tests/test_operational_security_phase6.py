@@ -155,7 +155,8 @@ class OperationalSecurityPhase6TestCase(unittest.TestCase):
         self.assertIn("addEventListener('input', calculatePointsPreview)", scanner)
 
     def test_production_csp_local_assets_and_proxy_trust(self):
-        env = {"SECRET_KEY": "session-secret-with-more-than-32-characters-a",
+        env = {"FLASK_DEBUG": "false", "SESSION_COOKIE_SECURE": "true",
+               "SECRET_KEY": "session-secret-with-more-than-32-characters-a",
                "JWT_SECRET_KEY": "jwt-secret-with-more-than-32-characters-b",
                "REGISTRATION_IDENTITY_HMAC_KEY": "registration-identity-key-with-more-than-32-characters-c",
                "REGISTRATION_EMAIL_ENCRYPTION_KEY": "registration-email-encryption-key-more-than-32-characters-d",
@@ -202,7 +203,8 @@ class OperationalSecurityPhase6TestCase(unittest.TestCase):
         self.assertEqual(payload, {"ip": "203.0.113.8", "secure": True})
 
     def test_production_rejects_invalid_operational_configuration(self):
-        env = {"SECRET_KEY": "session-secret-with-more-than-32-characters-a",
+        env = {"FLASK_DEBUG": "false", "SESSION_COOKIE_SECURE": "true",
+               "SECRET_KEY": "session-secret-with-more-than-32-characters-a",
                "JWT_SECRET_KEY": "jwt-secret-with-more-than-32-characters-b",
                "REGISTRATION_IDENTITY_HMAC_KEY": "registration-identity-key-with-more-than-32-characters-c",
                "REGISTRATION_EMAIL_ENCRYPTION_KEY": "registration-email-encryption-key-more-than-32-characters-d",

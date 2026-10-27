@@ -52,6 +52,7 @@ class Config:
         if SQLALCHEMY_DATABASE_URI.startswith("postgresql")
         else {}
     )
+    DATABASE_SSLMODE = os.getenv("DATABASE_SSLMODE", "require").lower()
     
     # CORS
     CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*")
@@ -113,6 +114,12 @@ class Config:
     GOOGLE_WALLET_SYNC_BATCH_SIZE = int(os.getenv("GOOGLE_WALLET_SYNC_BATCH_SIZE", 50))
     GOOGLE_WALLET_SYNC_ALERT_PENDING = int(os.getenv("GOOGLE_WALLET_SYNC_ALERT_PENDING", 100))
     GOOGLE_WALLET_SYNC_ALERT_STALE_SECONDS = int(os.getenv("GOOGLE_WALLET_SYNC_ALERT_STALE_SECONDS", 300))
+    APPLE_PASS_TYPE_ID = os.getenv("APPLE_PASS_TYPE_ID", "")
+    APPLE_TEAM_ID = os.getenv("APPLE_TEAM_ID", "")
+    APPLE_CERT_PATH = os.getenv("APPLE_CERT_PATH", "")
+    APPLE_KEY_PATH = os.getenv("APPLE_KEY_PATH", "")
+    APPLE_WWDR_PATH = os.getenv("APPLE_WWDR_PATH", "")
+    APPLE_WEB_SERVICE_URL = os.getenv("APPLE_WEB_SERVICE_URL", "")
     SESSION_COOKIE_HTTPONLY = True
     SESSION_COOKIE_SAMESITE = "Lax"
     SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "false").lower() == "true"
