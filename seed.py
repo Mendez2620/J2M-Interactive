@@ -1,14 +1,51 @@
 import os
+import argparse
 from datetime import date, datetime, timezone
+from pathlib import Path
+from sqlalchemy.engine import make_url
 from app import create_app
+from app.config import BASE_DIR
 from app.extensions import db
 from app.models import Business, BusinessCategory, Customer, Staff, Transaction, AppleDevice
 
 app = create_app(os.getenv("FLASK_ENV", "development"))
 
 
-def reset_and_seed_database():
+def _assert_safe_seed_target(*, confirmed=False):
+    """Fail closed unless this is an explicitly confirmed local SQLite database."""
+    environment = str(app.config.get("APP_ENV") or os.getenv("FLASK_ENV") or "").strip().lower()
+    if environment != "development":
+        raise RuntimeError("El reinicio de datos solo está permitido en desarrollo local.")
+    if not confirmed:
+        raise RuntimeError("El reinicio requiere confirmación explícita en desarrollo local.")
+
+    try:
+        database_url = make_url(str(app.config.get("SQLALCHEMY_DATABASE_URI") or ""))
+    except Exception as exc:
+        raise RuntimeError("No se pudo validar de forma segura la base de desarrollo.") from exc
+    if database_url.get_backend_name() != "sqlite":
+        raise RuntimeError("El reinicio solo está permitido sobre SQLite local aislado.")
+    if database_url.database not in {None, "", ":memory:"}:
+        database_path = Path(database_url.database)
+        if not database_path.is_absolute():
+            database_path = BASE_DIR / database_path
+        try:
+            database_path.resolve().relative_to(BASE_DIR.resolve())
+        except ValueError as exc:
+            raise RuntimeError("La base SQLite debe estar dentro del proyecto local.") from exc
+
+
+def _development_seed_password():
+    password = os.getenv("J2M_DEMO_SEED_PASSWORD", "")
+    if len(password) < 12:
+        raise RuntimeError("Configure J2M_DEMO_SEED_PASSWORD con al menos 12 caracteres para el seed local.")
+    return password
+
+
+def reset_and_seed_database(*, confirmed=False):
     """Drops all tables, recreates them with current schema, and inserts initial seed data."""
+    _assert_safe_seed_target(confirmed=confirmed)
+    demo_password = _development_seed_password()
     with app.app_context():
         print("Eliminando tablas antiguas si existen...")
         db.drop_all()
@@ -71,7 +108,7 @@ def reset_and_seed_database():
             role="admin",
             is_active=True,
         )
-        admin_user.set_password("Admin1234!")
+        admin_user.set_password(demo_password)
 
         cashier_cafe = Staff(
             business_id=cafe.id,
@@ -82,7 +119,7 @@ def reset_and_seed_database():
             role="cashier",
             is_active=True,
         )
-        cashier_cafe.set_password("Cajero1234!")
+        cashier_cafe.set_password(demo_password)
 
         manager_boutique = Staff(
             business_id=boutique.id,
@@ -93,7 +130,7 @@ def reset_and_seed_database():
             role="manager",
             is_active=True,
         )
-        manager_boutique.set_password("Manager1234!")
+        manager_boutique.set_password(demo_password)
 
         db.session.add_all([admin_user, cashier_cafe, manager_boutique])
         db.session.commit()
@@ -179,4 +216,7 @@ def reset_and_seed_database():
 
 
 if __name__ == "__main__":
-    reset_and_seed_database()
+    parser = argparse.ArgumentParser(description="Reinicia únicamente una base SQLite local de desarrollo.")
+    parser.add_argument("--yes-i-understand-data-will-be-deleted", action="store_true")
+    arguments = parser.parse_args()
+    reset_and_seed_database(confirmed=arguments.yes_i_understand_data_will_be_deleted)
