@@ -7,10 +7,12 @@ from datetime import date, datetime, timedelta, timezone
 from flask import Blueprint, current_app, jsonify, render_template, request, session
 from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
+from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
 from app.extensions import db
 from app.models import (Business, Customer, CustomerRegistrationChallenge,
-                        CustomerRegistrationIdentityClaim, RegistrationEmailJob)
+                        CustomerRegistrationIdentityClaim, RegistrationEmailJob,
+                        Promoter, ReferralAttribution)
 from app.phone_numbers import normalize_phone
 from app.routes.customer_recovery import _reserve_rate_limit
 from app.security import valid_email
@@ -59,6 +61,40 @@ def _set_registration_challenge_session(challenge_id=None):
     session["customer_registration_challenge_proof"] = (
         _hmac(stored_id, "registration-session") if challenge_id else secrets.token_hex(32)
     )
+
+
+def _session_owns_registration_challenge(challenge_id):
+    proof = session.get("customer_registration_challenge_proof")
+    return bool(
+        isinstance(challenge_id, str)
+        and isinstance(proof, str)
+        and hmac.compare_digest(proof, _hmac(challenge_id, "registration-session"))
+    )
+
+
+def _referral_serializer():
+    return URLSafeTimedSerializer(current_app.config["SECRET_KEY"], salt="customer-referral-context-v1")
+
+
+def _referral_context(promoter):
+    return _referral_serializer().dumps({"business_id": promoter.business_id, "promoter_id": promoter.id})
+
+
+def _promoter_from_context(value, business_id):
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        context = _referral_serializer().loads(
+            value, max_age=current_app.config["REGISTRATION_CHALLENGE_RETENTION"]
+        )
+    except (BadSignature, SignatureExpired):
+        return None
+    if not isinstance(context, dict) or context.get("business_id") != business_id:
+        return None
+    promoter_id = context.get("promoter_id")
+    if not isinstance(promoter_id, int):
+        return None
+    return Promoter.query.filter_by(id=promoter_id, business_id=business_id, is_active=True).first()
 
 
 def _payload():
@@ -138,8 +174,13 @@ def join_business(slug):
             return jsonify({"status": "error", "message": "El servicio para este negocio se encuentra temporalmente suspendido."}), 403
         return render_template("join.html", business=business)
     if request.method == "GET":
+        referral_code = (request.args.get("ref") or "").strip()
+        promoter = Promoter.query.filter_by(
+            business_id=business.id, referral_code=referral_code, is_active=True
+        ).first() if referral_code and len(referral_code) <= 32 else None
         return render_template(
             "join.html", business=business,
+            referral_context=_referral_context(promoter) if promoter else "",
             terms_version=current_app.config["TERMS_VERSION"],
             privacy_version=current_app.config["PRIVACY_NOTICE_VERSION"],
         )
@@ -153,6 +194,25 @@ def join_business(slug):
         return jsonify({"status": "error", "message": str(exc)}), 400
     now = _utcnow()
     email_hash, phone_hash = _identity_hmac(email), _identity_hmac(phone)
+    previous_challenge_id = session.get("customer_registration_challenge_id")
+    previous_challenge = db.session.get(CustomerRegistrationChallenge, previous_challenge_id) if previous_challenge_id else None
+    promoter = None
+    referral_locked = bool(
+        previous_challenge
+        and _session_owns_registration_challenge(previous_challenge_id)
+        and previous_challenge.business_id == business.id
+        and previous_challenge.email_hash == email_hash
+        and previous_challenge.phone_hash == phone_hash
+        and previous_challenge.consumed_at is None
+        and previous_challenge.expires_at > now
+        and previous_challenge.attempts < current_app.config["REGISTRATION_MAX_ATTEMPTS"]
+    )
+    if referral_locked and previous_challenge.promoter_id:
+        promoter = Promoter.query.filter_by(
+            id=previous_challenge.promoter_id, business_id=business.id, is_active=True
+        ).first()
+    if not referral_locked:
+        promoter = _promoter_from_context(data.get("referral_context"), business.id)
     ip_hash = _hmac(request.remote_addr or "unknown", "registration-ip")
     ua_hash = _hmac((request.user_agent.string or "unknown")[:512], "registration-user-agent")
     cutoff = now - timedelta(seconds=current_app.config["REGISTRATION_CHALLENGE_RETENTION"])
@@ -179,7 +239,10 @@ def join_business(slug):
         return _generic_response(started_at)
     code = f"{secrets.randbelow(100_000_000):08d}"
     challenge = CustomerRegistrationChallenge(
-        business_id=business.id, full_name=name, email=email, email_hash=email_hash,
+        business_id=business.id,
+        promoter_id=(promoter.id if promoter and (promoter.email or "").lower() != email
+                     and (not promoter.phone or promoter.phone != phone) else None),
+        full_name=name, email=email, email_hash=email_hash,
         phone=phone, phone_hash=phone_hash, birthdate=birthdate, code_hash="pending",
         terms_version=current_app.config["TERMS_VERSION"], privacy_version=current_app.config["PRIVACY_NOTICE_VERSION"],
         terms_accepted_at=now, privacy_accepted_at=now,
@@ -275,6 +338,19 @@ def verify_registration(slug):
             CustomerRegistrationIdentityClaim(business_id=business.id, identity_type="email", identity_hash=challenge.email_hash, customer_id=customer.id),
             CustomerRegistrationIdentityClaim(business_id=business.id, identity_type="phone", identity_hash=challenge.phone_hash, customer_id=customer.id),
         ])
+        promoter = (
+            db.session.query(Promoter)
+            .filter(Promoter.id == challenge.promoter_id, Promoter.business_id == business.id)
+            .with_for_update()
+            .one_or_none()
+            if challenge.promoter_id else None
+        )
+        if (promoter and promoter.business_id == business.id and promoter.is_active
+                and (promoter.email or "").lower() != challenge.email
+                and (not promoter.phone or promoter.phone != challenge.phone)):
+            db.session.add(ReferralAttribution(
+                business_id=business.id, promoter_id=promoter.id, customer_id=customer.id,
+            ))
         db.session.commit()
     except IntegrityError:
         db.session.rollback()

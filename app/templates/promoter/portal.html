@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Mis referidos | J2M Interactive{% endblock %}
+{% block content %}
+<main class="min-h-screen bg-slate-100 px-4 py-8">
+  <div class="mx-auto max-w-5xl space-y-6">
+    <header class="flex flex-col gap-4 rounded-3xl bg-slate-950 p-6 text-white sm:flex-row sm:items-center sm:justify-between">
+      <div><p class="text-sm text-indigo-300">{{ promoter.business.name }}</p><h1 class="text-2xl font-extrabold">Hola, {{ promoter.name }}</h1><p class="mt-1 text-sm text-slate-300">Tus resultados verificados, sin datos personales de clientes.</p></div>
+      <form method="POST" action="{{ url_for('promoter.promoter_logout') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="rounded-xl border border-white/30 px-4 py-2 text-sm font-semibold">Cerrar sesión</button></form>
+    </header>
+    <section class="grid gap-4 sm:grid-cols-2" aria-label="Resumen de referidos">
+      <article class="rounded-2xl bg-white p-6 shadow-sm"><p class="text-sm font-semibold text-slate-500">Referidos verificados</p><p class="mt-2 text-4xl font-black text-slate-900">{{ total }}</p></article>
+      <article class="rounded-2xl bg-white p-6 shadow-sm"><p class="text-sm font-semibold text-slate-500">Este mes</p><p class="mt-2 text-4xl font-black text-indigo-700">{{ month }}</p></article>
+    </section>
+    <section class="rounded-2xl bg-white p-6 shadow-sm">
+      <h2 class="text-lg font-bold text-slate-900">Tu enlace estable</h2>
+      <p class="mt-1 text-sm text-slate-600">Compártelo o descarga el QR. No contiene datos personales.</p>
+      <div class="mt-4 flex flex-col gap-3 sm:flex-row"><input readonly class="field flex-1 font-mono text-xs" value="{{ referral_url }}" aria-label="Enlace de referido"><a class="btn btn-secondary text-center" href="{{ url_for('promoter.promoter_qr') }}" download>Descargar QR</a></div>
+    </section>
+  </div>
+</main>
+{% endblock %}

@@ -13,6 +13,7 @@ class CustomerRegistrationChallenge(db.Model):
 
     id = db.Column(db.String(36), primary_key=True, default=lambda: secrets.token_hex(18))
     business_id = db.Column(db.Integer, db.ForeignKey("businesses.id", ondelete="CASCADE"), nullable=False, index=True)
+    promoter_id = db.Column(db.Integer, db.ForeignKey("promoters.id", ondelete="SET NULL"), nullable=True, index=True)
     full_name = db.Column(db.String(120), nullable=False)
     email = db.Column(db.String(120), nullable=False)
     email_hash = db.Column(db.String(64), nullable=False, index=True)
