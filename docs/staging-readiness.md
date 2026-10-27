@@ -23,9 +23,9 @@ backup no restaurable; CI fallido o workers sin configuración.
 
 Parta de `.env.example`, pero configure los valores reales exclusivamente en el
 almacén privado de la plataforma. Genere por separado `SECRET_KEY`,
-`JWT_SECRET_KEY`, `REGISTRATION_IDENTITY_HMAC_KEY` y
-`REGISTRATION_EMAIL_ENCRYPTION_KEY`. Las dos últimas deben permanecer estables:
-rotarlas sin transición rompería identidades HMAC o trabajos pendientes.
+`JWT_SECRET_KEY` y `REGISTRATION_IDENTITY_HMAC_KEY`. La última debe permanecer
+estable: rotarla sin transición rompería las reservas HMAC de teléfono. El alta
+pública y la recuperación ya no requieren SMTP ni un worker de correo.
 
 Use `FLASK_ENV=production`, `FLASK_DEBUG=false`, `SESSION_COOKIE_SECURE=true`,
 `UPLOAD_STORAGE_BACKEND=disabled` y el número exacto de proxies controlados en
@@ -86,11 +86,10 @@ públicos.
 Configure servicios separados que compartan imagen y base, pero no comando:
 
 - Web: el `CMD` de Gunicorn del `Dockerfile`.
-- Registro: `flask --app run.py run-registration-email-worker`.
 - Google Wallet, solo en modo real autorizado:
   `flask --app run.py run-google-wallet-sync-worker`.
 
-Use `J2M_PROCESS_TYPE=web`, `registration-worker` o `google-wallet-worker` según
+Use `J2M_PROCESS_TYPE=web` o `google-wallet-worker` según
 el servicio. El `HEALTHCHECK` de la imagen consulta `/api/health` únicamente en
 modo web; en un worker comprueba que PID 1 corresponda al comando esperado.
 Como defensa para servicios legacy que todavía no declaren `J2M_PROCESS_TYPE`,
@@ -113,7 +112,7 @@ esa fecha, migre de forma controlada a Infrastructure as Code a nivel de
 proyecto (`.railway/railway.ts`), comenzando con `railway config pull` y
 revisando `railway config plan`; esta fase no crea ni aplica esa infraestructura.
 
-Los workers usan outboxes duraderos, reintentos y recuperación de leases;
+El worker Google Wallet usa un outbox duradero, reintentos y recuperación de leases;
 reciben SIGTERM/SIGINT y terminan sin mantener transacciones durante llamadas
 externas. Vigile únicamente métricas agregadas y nunca cuerpos de correo,
 códigos, tokens o credenciales. El outbox no garantiza entrega exactamente una

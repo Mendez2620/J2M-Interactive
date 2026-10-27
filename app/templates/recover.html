@@ -25,18 +25,11 @@
         {% if google_mock %}<p class="text-xs text-amber-700">Google Wallet está en modo de desarrollo; la emisión real requiere credenciales configuradas.</p>{% endif %}
         <form method="POST" action="{{ url_for('recovery.end_recovery', business_slug=business.slug) }}"><button class="text-sm text-slate-500 underline">Terminar recuperación</button></form>
       </div>
-    {% elif challenge_pending %}
-      <form method="POST" action="{{ url_for('recovery.verify_recovery', business_slug=business.slug) }}" class="space-y-4">
-        <div><label for="code" class="block text-sm font-semibold mb-1">Código de ocho dígitos</label><input id="code" name="code" inputmode="numeric" pattern="[0-9]{8}" maxlength="8" required autocomplete="one-time-code" class="w-full rounded-xl border p-3 tracking-[.35em] text-center" aria-describedby="code-help"><p id="code-help" class="text-xs text-slate-500 mt-2">El código caduca en 10 minutos y solo puede utilizarse una vez.</p></div>
-        <button class="brand-button w-full rounded-xl p-3 font-bold" data-submit>Verificar código</button>
-      </form>
-      <a href="{{ url_for('recovery.recover', business_slug=business.slug) }}" class="block text-center text-sm mt-4 text-slate-500 underline">Solicitar otro código</a>
     {% else %}
-      <form method="POST" action="{{ url_for('recovery.request_recovery', business_slug=business.slug) }}" class="space-y-4">
-        <div><label for="email" class="block text-sm font-semibold mb-1">Correo registrado</label><input id="email" name="email" type="email" required autocomplete="email" class="w-full rounded-xl border p-3" placeholder="correo@ejemplo.com"><p class="text-xs text-slate-500 mt-2">Si la cuenta es elegible, enviaremos un código al correo registrado.</p></div>
-        <button class="brand-button w-full rounded-xl p-3 font-bold" data-submit>Enviar instrucciones</button>
-      </form>
-      <p class="text-xs text-slate-500 mt-5">¿Tu tarjeta no tiene correo? Solicita asistencia al negocio. La recuperación por teléfono o SMS aún no está disponible.</p>
+      <div class="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950">
+        <h2 class="font-bold">Recuperación pública no disponible</h2>
+        <p class="mt-2">Para proteger tu tarjeta, no aceptamos nombre, teléfono ni el QR usado en caja como prueba de identidad. Solicita asistencia directamente al negocio.</p>
+      </div>
     {% endif %}
     <a href="{{ url_for('business.join_business', slug=business.slug) }}" class="block text-center text-sm mt-6 text-indigo-700 underline">Volver al registro</a>
   </section>

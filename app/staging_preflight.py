@@ -80,7 +80,6 @@ def collect_preflight(config, *, check_database=False):
 
     secret_names = (
         "SECRET_KEY", "JWT_SECRET_KEY", "REGISTRATION_IDENTITY_HMAC_KEY",
-        "REGISTRATION_EMAIL_ENCRYPTION_KEY",
     )
     secrets = [str(config.get(name) or "") for name in secret_names]
     for name, value in zip(secret_names, secrets):
@@ -123,23 +122,6 @@ def collect_preflight(config, *, check_database=False):
             "trusted_proxy_count", "La cantidad de proxies confiables está acotada."
             if isinstance(proxy_count, int) and 0 <= proxy_count <= 10 else "TRUSTED_PROXY_COUNT debe estar entre 0 y 10.")
 
-    mail_backend = str(config.get("RECOVERY_MAIL_BACKEND") or "").lower()
-    if mail_backend == "smtp":
-        smtp_ok = bool(config.get("SMTP_HOST") and config.get("SMTP_FROM")
-                       and isinstance(config.get("SMTP_PORT"), int) and 0 < config.get("SMTP_PORT") < 65536)
-        _result(results, "ok" if smtp_ok else "error", "smtp",
-                "SMTP tiene host, puerto y remitente configurados; no se realizó ninguna conexión."
-                if smtp_ok else "SMTP requiere host, puerto válido y remitente antes de staging.")
-        username, password = config.get("SMTP_USERNAME"), config.get("SMTP_PASSWORD")
-        auth_status = "ok" if username and password else ("warning" if not username and not password else "error")
-        _result(results, auth_status, "smtp_auth",
-                "Las credenciales SMTP están presentes y permanecen ocultas."
-                if auth_status == "ok" else "SMTP no usa autenticación; confirme que el relay privado lo permite."
-                if auth_status == "warning" else "SMTP_USERNAME y SMTP_PASSWORD deben configurarse juntos.")
-        if not config.get("SMTP_USE_TLS"):
-            _result(results, "warning", "smtp_tls", "SMTP_USE_TLS está deshabilitado; confirmar transporte privado o habilitar TLS.")
-    else:
-        _result(results, "error", "smtp", "Staging requiere RECOVERY_MAIL_BACKEND=smtp.")
 
     wallet_mode = str(config.get("GOOGLE_WALLET_MODE") or "disabled").lower()
     if wallet_mode == "disabled":
@@ -179,11 +161,6 @@ def collect_preflight(config, *, check_database=False):
             "Uploads locales están deshabilitados." if config.get("UPLOAD_STORAGE_BACKEND") == "disabled"
             else "Staging no permite almacenamiento local efímero.")
     worker_values = {
-        "registration_worker": (
-            config.get("REGISTRATION_EMAIL_POLL_SECONDS"), config.get("REGISTRATION_EMAIL_BATCH_SIZE"),
-            config.get("REGISTRATION_EMAIL_MAX_ATTEMPTS"), config.get("REGISTRATION_EMAIL_STALE_SECONDS"),
-            config.get("REGISTRATION_EMAIL_RETENTION_SECONDS"),
-        ),
         "google_wallet_worker": (
             config.get("GOOGLE_WALLET_SYNC_POLL_SECONDS"), config.get("GOOGLE_WALLET_SYNC_BATCH_SIZE"),
             config.get("GOOGLE_WALLET_SYNC_ALERT_PENDING"), config.get("GOOGLE_WALLET_SYNC_ALERT_STALE_SECONDS"),

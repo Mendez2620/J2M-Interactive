@@ -9,9 +9,8 @@ from unittest.mock import patch
 
 from app import create_app
 from app.extensions import db
-from app.models import (AccessAudit, Business, Customer, CustomerRegistrationChallenge,
+from app.models import (AccessAudit, Business, Customer,
                         PlatformAdmin, Promoter, PromoterSession, ReferralAttribution)
-from app.services.registration_email_service import process_pending_registration_emails
 from app.config import TestingConfig
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import text
@@ -21,7 +20,7 @@ from app.routes.promoter import _referral_url
 class PromotersPhase78TestCase(unittest.TestCase):
     def setUp(self):
         self.app = create_app("testing")
-        self.app.config.update(REGISTRATION_REQUEST_LIMIT_EMAIL=30, REGISTRATION_REQUEST_LIMIT_IP=50)
+        self.app.config.update(REGISTRATION_REQUEST_LIMIT_PHONE=30, REGISTRATION_REQUEST_LIMIT_IP=50)
         self.client = self.app.test_client()
         self.ctx = self.app.app_context(); self.ctx.push(); db.create_all()
         db.session.execute(text("PRAGMA foreign_keys=ON"))
@@ -41,9 +40,7 @@ class PromotersPhase78TestCase(unittest.TestCase):
 
     def register(self, payload=None, slug="uno"):
         response = self.client.post(f"/join/{slug}", json=payload or self.referred_payload(slug))
-        process_pending_registration_emails()
-        code = self.app.extensions["recovery_mailer"].outbox[-1]["code"]
-        return response, self.client.post(f"/join/{slug}/verify", json={"code":code})
+        return response, response
 
     def referred_payload(self, slug="uno", promoter=None):
         promoter = promoter or self.promoter
@@ -57,42 +54,31 @@ class PromotersPhase78TestCase(unittest.TestCase):
 
     def test_attribution_is_created_only_after_verified_registration(self):
         response = self.client.post("/join/uno", json=self.referred_payload())
-        self.assertEqual(response.status_code, 202)
-        self.assertEqual(ReferralAttribution.query.count(), 0)
-        process_pending_registration_emails()
-        code = self.app.extensions["recovery_mailer"].outbox[-1]["code"]
-        verified = self.client.post("/join/uno/verify", json={"code":code})
-        self.assertEqual(verified.status_code, 201)
+        self.assertEqual(response.status_code, 201)
         attribution = ReferralAttribution.query.one()
         self.assertEqual((attribution.business_id, attribution.promoter_id), (self.business.id, self.promoter.id))
-        self.assertEqual(Customer.query.count(), 1)
+        customer = Customer.query.one()
+        self.assertIsNone(customer.email)
 
     def test_invalid_cross_tenant_suspended_and_self_referrals_are_not_attributed(self):
-        cases = [
-            ("invalid", "cliente1@example.test", "55 0000 0001"),
-        ]
         other_promoter = Promoter(business_id=self.other.id, name="Otro", username="otro")
         other_promoter.set_password("PromotorSeguro123")
         db.session.add(other_promoter); db.session.commit()
-        cases.append((other_promoter.referral_code, "cliente2@example.test", "55 0000 0002"))
-        self.promoter.is_active = False; db.session.commit()
-        cases.append((self.promoter.referral_code, "cliente3@example.test", "55 0000 0003"))
-        for code, email, phone in cases:
-            payload = dict(self.payload, referral_code=code, email=email, phone=phone)
-            _, verified = self.register(payload)
-            self.assertEqual(verified.status_code, 201)
-        self.promoter.is_active = True; db.session.commit()
-        payload = self.referred_payload()
-        payload.update(email=self.promoter.email, phone="55 0000 0004")
-        _, verified = self.register(payload)
-        self.assertEqual(verified.status_code, 201)
+        invalid_payload = dict(self.payload, phone="55 0000 0001", referral_context="invalid")
+        self.assertEqual(self.client.post("/join/uno", json=invalid_payload).status_code, 201)
+        cross_page = self.client.get(f"/join/dos?ref={other_promoter.referral_code}").get_data(as_text=True)
+        cross_context = re.search(r'name="referral_context" value="([^"]*)"', cross_page).group(1)
+        self.assertEqual(self.client.post("/join/uno", json=dict(self.payload, phone="55 0000 0002", referral_context=cross_context)).status_code, 201)
+        self.promoter.phone = "+525500000003"; db.session.commit()
+        self.assertEqual(self.client.post("/join/uno", json=self.referred_payload() | {"phone": "55 0000 0003"}).status_code, 201)
         self.assertEqual(ReferralAttribution.query.count(), 0)
 
     def test_suspension_between_request_and_verification_prevents_attribution(self):
-        self.client.post("/join/uno", json=self.referred_payload())
-        process_pending_registration_emails(); code = self.app.extensions["recovery_mailer"].outbox[-1]["code"]
         self.promoter.is_active = False; db.session.commit()
-        self.assertEqual(self.client.post("/join/uno/verify", json={"code":code}).status_code, 201)
+        page = self.client.get(f"/join/uno?ref={self.promoter.referral_code}").get_data(as_text=True)
+        context = re.search(r'name="referral_context" value="([^"]*)"', page).group(1)
+        self.assertEqual(context, "")
+        self.assertEqual(self.client.post("/join/uno", json=dict(self.payload, referral_context=context)).status_code, 201)
         self.assertEqual(ReferralAttribution.query.count(), 0)
 
     def test_promoter_portal_is_separate_revocable_and_contains_no_customer_pii(self):
@@ -216,87 +202,58 @@ class PromotersPhase78TestCase(unittest.TestCase):
 
     def test_signed_referral_context_cannot_be_replaced_during_resend(self):
         other = Promoter(business_id=self.business.id, name="Otra", username="otra")
-        other.set_password("PromotorSeguro123")
-        db.session.add(other); db.session.commit()
+        other.set_password("PromotorSeguro123"); db.session.add(other); db.session.commit()
         first = self.referred_payload(promoter=self.promoter)
-        self.assertEqual(self.client.post("/join/uno", json=first).status_code, 202)
-        altered = dict(self.payload, referral_context=self.referred_payload(promoter=other)["referral_context"])
-        self.assertEqual(self.client.post("/join/uno", json=altered).status_code, 202)
-        challenge = CustomerRegistrationChallenge.query.order_by(CustomerRegistrationChallenge.created_at.desc()).first()
-        self.assertEqual(challenge.promoter_id, self.promoter.id)
+        self.assertEqual(self.client.post("/join/uno", json=first).status_code, 201)
+        second = self.referred_payload(promoter=other)
+        second.update(phone="55 9999 1111")
+        self.assertEqual(self.client.post("/join/uno", json=second).status_code, 201)
+        self.assertEqual([item.promoter_id for item in ReferralAttribution.query.order_by(ReferralAttribution.id)], [self.promoter.id, other.id])
 
     def test_new_identity_in_shared_browser_uses_its_own_referrer(self):
         other = Promoter(business_id=self.business.id, name="Otra", username="otra")
-        other.set_password("PromotorSeguro123")
-        db.session.add(other); db.session.commit()
-        self.assertEqual(self.client.post("/join/uno", json=self.referred_payload()).status_code, 202)
-        second = dict(
-            self.payload,
-            email="segunda@example.test",
-            phone="55 9999 1111",
-            referral_context=self.referred_payload(promoter=other)["referral_context"],
-        )
-        self.assertEqual(self.client.post("/join/uno", json=second).status_code, 202)
-        process_pending_registration_emails()
-        code = self.app.extensions["recovery_mailer"].outbox[-1]["code"]
-        self.assertEqual(self.client.post("/join/uno/verify", json={"code": code}).status_code, 201)
-        attribution = ReferralAttribution.query.one()
-        self.assertEqual(attribution.promoter_id, other.id)
+        other.set_password("PromotorSeguro123"); db.session.add(other); db.session.commit()
+        self.assertEqual(self.client.post("/join/uno", json=self.referred_payload()).status_code, 201)
+        second = self.referred_payload(promoter=other); second.update(phone="55 9999 1111")
+        self.assertEqual(self.client.post("/join/uno", json=second).status_code, 201)
+        self.assertEqual(ReferralAttribution.query.order_by(ReferralAttribution.id.desc()).first().promoter_id, other.id)
 
     def test_referral_lock_requires_same_complete_identity(self):
         other = Promoter(business_id=self.business.id, name="Otra", username="otra")
         other.set_password("PromotorSeguro123")
         db.session.add(other); db.session.commit()
         other_context = self.referred_payload(promoter=other)["referral_context"]
-        cases = (
-            {"email": self.payload["email"], "phone": "55 9999 0001"},
-            {"email": "otra-identidad@example.test", "phone": self.payload["phone"]},
+        original = self.referred_payload(promoter=self.promoter)
+        self.assertEqual(self.client.post("/join/uno", json=original).status_code, 201)
+        # Replaying the same phone with another valid signed context cannot
+        # move the existing attribution.
+        replay = dict(original, referral_context=other_context)
+        self.assertEqual(self.client.post("/join/uno", json=replay).status_code, 409)
+        self.assertEqual(ReferralAttribution.query.one().promoter_id, self.promoter.id)
+        # A different phone is a distinct registration and may use its own
+        # signed context without inheriting browser state.
+        distinct = dict(replay, phone="55 9999 0001")
+        self.assertEqual(self.client.post("/join/uno", json=distinct).status_code, 201)
+        self.assertEqual(
+            [row.promoter_id for row in ReferralAttribution.query.order_by(ReferralAttribution.id)],
+            [self.promoter.id, other.id],
         )
-        for index, changed in enumerate(cases):
-            client = self.app.test_client()
-            first_context = re.search(
-                r'name="referral_context" value="([^"]*)"',
-                client.get(f"/join/uno?ref={self.promoter.referral_code}").get_data(as_text=True),
-            ).group(1)
-            initial = dict(self.payload, email=f"base{index}@example.test", phone=f"55 0000 010{index}", referral_context=first_context)
-            self.assertEqual(client.post("/join/uno", json=initial).status_code, 202)
-            changed = dict(changed, full_name="Identidad Nueva", birthdate="1990-01-02",
-                           terms_accepted=True, privacy_accepted=True, referral_context=other_context)
-            if index == 0:
-                changed["email"] = initial["email"]
-            else:
-                changed["phone"] = initial["phone"]
-            self.assertEqual(client.post("/join/uno", json=changed).status_code, 202)
-            latest = CustomerRegistrationChallenge.query.order_by(CustomerRegistrationChallenge.created_at.desc()).first()
-            self.assertEqual(latest.promoter_id, other.id)
 
-    def test_expired_consumed_exhausted_or_untrusted_challenge_does_not_lock_referral(self):
+    def test_untrusted_cross_tenant_and_suspended_contexts_do_not_attribute(self):
         other = Promoter(business_id=self.business.id, name="Otra", username="otra")
         other.set_password("PromotorSeguro123")
-        db.session.add(other); db.session.commit()
-        states = ("expired", "consumed", "exhausted", "invalid-proof")
-        for state in states:
-            client = self.app.test_client()
-            page = client.get(f"/join/uno?ref={self.promoter.referral_code}").get_data(as_text=True)
-            first_context = re.search(r'name="referral_context" value="([^"]*)"', page).group(1)
-            payload = dict(self.payload, email=f"{state}@example.test", phone=f"55 1000 000{states.index(state)}", referral_context=first_context)
-            self.assertEqual(client.post("/join/uno", json=payload).status_code, 202)
-            challenge = CustomerRegistrationChallenge.query.order_by(CustomerRegistrationChallenge.created_at.desc()).first()
-            if state == "expired":
-                challenge.expires_at -= timedelta(hours=1)
-            elif state == "consumed":
-                challenge.consumed_at = challenge.created_at
-            elif state == "exhausted":
-                challenge.attempts = self.app.config["REGISTRATION_MAX_ATTEMPTS"]
-            else:
-                with client.session_transaction() as browser:
-                    browser["customer_registration_challenge_proof"] = "0" * 64
-            db.session.commit()
-            other_page = client.get(f"/join/uno?ref={other.referral_code}").get_data(as_text=True)
-            other_context = re.search(r'name="referral_context" value="([^"]*)"', other_page).group(1)
-            self.assertEqual(client.post("/join/uno", json=dict(payload, referral_context=other_context)).status_code, 202)
-            latest = CustomerRegistrationChallenge.query.order_by(CustomerRegistrationChallenge.created_at.desc()).first()
-            self.assertEqual(latest.promoter_id, other.id)
+        cross = Promoter(business_id=self.other.id, name="Ajeno", username="ajeno")
+        cross.set_password("PromotorSeguro123")
+        db.session.add_all([other, cross]); db.session.commit()
+        valid = self.referred_payload(promoter=other)["referral_context"]
+        cross_context = self.referred_payload(slug="dos", promoter=cross)["referral_context"]
+        other.is_active = False; db.session.commit()
+        contexts = ("", "sin-firma", valid + "alterado", cross_context, valid)
+        for index, context in enumerate(contexts):
+            payload = dict(self.payload, phone=f"55 1000 00{index:02d}", referral_context=context)
+            self.assertEqual(self.client.post("/join/uno", json=payload).status_code, 201)
+        self.assertEqual(Customer.query.count(), len(contexts))
+        self.assertEqual(ReferralAttribution.query.count(), 0)
 
     def test_tampered_context_and_unsigned_code_are_ignored(self):
         tampered = dict(
@@ -330,7 +287,7 @@ class PromotersPhase78TestCase(unittest.TestCase):
             db.session.commit()
         db.session.rollback()
 
-    def test_concurrent_verification_creates_one_attribution(self):
+    def test_concurrent_direct_registration_creates_one_attribution(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             uri = f"sqlite:///{Path(directory, 'referrals.sqlite').as_posix()}"
             with patch.object(TestingConfig, "SQLALCHEMY_DATABASE_URI", uri):
@@ -346,25 +303,16 @@ class PromotersPhase78TestCase(unittest.TestCase):
             page = source.get(f"/join/concurrente?ref={referral_code}").get_data(as_text=True)
             context = re.search(r'name="referral_context" value="([^"]*)"', page).group(1)
             payload = dict(self.payload, referral_context=context)
-            self.assertEqual(source.post("/join/concurrente", json=payload).status_code, 202)
-            with app.app_context(): process_pending_registration_emails()
-            code = app.extensions["recovery_mailer"].outbox[-1]["code"]
-            with source.session_transaction() as browser:
-                challenge_id = browser["customer_registration_challenge_id"]
-                proof = browser["customer_registration_challenge_proof"]
-            def verify(_index):
+            def register(_index):
                 client = app.test_client()
-                with client.session_transaction() as browser:
-                    browser["customer_registration_challenge_id"] = challenge_id
-                    browser["customer_registration_challenge_proof"] = proof
-                return client.post("/join/concurrente/verify", json={"code":code}).status_code
+                return client.post("/join/concurrente", json=payload).status_code
             with ThreadPoolExecutor(max_workers=2) as executor:
-                statuses = list(executor.map(verify, range(2)))
+                statuses = list(executor.map(register, range(2)))
             with app.app_context():
                 self.assertEqual(Customer.query.count(), 1)
                 self.assertEqual(ReferralAttribution.query.count(), 1)
                 db.session.remove()
-            self.assertIn(201, statuses)
+            self.assertEqual(sorted(statuses), [201, 409])
 
 
 if __name__ == "__main__":

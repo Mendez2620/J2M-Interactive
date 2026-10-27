@@ -1,19 +1,21 @@
-# Registro verificado de clientes
+# Registro directo de clientes sin correo
 
-El alta pública crea primero un desafío temporal y solo crea el cliente después de consumir correctamente el código enviado por correo. Los códigos se almacenan únicamente como HMAC, caducan, limitan intentos y solicitudes, y no producen enlaces Wallet antes de verificar el correo.
+El alta pública solicita nombre, teléfono internacional, aceptación de Términos y Aviso de Privacidad, y opcionalmente fecha de nacimiento y consentimiento de marketing. No solicita correo, no crea códigos OTP y no depende de SMTP. La tarjeta y el cliente se crean juntos en una única transacción.
 
-La aceptación de Términos y Aviso de Privacidad es obligatoria, versionada e independiente del consentimiento opcional de marketing. Las cuentas históricas conservan sus datos y permanecen sin marcar como verificadas hasta completar un proceso futuro expresamente diseñado para ellas.
+La identidad se reserva por negocio mediante un HMAC estable del teléfono y la restricción compuesta de `customer_registration_identity_claims`. Esto permite el mismo teléfono en negocios distintos, pero evita duplicados y carreras dentro de un tenant. `REGISTRATION_IDENTITY_HMAC_KEY` debe ser estable, exclusiva y distinta de las claves de sesión y JWT.
 
-Cada solicitud conserva la fecha UTC de aceptación, la versión visible y un SHA-256 del documento presentado. Si cambia un documento, debe cambiar también su variable de versión. Los desafíos anteriores a esta evidencia se invalidan durante la migración y deben solicitarse nuevamente.
+La aceptación legal conserva fecha UTC, versión y SHA-256 del contenido presentado. La atribución de promotor usa un contexto firmado, vuelve a validar negocio y estado del promotor dentro de la transacción y bloquea la autorreferencia por teléfono.
 
-`REGISTRATION_IDENTITY_HMAC_KEY` es una clave dedicada, estable e independiente de `SECRET_KEY` y `JWT_SECRET_KEY`. Producción no arranca si falta, es corta o reutiliza alguna de esas claves. Rotar la clave de sesión Flask no altera las reservas de identidad; la clave de identidad no debe rotarse sin una migración explícita de sus HMAC.
+## Datos históricos
 
-Las respuestas públicas válidas usan siempre HTTP 202 y el mismo cuerpo para identidades nuevas, existentes o limitadas. La solicitud HTTP nunca llama a SMTP: el desafío y un trabajo de correo con el código cifrado se confirman en una sola transacción y un worker independiente realiza la entrega. Las identidades existentes, incluidas las cuentas históricas sin `email_verified_at`, no generan correo de registro; la interfaz remite al flujo de recuperación verificada sin confirmar que exista una cuenta.
+Las columnas de correo, desafíos y trabajos del outbox se conservan para no destruir historial. Los clientes nuevos guardan `email=NULL` y `email_verified_at=NULL`; ningún endpoint público crea nuevos desafíos o correos de registro. Una eliminación o anonimización futura de correos históricos requiere política de retención, revisión legal, respaldo probado y una migración separada.
 
-`REGISTRATION_EMAIL_ENCRYPTION_KEY` protege temporalmente el código del outbox y debe ser estable, exclusiva y distinta de las claves de sesión, JWT e identidad. No debe rotarse mientras existan trabajos pendientes. Consulte [Operación del worker de correos de registro](registration-email-worker.md).
+## Recuperación
 
-## Validaciones operativas pendientes
+La recuperación pública está deshabilitada: nombre, fecha de nacimiento, teléfono y el QR operativo de caja no prueban legítima posesión. Los clientes históricos no pierden saldos, movimientos ni identificadores Wallet. Quien necesite recuperar una tarjeta debe acudir al negocio; una fase futura diseñará un flujo asistido con permisos explícitos, motivo obligatorio, auditoría persistente y revocación de sesiones.
 
-- El transporte SMTP en memoria solo se utiliza en pruebas. Antes del despliegue debe comprobarse entrega, reintentos y reputación con SMTP real. Las pruebas locales reducen diferencias previsibles, pero no constituyen una garantía absoluta contra análisis temporal en redes reales.
-- La migración debe ejecutarse de forma controlada y validarse en una copia de PostgreSQL antes de Railway. No se ejecuta automáticamente ni se aplicó a Supabase durante esta fase.
-- La experiencia final de correo y Wallet requiere validación manual en dispositivos físicos y con las credenciales externas del entorno de staging.
+Después de un alta correcta, el mismo navegador conserva durante un periodo corto una credencial aleatoria de entrega. Mientras siga vigente, una recarga puede volver a obtener enlaces temporales para el mismo cliente y los mismos identificadores Wallet. La credencial está ligada a la sesión firmada, no crea clientes ni pases nuevos y no constituye recuperación pública.
+
+Los intentos de alta reservan cuota por teléfono y por IP antes de comprobar duplicados. Las reservas se confirman antes de la transacción del cliente para que los conflictos y rollbacks posteriores no permitan intentos ilimitados.
+
+La experiencia Wallet debe validarse manualmente en dispositivos físicos. No se ejecutaron migraciones ni se modificaron Railway o Supabase reales.
