@@ -93,6 +93,11 @@ Configure servicios separados que compartan imagen y base, pero no comando:
 Use `J2M_PROCESS_TYPE=web`, `registration-worker` o `google-wallet-worker` según
 el servicio. El `HEALTHCHECK` de la imagen consulta `/api/health` únicamente en
 modo web; en un worker comprueba que PID 1 corresponda al comando esperado.
+Como defensa para servicios legacy que todavía no declaren `J2M_PROCESS_TYPE`,
+el healthcheck detecta el comando de PID 1 (Gunicorn web o worker conocido);
+si no reconoce un único proceso válido, falla cerrado. **Defina siempre la
+variable explícitamente en Railway antes de declarar completado staging**.
+No sustituye los controles de progreso/backlog de los trabajadores.
 
 `railway.toml` no declara un healthcheck HTTP compartido. Configure desde el
 servicio web de Railway la ruta `/api/ready` y un timeout acorde al arranque.
