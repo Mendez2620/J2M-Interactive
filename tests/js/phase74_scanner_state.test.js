@@ -130,11 +130,12 @@ async function testPwaUpdateWaitsForSafeScannerState() {
 function element(dataset = {}) {
   const listeners = {};
   const classes = new Set(['hidden']);
+  const attributes = {};
   return {
     dataset, disabled:false, value:'', textContent:'', id:'', hidden:false,
     className:'',
     classList:{add:name => classes.add(name), remove:name => classes.delete(name), toggle:(name, force) => force ? classes.add(name) : classes.delete(name), contains:name => classes.has(name)},
-    setAttribute() {}, focus() { this.focused = true; },
+    setAttribute(name, value) { attributes[name] = value; }, removeAttribute(name) { delete attributes[name]; }, getAttribute(name) { return attributes[name]; }, focus() { this.focused = true; },
     addEventListener:(name, handler) => { listeners[name] = handler; },
     dispatch:async name => listeners[name]?.({target:this}),
     replaceChildren() { this.value = ''; this.options = []; }, appendChild(option) { this.options ||= []; this.options.push(option); if (!this.value) this.value = option.value; },
@@ -148,6 +149,7 @@ function scannerHarness(fetchImpl, {device = 'desktop', startError = null, getCa
     confirmPanel:element(), confirmTitle:element(), confirmCustomer:element(), confirmBefore:element(), confirmEffect:element(), cancel:element(), confirm:element(),
     successPanel:element(), successName:element(), successBalance:element(), scanNext:element(), purchase:element(), redeem:element(), reset:element(),
     earn:element({action:'earn_stamp'}), redeemAction:element({action:'redeem_stamp'}),
+    scanStep:element({scannerStep:'scan'}), reviewStep:element({scannerStep:'review'}), confirmStep:element({scannerStep:'confirm'}),
   };
   nodes.reader.id = 'test-reader';
   const one = {
@@ -160,7 +162,7 @@ function scannerHarness(fetchImpl, {device = 'desktop', startError = null, getCa
     '[data-success-panel]':nodes.successPanel, '[data-success-name]':nodes.successName, '[data-success-balance]':nodes.successBalance, '[data-scan-next]':nodes.scanNext, '[data-purchase-amount]':nodes.purchase,
     '[data-redeem-amount]':nodes.redeem, '[data-reset-scanner]':nodes.reset,
   };
-  const root = {dataset:{}, querySelector:selector => one[selector], querySelectorAll:selector => selector === '[data-action]' ? [nodes.earn, nodes.redeemAction] : [nodes.purchase, nodes.redeem]};
+  const root = {dataset:{}, querySelector:selector => one[selector], querySelectorAll:selector => selector === '[data-action]' ? [nodes.earn, nodes.redeemAction] : selector === '[data-scanner-step]' ? [nodes.scanStep, nodes.reviewStep, nodes.confirmStep] : [nodes.purchase, nodes.redeem]};
   const documentListeners = {};
   const document = {
     hidden:false,
@@ -204,6 +206,7 @@ async function testCameraIntegration() {
     assert.equal(url, '/api/web-scanner/lookup'); lookupCalls += 1;
     await sleep(500); return lookupSuccess('Cliente correcto');
   });
+  assert.equal(slow.nodes.scanStep.getAttribute('aria-current'), 'step', 'idle scanner starts at scan step');
   await slow.nodes.start.dispatch('click');
   for (let index = 0; index < 10; index += 1) slow.instances[0].callback('qr-repetido');
   assert.equal(slow.instances[0].paused, true, 'camera pauses before awaiting the lookup');
@@ -211,6 +214,9 @@ async function testCameraIntegration() {
   assert.equal(lookupCalls, 1, 'ten detections produce one effective lookup');
   assert.equal(slow.nodes.customerName.textContent, 'Cliente correcto');
   assert.equal(slow.nodes.customerPanel.classList.contains('hidden'), false);
+  assert.equal(slow.nodes.reviewStep.getAttribute('aria-current'), 'step', 'validated customer advances to review');
+  await slow.nodes.earn.dispatch('click');
+  assert.equal(slow.nodes.confirmStep.getAttribute('aria-current'), 'step', 'explicit operation advances to confirmation');
 
   const mobile = scannerHarness(async () => lookupSuccess('Cliente móvil'), {device:'mobile'});
   await mobile.nodes.start.dispatch('click');

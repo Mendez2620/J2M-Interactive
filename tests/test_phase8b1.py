@@ -1,4 +1,5 @@
 import re
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -14,13 +15,25 @@ class Phase8B1InterfaceTestCase(unittest.TestCase):
         template = self.read("app/templates/manager/base.html")
         for marker in (
             'id="managerDrawer"', "data-open-manager-drawer", "data-manager-backdrop",
-            "mobile-bottom", "env(safe-area-inset-bottom)", "aria-label=\"Acciones principales\"",
+            "mobile-bottom", "env(safe-area-inset-bottom)", "aria-label=\"Acciones principales\"", "inert",
         ):
             self.assertIn(marker, template)
         self.assertNotIn("overflow-x-auto gap-2 bg-slate-950", template)
-        self.assertIn("event.key==='Escape'", template)
-        self.assertIn("event.key==='Tab'", template)
-        self.assertIn("previousFocus?.focus()", template)
+        drawer_script = self.read("app/static/js/manager-drawer.js")
+        self.assertIn("event.key === 'Escape'", drawer_script)
+        self.assertIn("event.key !== 'Tab'", drawer_script)
+        self.assertIn('input:not([type="hidden"])', drawer_script)
+        self.assertIn("drawer.inert = true", drawer_script)
+
+    def test_manager_drawer_keyboard_behavior(self):
+        result = subprocess.run(
+            ["node", "tests/js/phase8b1_manager_drawer.test.js"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_navigation_remains_permission_gated_and_logout_is_post_csrf(self):
         template = self.read("app/templates/manager/base.html")
@@ -42,6 +55,11 @@ class Phase8B1InterfaceTestCase(unittest.TestCase):
             self.assertIn(marker, template)
         self.assertIn("La cámara se activa solo cuando tú lo indicas", template)
         self.assertIn("ningún saldo cambiará", template)
+        for step in ("scan", "review", "confirm"):
+            self.assertIn(f'data-scanner-step="{step}"', template)
+        scanner_script = self.read("app/static/js/web-scanner.js")
+        self.assertIn("function updateProgress()", scanner_script)
+        self.assertIn("aria-current", scanner_script)
 
     def test_staff_mobile_navigation_keeps_post_logout_and_safe_area(self):
         template = self.read("app/templates/staff/scanner.html")
