@@ -1,4 +1,4 @@
-from flask import Blueprint, current_app, g, redirect, render_template, request, url_for
+from flask import Blueprint, current_app, g, redirect, render_template, request, session, url_for
 from sqlalchemy import func, or_
 
 from app.manager_auth import (
@@ -9,6 +9,7 @@ from app.permissions import has_permission
 from app.services.auth_rate_limit_service import (
     AuthRateLimitUnavailable, clear_auth_attempts, reserve_auth_attempt,
 )
+from app.services.unified_staff_access_service import unified_staff_access
 
 
 staff_portal_bp = Blueprint("staff_portal", __name__, url_prefix="/staff")
@@ -24,10 +25,14 @@ def staff_private_cache(response):
 
 @staff_portal_bp.route("/login", methods=["GET", "POST"])
 def staff_login():
+    if request.method == "GET" and request.args.get("legacy") != "1":
+        return unified_staff_access()
     error = "La sesión de seguridad cambió. Inicia sesión nuevamente." if request.args.get("csrf_error") else None
     status = 200
     remembered_business = (request.cookies.get("j2m_staff_business") or "").strip().lower()
     if request.method == "POST":
+        session.pop("staff_access_choice", None)
+        session.pop("manager_account_choice", None)
         identity = (request.form.get("identity") or "").strip().lower()
         password = request.form.get("password") or ""
         business_slug = (request.form.get("business_slug") or "").strip().lower()
@@ -76,7 +81,7 @@ def staff_login():
 @staff_portal_bp.route("/logout", methods=["POST"])
 def staff_logout():
     revoke_current_staff_session()
-    return redirect(url_for("staff_portal.staff_login"))
+    return redirect(url_for("main.staff_access"))
 
 
 @staff_portal_bp.route("/portal/scanner", methods=["GET"])

@@ -31,6 +31,7 @@ class Staff(db.Model):
     # Unique constraint per business (same username can exist across different businesses)
     __table_args__ = (
         db.UniqueConstraint("business_id", "username", name="uq_business_username"),
+        db.Index("ix_staff_email_lower", db.func.lower(email)),
     )
 
     # Relationships

@@ -12,6 +12,7 @@ from app.access_audit import access_audit, staff_access_state
 from app.manager_auth import create_manager_browser_session, manager_portal_required, revoke_current_manager_session
 from app.permissions import effective_permissions, has_permission
 from app.services.auth_rate_limit_service import AuthRateLimitUnavailable, clear_auth_attempts, reserve_auth_attempt
+from app.services.unified_staff_access_service import unified_staff_access
 
 manager_bp = Blueprint("manager", __name__, url_prefix="/manager")
 # Legacy test hook; authentication throttling is persisted in auth_rate_limit_slots.
@@ -64,8 +65,11 @@ def create_cashier(business_id):
     password_error = validate_password(password)
     if not username or password_error:
         return jsonify({"status": "error", "message": password_error or "username requerido"}), 400
+    email = (data.get("email") or "").strip().lower() or None
+    if email and not valid_email(email):
+        return jsonify({"status": "error", "message": "Correo electrónico inválido."}), 400
     cashier = Staff(business_id=business_id, username=username, name=data.get("name"),
-                    email=data.get("email"), phone=data.get("phone"), role="cashier",
+                    email=email, phone=data.get("phone"), role="cashier",
                     permissions="scanner_operate", mobile_access_enabled=False, web_access_enabled=False)
     cashier.set_password(password)
     try:
@@ -102,7 +106,7 @@ def edit_cashier(business_id, staff_id):
     data = request.get_json(silent=True) or {}
     if set(data) - {"name", "email", "phone"}:
         return jsonify({"status": "error", "message": "Solo pueden editarse nombre, correo y teléfono."}), 400
-    email = (data.get("email") or "").strip() or None
+    email = (data.get("email") or "").strip().lower() or None
     if email and not valid_email(email):
         return jsonify({"status": "error", "message": "Correo electrónico inválido."}), 400
     if "name" in data:
@@ -242,6 +246,8 @@ def _portal_destination(staff):
 
 @manager_bp.route("/login", methods=["GET", "POST"])
 def manager_login():
+    if request.method == "GET":
+        return unified_staff_access()
     error = "La sesión de seguridad cambió. Inicia sesión nuevamente." if request.args.get("csrf_error") else None
     status = 200
     account_choices = None
@@ -263,10 +269,14 @@ def manager_login():
                 return redirect(_portal_destination(staff))
             session.pop("manager_account_choice", None)
             error, status = "No fue posible iniciar sesión con esas credenciales.", 401
-            return render_template("manager/login.html", error=error, account_choices=None), status
+            return render_template(
+                "staff/access.html", error=error, account_choices=None,
+                account_form_action=url_for("manager.manager_login"),
+            ), status
 
         # Any credential submission supersedes an earlier account choice.
         session.pop("manager_account_choice", None)
+        session.pop("staff_access_choice", None)
         # ``identity`` remains a compatibility input for older web clients; the
         # current portal deliberately requests email only.
         identity = (request.form.get("email") or request.form.get("identity") or "").strip().lower()
@@ -308,13 +318,16 @@ def manager_login():
                 staff = eligible[0]
                 create_manager_browser_session(staff, remember=remember)
                 return redirect(_portal_destination(staff))
-    return render_template("manager/login.html", error=error, account_choices=account_choices), status
+    return render_template(
+        "staff/access.html", error=error, account_choices=account_choices,
+        account_form_action=url_for("manager.manager_login"),
+    ), status
 
 
 @manager_bp.route("/logout", methods=["POST"])
 def manager_logout():
     revoke_current_manager_session()
-    return redirect(url_for("manager.manager_login"))
+    return redirect(url_for("main.staff_access"))
 
 
 def _portal_context(active):
@@ -464,8 +477,12 @@ def portal_create_cashier():
     if not username or error:
         flash(error or "El usuario es obligatorio.", "error")
         return redirect(url_for("manager.portal_cashiers"))
+    email = (data.get("email") or "").strip().lower() or None
+    if email and not valid_email(email):
+        flash("Correo electrónico inválido.", "error")
+        return redirect(url_for("manager.portal_cashiers"))
     cashier = Staff(business_id=g.manager.business_id, username=username, name=(data.get("name") or "").strip() or None,
-                    email=(data.get("email") or "").strip() or None, phone=(data.get("phone") or "").strip() or None,
+                    email=email, phone=(data.get("phone") or "").strip() or None,
                     role="cashier", permissions="scanner_operate", mobile_access_enabled=False, web_access_enabled=False)
     cashier.set_password(password)
     try:
@@ -482,7 +499,7 @@ def portal_create_cashier():
 def portal_edit_cashier(staff_id):
     cashier = Staff.query.filter_by(id=staff_id, business_id=g.manager.business_id, role="cashier").first_or_404()
     cashier.name = (request.form.get("name") or "").strip() or None
-    email = (request.form.get("email") or "").strip() or None
+    email = (request.form.get("email") or "").strip().lower() or None
     if email and not valid_email(email):
         flash("Correo electrónico inválido.", "error"); return redirect(url_for("manager.portal_cashiers"))
     cashier.email, cashier.phone = email, (request.form.get("phone") or "").strip() or None

@@ -1,4 +1,4 @@
-from flask import Blueprint, current_app, jsonify, make_response, render_template, send_from_directory
+from flask import Blueprint, current_app, jsonify, make_response, send_from_directory
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from app.extensions import db
@@ -12,14 +12,15 @@ from app.routes.manager import manager_bp
 from app.routes.apple_webservice import apple_ws_bp
 from app.routes.customer_recovery import recovery_bp
 from app.routes.promoter import promoter_bp
+from app.services.unified_staff_access_service import unified_staff_access
 
 # Health Check Blueprint or root API routes
 main_bp = Blueprint("main", __name__)
 
 
-@main_bp.route("/staff-access", methods=["GET"])
+@main_bp.route("/staff-access", methods=["GET", "POST"])
 def staff_access():
-    return render_template("staff/access.html")
+    return unified_staff_access()
 
 
 @main_bp.route("/api/health", methods=["GET"])

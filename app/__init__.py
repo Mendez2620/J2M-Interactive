@@ -137,7 +137,7 @@ def create_app(config_name=None):
         g.request_id = secrets.token_hex(16)
         g.csp_nonce = secrets.token_urlsafe(18)
         protected_manager_path = request.path in {"/manager/login", "/manager/logout"} or request.path.startswith("/manager/portal")
-        protected_staff_path = request.path.startswith("/staff/") or request.path.startswith("/api/web-scanner/")
+        protected_staff_path = request.path == "/staff-access" or request.path.startswith("/staff/") or request.path.startswith("/api/web-scanner/")
         protected_recovery_path = request.path.startswith("/recover/")
         protected_join_path = request.path.startswith("/join/")
         protected_promoter_path = request.path.startswith("/promoter/")
