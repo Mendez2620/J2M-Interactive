@@ -2,7 +2,8 @@
   "private": true,
   "scripts": {
     "build:css": "tailwindcss -i ./app/static/css/tailwind.input.css -o ./app/static/css/tailwind.min.css --minify",
-    "test:phase74-js": "node tests/js/phase74_scanner_state.test.js"
+    "test:phase74-js": "node tests/js/phase74_scanner_state.test.js",
+    "test:phase8b1-js": "node tests/js/phase8b1_manager_drawer.test.js"
   },
   "devDependencies": {
     "@tailwindcss/cli": "4.3.0",
