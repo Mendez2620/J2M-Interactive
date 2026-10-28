@@ -25,6 +25,19 @@
   let preferredCameraId = null;
   let pendingConfirmation = null;
 
+  function updateProgress() {
+    let current = 'scan';
+    if (!confirmPanel.classList.contains('hidden') || !successPanel.classList.contains('hidden') || ['processing', 'uncertain'].includes(state.phase)) current = 'confirm';
+    else if (state.phase === 'selected') current = 'review';
+    root.querySelectorAll('[data-scanner-step]').forEach(step => {
+      const active = step.dataset.scannerStep === current;
+      step.classList.toggle('bg-indigo-50', active);
+      step.classList.toggle('text-indigo-700', active);
+      if (active) step.setAttribute('aria-current', 'step');
+      else step.removeAttribute('aria-current');
+    });
+  }
+
   function publishPhase() {
     root.dataset.scannerPhase = state.phase;
     if (typeof window.CustomEvent === 'function') window.dispatchEvent(new window.CustomEvent('j2m:scanner-phase', {detail:{phase:state.phase}}));
@@ -54,6 +67,7 @@
     root.querySelector('[data-reset-scanner]').disabled = ['processing', 'uncertain'].includes(state.phase);
     root.querySelector('[data-confirm-operation]').disabled = state.phase === 'processing';
     root.querySelectorAll('[data-purchase-amount],[data-redeem-amount]').forEach(input => { input.disabled = ['processing', 'uncertain'].includes(state.phase); });
+    updateProgress();
     publishPhase();
   }
   function clearSelection() {
@@ -210,6 +224,7 @@
     root.querySelector('[data-confirm-effect]').textContent = copy.effect;
     confirmPanel.classList.remove('hidden');
     customerPanel.classList.add('hidden');
+    updateProgress();
     root.querySelector('[data-confirm-operation]').focus();
   }
   function cancelConfirmation() {

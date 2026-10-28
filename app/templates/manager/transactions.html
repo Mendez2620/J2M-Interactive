@@ -1,8 +1,8 @@
 {% extends "manager/base.html" %}
 {% block portal_title %}Movimientos{% endblock %}
 {% block portal_content %}
-<h1 class="text-2xl font-extrabold">Movimientos</h1><p class="text-slate-500 mb-5">Historial inmutable del programa de lealtad.</p>
-<form action="{{ url_for('manager.portal_transactions') }}" data-ajax-search data-ajax-target="#transaction-results" class="grid sm:grid-cols-4 gap-3 mb-5">
+<div class="mb-6"><p class="text-xs font-bold uppercase tracking-[.16em] text-indigo-600">Actividad del programa</p><h1 class="mt-1 text-2xl font-extrabold sm:text-3xl">Movimientos</h1><p class="mt-1 text-slate-500">Historial inmutable del programa de lealtad.</p></div>
+<form action="{{ url_for('manager.portal_transactions') }}" data-ajax-search data-ajax-target="#transaction-results" class="metric mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4" aria-label="Filtros de movimientos">
   <select name="type" class="field"><option value="">Todos</option><option value="earn" {{ 'selected' if movement == 'earn' }}>Otorgados</option><option value="redeem" {{ 'selected' if movement == 'redeem' }}>Canjeados</option></select>
   <input type="date" name="from" value="{{ request.args.get('from','') }}" aria-label="Desde" class="field">
   <input type="date" name="to" value="{{ request.args.get('to','') }}" aria-label="Hasta" class="field">
