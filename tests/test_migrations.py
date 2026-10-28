@@ -118,6 +118,38 @@ class MigrationTestCase(unittest.TestCase):
                 self.assertTrue({"logo_path", "cover_path"} <= columns)
                 self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "f9a0b1c2d3e4")
 
+    def test_staff_email_index_upgrade_and_downgrade_preserve_existing_staff(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            path = Path(directory) / "staff-email-index.sqlite"
+            self.upgrade(path, "f9a0b1c2d3e4")
+            with sqlite3.connect(path) as connection:
+                connection.execute(
+                    "INSERT INTO businesses (id, name, slug, primary_color, secondary_color, loyalty_type, points_per_currency, stamps_reward_limit, cooldown_minutes, is_active, web_access_enabled, mobile_access_enabled, created_at) VALUES (1, 'Existente', 'existente', '#000000', '#FFFFFF', 'stamps', 1.0, 10, 0, 1, 1, 0, '2026-01-01')"
+                )
+                connection.execute(
+                    "INSERT INTO staff (id, business_id, username, email, password_hash, role, is_active, web_access_enabled, mobile_access_enabled, auth_version, permissions, created_at) VALUES (1, 1, 'existente', 'Mixto@Example.Test', 'hash', 'manager', 1, 1, 0, 1, 'view_stats', '2026-01-01')"
+                )
+            self.upgrade(path)
+            with sqlite3.connect(path) as connection:
+                self.assertEqual(
+                    connection.execute("SELECT username, email FROM staff WHERE id = 1").fetchone(),
+                    ("existente", "Mixto@Example.Test"),
+                )
+                index_sql = connection.execute(
+                    "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'ix_staff_email_lower'"
+                ).fetchone()[0].lower()
+                self.assertIn("lower(email)", index_sql)
+            result = self.run_db_command(path, "downgrade", "f9a0b1c2d3e4")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            with sqlite3.connect(path) as connection:
+                self.assertEqual(
+                    connection.execute("SELECT username, email FROM staff WHERE id = 1").fetchone(),
+                    ("existente", "Mixto@Example.Test"),
+                )
+                self.assertIsNone(connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'ix_staff_email_lower'"
+                ).fetchone())
+
     def test_idempotency_migration_preserves_rows_and_scopes_keys_by_business(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             path = Path(directory) / "idempotency.sqlite"

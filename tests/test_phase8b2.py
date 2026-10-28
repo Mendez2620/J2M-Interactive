@@ -43,6 +43,11 @@ class UnifiedStaffAccessPhase8B2TestCase(unittest.TestCase):
             "email": email, "password": password, "remember": "1" if remember else "0",
         })
 
+    def assert_private_no_store(self, response):
+        self.assertIn("no-store", response.headers.get("Cache-Control", ""))
+        self.assertIn("private", response.headers.get("Cache-Control", ""))
+        self.assertEqual(response.headers.get("Pragma"), "no-cache")
+
     def test_single_manager_and_cashier_open_role_specific_portals(self):
         manager = self.login("GERENTE@example.test")
         self.assertEqual(manager.status_code, 302); self.assertIn("/manager/portal", manager.location)
@@ -121,6 +126,12 @@ class UnifiedStaffAccessPhase8B2TestCase(unittest.TestCase):
         with self.client.session_transaction() as browser:
             self.assertNotIn("staff_access_choice", browser)
             self.assertNotIn("manager_staff_id", browser)
+        overflow = Staff.query.filter_by(email="bounded@example.test").order_by(Staff.id.desc()).first()
+        overflow.email = "resolved@example.test"; db.session.commit()
+        resolved = self.login("bounded@example.test", "BoundedPassword123!")
+        self.assertEqual(resolved.status_code, 200)
+        resolved_html = resolved.get_data(as_text=True)
+        self.assertIn("Negocio 0", resolved_html); self.assertIn("Negocio 1", resolved_html)
 
     def test_remembered_session_is_revocable_and_bound_to_auth_version(self):
         response = self.login(self.manager.email, remember=True)
@@ -149,6 +160,37 @@ class UnifiedStaffAccessPhase8B2TestCase(unittest.TestCase):
         })
         self.assertEqual(response.status_code, 302); self.assertIn("/staff/portal/scanner", response.location)
 
+    def test_legacy_login_rejects_cashiers_with_email_and_unified_access_remains_available(self):
+        legacy_response = self.client.post("/staff/login", data={
+            "identity": self.cashier.username, "business_slug": self.business.slug,
+            "password": "Password123!",
+        })
+        self.assertEqual(legacy_response.status_code, 401)
+        self.assertIn("No fue posible iniciar sesión", legacy_response.get_data(as_text=True))
+        self.assertEqual(StaffSession.query.filter_by(staff_id=self.cashier.id).count(), 0)
+        unified = self.login(self.cashier.email)
+        self.assertEqual(unified.status_code, 302); self.assertIn("/staff/portal/scanner", unified.location)
+
+    def test_staff_access_responses_are_private_and_service_worker_never_caches_them(self):
+        self.assert_private_no_store(self.client.get("/staff-access"))
+        error = self.login("missing@example.test", "WrongPassword123!")
+        self.assertEqual(error.status_code, 401); self.assert_private_no_store(error)
+        second = self.staff(
+            self.other, "cache-manager", "manager", self.manager.email,
+            "Password123!", "view_stats",
+        )
+        credentials = self.login(self.manager.email)
+        self.assertEqual(credentials.status_code, 200); self.assert_private_no_store(credentials)
+        selector = self.client.get("/staff-access")
+        self.assertEqual(selector.status_code, 200); self.assert_private_no_store(selector)
+        selected = self.client.post("/staff-access", data={"account_id": second.id})
+        self.assertEqual(selected.status_code, 302); self.assert_private_no_store(selected)
+        worker_response = self.client.get("/service-worker.js")
+        worker = worker_response.get_data(as_text=True); worker_response.close()
+        self.assertNotIn("'/staff-access'", worker)
+        self.assertIn("SAFE_ASSETS.includes(url.pathname)", worker)
+        self.assertIn("request.mode === 'navigate'", worker)
+
     def test_unified_ui_replaces_role_choice_and_keeps_pwa_contract(self):
         for path in ("/staff-access", "/manager/login", "/staff/login"):
             response = self.client.get(path)
@@ -165,7 +207,8 @@ class UnifiedStaffAccessPhase8B2TestCase(unittest.TestCase):
     def test_csrf_protects_login_and_account_selection(self):
         self.app.config["CSRF_ENABLED"] = True
         client = self.app.test_client()
-        self.assertEqual(client.post("/staff-access", data={"email": self.manager.email, "password": "Password123!"}).status_code, 400)
+        missing_csrf = client.post("/staff-access", data={"email": self.manager.email, "password": "Password123!"})
+        self.assertEqual(missing_csrf.status_code, 400); self.assert_private_no_store(missing_csrf)
         with client.session_transaction() as browser: browser["csrf_token"] = "phase8b2-csrf"
         second = self.staff(self.other, "manager-csrf", "manager", self.manager.email, "Password123!", "view_stats")
         response = client.post("/staff-access", data={

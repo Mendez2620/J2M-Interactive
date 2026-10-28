@@ -206,7 +206,10 @@ def create_app(config_name=None):
             csp = "default-src 'self'; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'"
         response.headers.setdefault("Content-Security-Policy", csp)
         response.headers.setdefault("X-Request-ID", getattr(g, "request_id", ""))
-        if request.path.startswith(("/admin", "/manager", "/staff", "/recover", "/api/scanner", "/api/web-scanner")):
+        if request.path == "/staff-access":
+            response.headers["Cache-Control"] = "no-store, private"
+            response.headers["Pragma"] = "no-cache"
+        elif request.path.startswith(("/admin", "/manager", "/staff", "/recover", "/api/scanner", "/api/web-scanner")):
             response.headers.setdefault("Cache-Control", "no-store")
         duration_ms = round((time.perf_counter() - getattr(g, "request_started_at", time.perf_counter())) * 1000, 2)
         if app.config.get("LOG_REQUESTS"):

@@ -1,5 +1,6 @@
 from flask import Blueprint, current_app, g, redirect, render_template, request, session, url_for
-from sqlalchemy import func, or_
+from sqlalchemy import or_
+from werkzeug.security import check_password_hash, generate_password_hash
 
 from app.manager_auth import (
     create_staff_browser_session, revoke_current_staff_session, staff_portal_required,
@@ -13,6 +14,7 @@ from app.services.unified_staff_access_service import unified_staff_access
 
 
 staff_portal_bp = Blueprint("staff_portal", __name__, url_prefix="/staff")
+_LEGACY_DUMMY_PASSWORD_HASH = generate_password_hash("J2M-legacy-invalid-credential-padding-only")
 
 
 @staff_portal_bp.after_request
@@ -46,12 +48,14 @@ def staff_login():
         if status == 200 and reservation is None:
             error, status = "Demasiados intentos. Intenta más tarde.", 429
         elif status == 200:
-            query = Staff.query.join(Business).filter(
-                or_(func.lower(Staff.email) == identity, Staff.username == identity),
+            staff = Staff.query.join(Business).filter(
+                Staff.username == identity,
                 Business.slug == business_slug,
-            )
-            candidates = query.all() if identity and password and business_slug else []
-            staff = next((item for item in candidates if item.check_password(password)), None)
+                or_(Staff.email.is_(None), Staff.email == ""),
+            ).first() if identity and password and business_slug else None
+            password_hash = staff.password_hash if staff else _LEGACY_DUMMY_PASSWORD_HASH
+            if not check_password_hash(password_hash, password):
+                staff = None
             eligible = (
                 staff and staff.role == "cashier" and staff.is_active and staff.business.is_active
                 and staff.web_access_enabled and staff.business.web_access_enabled
