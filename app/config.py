@@ -92,6 +92,12 @@ class Config:
     REGISTRATION_IDENTITY_HMAC_KEY = os.getenv(
         "REGISTRATION_IDENTITY_HMAC_KEY", "development-registration-identity-key-32-bytes"
     )
+    # The first key signs new evidence. Retain older comma-separated keys to
+    # keep duplicate detection stable during controlled rotation.
+    REFERRAL_EVIDENCE_HMAC_KEYS = os.getenv(
+        "REFERRAL_EVIDENCE_HMAC_KEYS",
+        "development-referral-evidence-key-at-least-32-bytes",
+    )
     REGISTRATION_EMAIL_ENCRYPTION_KEY = os.getenv(
         "REGISTRATION_EMAIL_ENCRYPTION_KEY", "development-registration-email-encryption-key-32-bytes"
     )
@@ -168,6 +174,7 @@ class TestingConfig(Config):
     GOOGLE_ISSUER_ID = "3388000000000000000"
     REGISTRATION_RESPONSE_MIN_MS = 0
     REGISTRATION_IDENTITY_HMAC_KEY = "testing-registration-identity-key-32-bytes"
+    REFERRAL_EVIDENCE_HMAC_KEYS = "testing-referral-evidence-key-at-least-32-bytes"
     REGISTRATION_EMAIL_ENCRYPTION_KEY = "testing-registration-email-encryption-key-32-bytes"
 
 

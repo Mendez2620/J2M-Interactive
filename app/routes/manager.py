@@ -189,20 +189,32 @@ def manager_customers(business_id):
 def review_referral_eligibility(business_id, eligibility_id):
     if not validate_csrf():
         return jsonify({"status": "error", "message": "Token CSRF inválido o ausente."}), 400
-    denied = _own_business(business_id)
-    if denied:
-        return denied
+    return _apply_referral_decision(g.staff, business_id, eligibility_id)
+
+
+@manager_bp.post("/portal/referrals/<int:eligibility_id>/decision")
+@manager_portal_required("review_referrals")
+def portal_review_referral_eligibility(eligibility_id):
+    """Cookie-session integration point; listing/UI remains reserved for 8C.3."""
+    return _apply_referral_decision(g.manager, g.manager.business_id, eligibility_id)
+
+
+def _apply_referral_decision(actor, business_id, eligibility_id):
+    if actor.business_id != business_id:
+        return jsonify({"status": "error", "message": "Acceso a negocio no autorizado."}), 403
     data = request.get_json(silent=True)
     if not isinstance(data, dict) or set(data) - {
-        "status", "transaction_id", "evidence_reference", "reason", "request_id"
+        "status", "transaction_id", "evidence_reference", "evidence_type",
+        "reason", "request_id"
     }:
         return jsonify({"status": "error", "message": "Solicitud de revisión inválida."}), 400
     request_id = request.headers.get("Idempotency-Key") or data.get("request_id")
     try:
         result = decide_referral_eligibility(
-            business=g.staff.business, actor=g.staff, eligibility_id=eligibility_id,
+            business=actor.business, actor=actor, eligibility_id=eligibility_id,
             to_status=data.get("status"), transaction_id=data.get("transaction_id"),
-            evidence_reference=data.get("evidence_reference"), reason=data.get("reason"),
+            evidence_reference=data.get("evidence_reference"),
+            evidence_type=data.get("evidence_type"), reason=data.get("reason"),
             request_id=request_id,
         )
     except ReferralEligibilityError as exc:

@@ -35,24 +35,60 @@ _TRANSITIONS = {
 }
 
 
-def _digest(value, purpose):
-    key = current_app.config["SECRET_KEY"].encode("utf-8")
-    return hmac.new(key, f"{purpose}:{value}".encode("utf-8"), hashlib.sha256).hexdigest()
+def _evidence_keys():
+    configured = current_app.config.get("REFERRAL_EVIDENCE_HMAC_KEYS") or ()
+    values = configured if isinstance(configured, (list, tuple)) else str(configured).split(",")
+    keys = [str(item).strip() for item in values if str(item).strip()]
+    if not keys or any(len(item) < 32 for item in keys):
+        raise ReferralEligibilityError("La validación de evidencia no está configurada.", 503)
+    return keys
 
 
-def _fingerprint(eligibility_id, to_status, transaction_id, reference, reason):
-    canonical = json.dumps({
-        "eligibility_id": eligibility_id,
-        "to_status": to_status,
-        "transaction_id": transaction_id,
-        "reference_hash": _digest(reference, "referral-evidence") if reference else None,
-        "reason": reason,
-    }, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+def _evidence_hashes(value):
+    result = []
+    for key in _evidence_keys():
+        digest = hmac.new(
+            key.encode("utf-8"), f"referral-evidence:{value}".encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        result.append((digest, hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]))
+    return result
+
+
+def _fingerprints(eligibility_id, to_status, transaction_id, reference, evidence_type, reason):
+    reference_hashes = [item[0] for item in _evidence_hashes(reference)] if reference else [None]
+    fingerprints = []
+    for reference_hash in reference_hashes:
+        canonical = json.dumps({
+            "eligibility_id": eligibility_id,
+            "to_status": to_status,
+            "transaction_id": transaction_id,
+            "reference_hash": reference_hash,
+            "evidence_type": evidence_type,
+            "reason": reason,
+        }, sort_keys=True, separators=(",", ":"))
+        fingerprints.append(hashlib.sha256(canonical.encode("utf-8")).hexdigest())
+    return fingerprints
+
+
+def _first_eligible_transaction(business, eligibility):
+    query = Transaction.query.filter(
+        Transaction.business_id == business.id,
+        Transaction.customer_id == eligibility.customer_id,
+        Transaction.type == "earn",
+        Transaction.timestamp >= eligibility.attribution.created_at,
+        Transaction.timestamp >= eligibility.attribution.customer.created_at,
+    )
+    if business.loyalty_type == "stamps":
+        query = query.filter(Transaction.stamps_amount > 0)
+    else:
+        query = query.filter(Transaction.points_amount > 0, Transaction.purchase_amount > 0)
+    return query.order_by(Transaction.timestamp.asc(), Transaction.id.asc()).first()
 
 
 def decide_referral_eligibility(*, business, actor, eligibility_id, to_status,
-                                transaction_id, evidence_reference, reason, request_id):
+                                transaction_id, evidence_reference, evidence_type,
+                                reason, request_id):
     """Apply one conditional transition and append its audit record atomically."""
     if not business.is_active:
         raise ReferralEligibilityError("El negocio está suspendido.", 403)
@@ -62,16 +98,20 @@ def decide_referral_eligibility(*, business, actor, eligibility_id, to_status,
         raise ReferralEligibilityError("Estado de revisión inválido.")
     reason = reason.strip() if isinstance(reason, str) else ""
     reference = evidence_reference.strip() if isinstance(evidence_reference, str) else ""
+    evidence_type = evidence_type.strip() if isinstance(evidence_type, str) else ""
     if not reason or len(reason) > 500:
         raise ReferralEligibilityError("Indica un motivo de hasta 500 caracteres.")
     request_id = request_id.strip()
-    fingerprint = _fingerprint(eligibility_id, to_status, transaction_id, reference, reason)
+    fingerprints = _fingerprints(
+        eligibility_id, to_status, transaction_id, reference, evidence_type, reason
+    )
+    fingerprint = fingerprints[0]
 
     previous = ReferralEligibilityDecision.query.filter_by(
         business_id=business.id, request_id=request_id,
     ).first()
     if previous:
-        if previous.request_fingerprint != fingerprint:
+        if previous.request_fingerprint not in fingerprints:
             raise ReferralEligibilityError("El identificador ya se usó para otra decisión.", 409)
         return ReferralDecisionResult(db.session.get(ReferralEligibility, previous.eligibility_id), True)
 
@@ -90,8 +130,9 @@ def decide_referral_eligibility(*, business, actor, eligibility_id, to_status,
 
     transaction = None
     evidence_hash = None
+    evidence_key_id = None
     if to_status == "verified":
-        if not reference or len(reference) > 200:
+        if not 6 <= len(reference) <= 200:
             raise ReferralEligibilityError("Se requiere una referencia de evidencia válida.")
         if not isinstance(transaction_id, int) or isinstance(transaction_id, bool):
             raise ReferralEligibilityError("Se requiere una compra válida.")
@@ -99,12 +140,35 @@ def decide_referral_eligibility(*, business, actor, eligibility_id, to_status,
             id=transaction_id, business_id=business.id,
             customer_id=eligibility.customer_id, type="earn",
         ).first()
-        if not transaction or transaction.purchase_amount <= 0:
+        if not transaction:
+            raise ReferralEligibilityError("La compra indicada no es elegible.")
+        first = _first_eligible_transaction(business, eligibility)
+        if not first or first.id != transaction.id:
+            raise ReferralEligibilityError(
+                "Solo puede verificarse la primera compra elegible posterior a la atribución.", 409
+            )
+        if business.loyalty_type == "stamps" and transaction.purchase_amount <= 0:
+            if evidence_type != "manual_receipt":
+                raise ReferralEligibilityError(
+                    "Los sellos sin importe requieren comprobante manual revisado."
+                )
+        elif transaction.purchase_amount > 0:
+            if evidence_type != "recorded_amount":
+                raise ReferralEligibilityError("Selecciona evidencia de importe registrado.")
+        else:
             raise ReferralEligibilityError("La compra indicada no es elegible.")
         if not eligibility.attribution.promoter.is_active:
             raise ReferralEligibilityError("El promotor está suspendido.", 409)
-        evidence_hash = _digest(reference, "referral-evidence")
-    elif transaction_id is not None or reference:
+        hashes = _evidence_hashes(reference)
+        evidence_hash, evidence_key_id = hashes[0]
+        duplicate = ReferralEligibility.query.filter(
+            ReferralEligibility.business_id == business.id,
+            ReferralEligibility.id != eligibility.id,
+            ReferralEligibility.evidence_reference_hash.in_([item[0] for item in hashes]),
+        ).first()
+        if duplicate:
+            raise ReferralEligibilityError("La evidencia económica ya fue utilizada.", 409)
+    elif transaction_id is not None or reference or evidence_type:
         raise ReferralEligibilityError("La evidencia de compra solo se admite al verificar.")
 
     now = datetime.now(timezone.utc)
@@ -115,7 +179,10 @@ def decide_referral_eligibility(*, business, actor, eligibility_id, to_status,
         "version": eligibility.version + 1,
     }
     if to_status == "verified":
-        values.update(source_transaction_id=transaction.id, evidence_reference_hash=evidence_hash)
+        values.update(
+            source_transaction_id=transaction.id, evidence_reference_hash=evidence_hash,
+            evidence_type=evidence_type, evidence_key_id=evidence_key_id,
+        )
 
     try:
         changed = db.session.execute(
@@ -131,7 +198,7 @@ def decide_referral_eligibility(*, business, actor, eligibility_id, to_status,
             winner = ReferralEligibilityDecision.query.filter_by(
                 business_id=business.id, request_id=request_id,
             ).first()
-            if winner and winner.request_fingerprint == fingerprint:
+            if winner and winner.request_fingerprint in fingerprints:
                 return ReferralDecisionResult(
                     db.session.get(ReferralEligibility, winner.eligibility_id), True
                 )
@@ -140,7 +207,8 @@ def decide_referral_eligibility(*, business, actor, eligibility_id, to_status,
             business_id=business.id, eligibility_id=eligibility.id,
             actor_staff_id=actor.id, from_status=old_status, to_status=to_status,
             source_transaction_id=transaction.id if transaction else None,
-            evidence_reference_hash=evidence_hash, reason=reason,
+            evidence_reference_hash=evidence_hash, evidence_type=evidence_type or None,
+            evidence_key_id=evidence_key_id, reason=reason,
             request_id=request_id, request_fingerprint=fingerprint,
         ))
         db.session.commit()
@@ -149,7 +217,7 @@ def decide_referral_eligibility(*, business, actor, eligibility_id, to_status,
         winner = ReferralEligibilityDecision.query.filter_by(
             business_id=business.id, request_id=request_id,
         ).first()
-        if winner and winner.request_fingerprint == fingerprint:
+        if winner and winner.request_fingerprint in fingerprints:
             return ReferralDecisionResult(db.session.get(ReferralEligibility, winner.eligibility_id), True)
         raise ReferralEligibilityError("La evidencia o la decisión ya fue utilizada.", 409)
 

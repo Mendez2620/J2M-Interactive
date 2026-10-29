@@ -64,6 +64,16 @@ class MigrationTestCase(unittest.TestCase):
                 referral_fks = connection.execute("PRAGMA foreign_key_list(referral_attributions)").fetchall()
                 self.assertGreaterEqual(sum(1 for row in referral_fks if row[2] == "promoters"), 2)
                 self.assertGreaterEqual(sum(1 for row in referral_fks if row[2] == "customers"), 2)
+                eligibility_fks = connection.execute("PRAGMA foreign_key_list(referral_eligibilities)").fetchall()
+                decision_fks = connection.execute("PRAGMA foreign_key_list(referral_eligibility_decisions)").fetchall()
+                self.assertIn("RESTRICT", {row[6] for row in eligibility_fks if row[2] == "referral_attributions"})
+                self.assertIn("RESTRICT", {row[6] for row in decision_fks if row[2] == "referral_eligibilities"})
+                triggers = {row[0] for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='trigger'"
+                )}
+                self.assertTrue({
+                    "trg_referral_decisions_no_update", "trg_referral_decisions_no_delete"
+                } <= triggers)
                 self.assertEqual(connection.execute(
                     "SELECT version_num FROM alembic_version"
                 ).fetchone()[0], "1b2c3d4e5f6a")

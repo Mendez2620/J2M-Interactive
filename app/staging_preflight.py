@@ -87,7 +87,21 @@ def collect_preflight(config, *, check_database=False):
         _result(results, "ok" if valid else "error", name,
                 "Configurado con longitud suficiente y sin placeholder evidente."
                 if valid else "Falta una clave robusta y estable, sin placeholders.")
-    if all(secrets) and len(set(secrets)) == len(secrets):
+    evidence_config = config.get("REFERRAL_EVIDENCE_HMAC_KEYS") or ()
+    evidence_keys = (
+        [str(item).strip() for item in evidence_config if str(item).strip()]
+        if isinstance(evidence_config, (list, tuple))
+        else [item.strip() for item in str(evidence_config).split(",") if item.strip()]
+    )
+    evidence_valid = (
+        bool(evidence_keys) and len(evidence_keys) == len(set(evidence_keys))
+        and all(len(item) >= 32 and not _placeholder(item) for item in evidence_keys)
+    )
+    _result(results, "ok" if evidence_valid else "error", "REFERRAL_EVIDENCE_HMAC_KEYS",
+            "El anillo de evidencia contiene claves estables y robustas."
+            if evidence_valid else "Configure al menos una clave de evidencia robusta y estable.")
+    all_secrets = secrets + evidence_keys
+    if all(all_secrets) and len(set(all_secrets)) == len(all_secrets):
         _result(results, "ok", "secret_separation", "Las claves de propósitos incompatibles son distintas.")
     else:
         _result(results, "error", "secret_separation", "Cada propósito criptográfico requiere una clave distinta.")

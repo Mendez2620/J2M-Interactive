@@ -2,6 +2,7 @@ import secrets
 from datetime import datetime, timezone
 
 from werkzeug.security import check_password_hash, generate_password_hash
+from sqlalchemy import event
 
 from app.extensions import db
 
@@ -88,6 +89,8 @@ class ReferralEligibility(db.Model):
     status = db.Column(db.String(20), nullable=False, default="pending", index=True)
     source_transaction_id = db.Column(db.Integer, nullable=True, unique=True)
     evidence_reference_hash = db.Column(db.String(64), nullable=True)
+    evidence_type = db.Column(db.String(30), nullable=True)
+    evidence_key_id = db.Column(db.String(16), nullable=True)
     reviewed_by_staff_id = db.Column(db.Integer, db.ForeignKey("staff.id", ondelete="SET NULL"), nullable=True)
     reviewed_at = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
@@ -109,7 +112,7 @@ class ReferralEligibility(db.Model):
         db.ForeignKeyConstraint(
             ["business_id", "attribution_id"],
             ["referral_attributions.business_id", "referral_attributions.id"],
-            ondelete="CASCADE", name="fk_referral_eligibility_attribution_tenant",
+            ondelete="RESTRICT", name="fk_referral_eligibility_attribution_tenant",
         ),
         db.ForeignKeyConstraint(
             ["business_id", "promoter_id"], ["promoters.business_id", "promoters.id"],
@@ -140,6 +143,8 @@ class ReferralEligibilityDecision(db.Model):
     to_status = db.Column(db.String(20), nullable=False)
     source_transaction_id = db.Column(db.Integer, nullable=True)
     evidence_reference_hash = db.Column(db.String(64), nullable=True)
+    evidence_type = db.Column(db.String(30), nullable=True)
+    evidence_key_id = db.Column(db.String(16), nullable=True)
     reason = db.Column(db.String(500), nullable=False)
     request_id = db.Column(db.String(64), nullable=False)
     request_fingerprint = db.Column(db.String(64), nullable=False)
@@ -152,6 +157,12 @@ class ReferralEligibilityDecision(db.Model):
         db.ForeignKeyConstraint(
             ["business_id", "eligibility_id"],
             ["referral_eligibilities.business_id", "referral_eligibilities.id"],
-            ondelete="CASCADE", name="fk_referral_decision_eligibility_tenant",
+            ondelete="RESTRICT", name="fk_referral_decision_eligibility_tenant",
         ),
     )
+
+
+@event.listens_for(ReferralEligibilityDecision, "before_update")
+@event.listens_for(ReferralEligibilityDecision, "before_delete")
+def _referral_decision_is_append_only(_mapper, _connection, _target):
+    raise ValueError("El historial de elegibilidad es append-only.")

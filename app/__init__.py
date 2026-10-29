@@ -52,6 +52,19 @@ def create_app(config_name=None):
                 or any(value in identity_key.lower() for value in obvious_placeholders)):
             raise RuntimeError("Producción requiere REGISTRATION_IDENTITY_HMAC_KEY independiente y estable de al menos 32 caracteres.")
         app.config["REGISTRATION_IDENTITY_HMAC_KEY"] = identity_key
+        evidence_keys = [
+            item.strip() for item in os.getenv("REFERRAL_EVIDENCE_HMAC_KEYS", "").split(",")
+            if item.strip()
+        ]
+        if (not evidence_keys or len(evidence_keys) != len(set(evidence_keys))
+                or any(len(item) < 32 or item in {secret, jwt_secret, identity_key}
+                       or any(value in item.lower() for value in obvious_placeholders)
+                       for item in evidence_keys)):
+            raise RuntimeError(
+                "Producción requiere REFERRAL_EVIDENCE_HMAC_KEYS con claves estables, "
+                "independientes y de al menos 32 caracteres."
+            )
+        app.config["REFERRAL_EVIDENCE_HMAC_KEYS"] = tuple(evidence_keys)
         cors_origins = [item.strip() for item in str(app.config.get("CORS_ORIGINS") or "").split(",") if item.strip()]
         if not cors_origins or any(
             item == "*" or (lambda parsed: parsed.scheme != "https" or not parsed.hostname

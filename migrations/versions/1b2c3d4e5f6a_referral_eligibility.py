@@ -13,6 +13,38 @@ branch_labels = None
 depends_on = None
 
 
+def _create_append_only_guards(bind):
+    if bind.dialect.name == "postgresql":
+        op.execute("""
+            CREATE OR REPLACE FUNCTION prevent_referral_decision_mutation()
+            RETURNS trigger AS $$
+            BEGIN
+                RAISE EXCEPTION 'referral eligibility decisions are append-only';
+            END;
+            $$ LANGUAGE plpgsql
+        """)
+        op.execute("""
+            DROP TRIGGER IF EXISTS trg_referral_decisions_append_only
+            ON referral_eligibility_decisions
+        """)
+        op.execute("""
+            CREATE TRIGGER trg_referral_decisions_append_only
+            BEFORE UPDATE OR DELETE ON referral_eligibility_decisions
+            FOR EACH ROW EXECUTE FUNCTION prevent_referral_decision_mutation()
+        """)
+    elif bind.dialect.name == "sqlite":
+        op.execute("""
+            CREATE TRIGGER IF NOT EXISTS trg_referral_decisions_no_update
+            BEFORE UPDATE ON referral_eligibility_decisions
+            BEGIN SELECT RAISE(ABORT, 'referral eligibility decisions are append-only'); END
+        """)
+        op.execute("""
+            CREATE TRIGGER IF NOT EXISTS trg_referral_decisions_no_delete
+            BEFORE DELETE ON referral_eligibility_decisions
+            BEGIN SELECT RAISE(ABORT, 'referral eligibility decisions are append-only'); END
+        """)
+
+
 def upgrade():
     bind = op.get_bind()
     inspector = sa.inspect(bind)
@@ -22,12 +54,14 @@ def upgrade():
             raise RuntimeError("Esquema de elegibilidad previo incompleto: falta el historial.")
         required_columns = {
             "id", "business_id", "attribution_id", "promoter_id", "customer_id",
-            "status", "source_transaction_id", "evidence_reference_hash",
+            "status", "source_transaction_id", "evidence_reference_hash", "evidence_type",
+            "evidence_key_id",
             "reviewed_by_staff_id", "reviewed_at", "created_at", "updated_at", "version",
         }
         decision_columns = {
             "id", "business_id", "eligibility_id", "actor_staff_id", "from_status",
-            "to_status", "source_transaction_id", "evidence_reference_hash", "reason",
+            "to_status", "source_transaction_id", "evidence_reference_hash", "evidence_type",
+            "evidence_key_id", "reason",
             "request_id", "request_fingerprint", "created_at",
         }
         actual_columns = {item["name"] for item in inspector.get_columns("referral_eligibilities")}
@@ -40,7 +74,17 @@ def upgrade():
         decision_unique_names = {
             item["name"] for item in inspector.get_unique_constraints("referral_eligibility_decisions")
         }
-        fk_names = {item["name"] for item in inspector.get_foreign_keys("referral_eligibilities")}
+        eligibility_fks = inspector.get_foreign_keys("referral_eligibilities")
+        fk_names = {item["name"] for item in eligibility_fks}
+        decision_fks = inspector.get_foreign_keys("referral_eligibility_decisions")
+        attribution_fk = next(
+            (item for item in eligibility_fks
+             if item["name"] == "fk_referral_eligibility_attribution_tenant"), None
+        )
+        decision_fk = next(
+            (item for item in decision_fks
+             if item["name"] == "fk_referral_decision_eligibility_tenant"), None
+        )
         if (
             not required_columns <= actual_columns
             or not decision_columns <= actual_decision_columns
@@ -52,11 +96,16 @@ def upgrade():
                 "fk_referral_eligibility_customer_tenant",
                 "fk_referral_eligibility_transaction_tenant",
             } <= fk_names
+            or not attribution_fk
+            or str(attribution_fk.get("options", {}).get("ondelete", "")).upper() != "RESTRICT"
+            or not decision_fk
+            or str(decision_fk.get("options", {}).get("ondelete", "")).upper() != "RESTRICT"
         ):
             raise RuntimeError("Esquema de elegibilidad previo incompatible; no se marcará la revisión.")
         if bind.dialect.name == "postgresql":
             op.execute("ALTER TABLE referral_eligibilities ENABLE ROW LEVEL SECURITY")
             op.execute("ALTER TABLE referral_eligibility_decisions ENABLE ROW LEVEL SECURITY")
+        _create_append_only_guards(bind)
         return
     with op.batch_alter_table("referral_attributions") as batch:
         batch.create_unique_constraint(
@@ -75,6 +124,8 @@ def upgrade():
         sa.Column("status", sa.String(20), server_default="pending", nullable=False),
         sa.Column("source_transaction_id", sa.Integer(), nullable=True),
         sa.Column("evidence_reference_hash", sa.String(64), nullable=True),
+        sa.Column("evidence_type", sa.String(30), nullable=True),
+        sa.Column("evidence_key_id", sa.String(16), nullable=True),
         sa.Column("reviewed_by_staff_id", sa.Integer(), nullable=True),
         sa.Column("reviewed_at", sa.DateTime(), nullable=True),
         sa.Column("created_at", sa.DateTime(), nullable=False),
@@ -88,7 +139,7 @@ def upgrade():
         sa.ForeignKeyConstraint(
             ["business_id", "attribution_id"],
             ["referral_attributions.business_id", "referral_attributions.id"],
-            name="fk_referral_eligibility_attribution_tenant", ondelete="CASCADE",
+            name="fk_referral_eligibility_attribution_tenant", ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
             ["business_id", "promoter_id"], ["promoters.business_id", "promoters.id"],
@@ -113,7 +164,6 @@ def upgrade():
     op.create_index("ix_referral_eligibilities_promoter_id", "referral_eligibilities", ["promoter_id"])
     op.create_index("ix_referral_eligibilities_status", "referral_eligibilities", ["status"])
 
-    now = sa.func.now()
     attributions = sa.table(
         "referral_attributions",
         sa.column("id", sa.Integer), sa.column("business_id", sa.Integer),
@@ -126,17 +176,15 @@ def upgrade():
         sa.column("status", sa.String), sa.column("created_at", sa.DateTime),
         sa.column("updated_at", sa.DateTime), sa.column("version", sa.Integer),
     )
-    rows = bind.execute(sa.select(
-        attributions.c.business_id, attributions.c.id, attributions.c.promoter_id,
-        attributions.c.customer_id,
-    )).all()
-    if rows:
-        bind.execute(eligibility.insert(), [{
-            "business_id": row.business_id, "attribution_id": row.id,
-            "promoter_id": row.promoter_id, "customer_id": row.customer_id,
-            "status": "pending", "created_at": bind.execute(sa.select(now)).scalar_one(),
-            "updated_at": bind.execute(sa.select(now)).scalar_one(), "version": 0,
-        } for row in rows])
+    bind.execute(eligibility.insert().from_select(
+        ["business_id", "attribution_id", "promoter_id", "customer_id", "status",
+         "created_at", "updated_at", "version"],
+        sa.select(
+            attributions.c.business_id, attributions.c.id, attributions.c.promoter_id,
+            attributions.c.customer_id, sa.literal("pending"), sa.func.now(),
+            sa.func.now(), sa.literal(0),
+        ),
+    ))
 
     op.create_table(
         "referral_eligibility_decisions",
@@ -148,6 +196,8 @@ def upgrade():
         sa.Column("to_status", sa.String(20), nullable=False),
         sa.Column("source_transaction_id", sa.Integer(), nullable=True),
         sa.Column("evidence_reference_hash", sa.String(64), nullable=True),
+        sa.Column("evidence_type", sa.String(30), nullable=True),
+        sa.Column("evidence_key_id", sa.String(16), nullable=True),
         sa.Column("reason", sa.String(500), nullable=False),
         sa.Column("request_id", sa.String(64), nullable=False),
         sa.Column("request_fingerprint", sa.String(64), nullable=False),
@@ -156,7 +206,7 @@ def upgrade():
         sa.ForeignKeyConstraint(
             ["business_id", "eligibility_id"],
             ["referral_eligibilities.business_id", "referral_eligibilities.id"],
-            name="fk_referral_decision_eligibility_tenant", ondelete="CASCADE",
+            name="fk_referral_decision_eligibility_tenant", ondelete="RESTRICT",
         ),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("business_id", "request_id", name="uq_referral_decision_business_request"),
@@ -168,6 +218,7 @@ def upgrade():
         # Internal tables: deny Data API-style public access even when created in public schema.
         op.execute("ALTER TABLE referral_eligibilities ENABLE ROW LEVEL SECURITY")
         op.execute("ALTER TABLE referral_eligibility_decisions ENABLE ROW LEVEL SECURITY")
+    _create_append_only_guards(bind)
 
 
 def downgrade():
@@ -177,6 +228,12 @@ def downgrade():
         raise RuntimeError(
             "Downgrade bloqueado: existen decisiones de elegibilidad que deben conservarse."
         )
+    if bind.dialect.name == "postgresql":
+        op.execute("DROP TRIGGER IF EXISTS trg_referral_decisions_append_only ON referral_eligibility_decisions")
+        op.execute("DROP FUNCTION IF EXISTS prevent_referral_decision_mutation()")
+    elif bind.dialect.name == "sqlite":
+        op.execute("DROP TRIGGER IF EXISTS trg_referral_decisions_no_update")
+        op.execute("DROP TRIGGER IF EXISTS trg_referral_decisions_no_delete")
     op.drop_table("referral_eligibility_decisions")
     op.drop_table("referral_eligibilities")
     with op.batch_alter_table("transactions") as batch:
