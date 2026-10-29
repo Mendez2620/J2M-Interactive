@@ -275,6 +275,24 @@ class MigrationTestCase(unittest.TestCase):
                 self.assertEqual(connection.execute(
                     "SELECT name, loyalty_type FROM businesses WHERE id = 1"
                 ).fetchone(), ("Conservar", "points"))
+                record_columns = {
+                    row[1] for row in connection.execute(
+                        "PRAGMA table_info(referral_incentive_records)"
+                    )
+                }
+                self.assertTrue({
+                    "attribution_id", "source_transaction_id", "rule_version"
+                } <= record_columns)
+                triggers = {
+                    row[0] for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type='trigger'"
+                    )
+                }
+                self.assertTrue({
+                    "trg_referral_incentive_record_subject",
+                    "trg_referral_incentive_records_no_update",
+                    "trg_referral_incentive_records_no_delete",
+                } <= triggers)
                 connection.execute(
                     "INSERT INTO referral_incentive_rules (id, business_id, beneficiary_type, loyalty_program, reward_type, reward_amount, eligible_condition, status, version, created_by_type, created_by_id, updated_by_type, updated_by_id, created_at, updated_at) VALUES (1, 1, 'external_promoter', 'points', 'points', 5, 'first_verified_purchase', 'draft', 1, 'staff', 1, 'staff', 1, '2026-01-01', '2026-01-01')"
                 )

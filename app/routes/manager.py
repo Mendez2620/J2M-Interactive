@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta, timezone
 
 from flask import Blueprint, current_app, flash, g, jsonify, redirect, render_template, request, send_file, session, url_for
@@ -230,17 +231,21 @@ def _apply_referral_decision(actor, business_id, eligibility_id):
     }), 200
 
 
-def _rule_json(rule):
+def _rule_json(rule, snapshot=None):
+    historical = json.loads(snapshot) if snapshot else {}
     return {
         "id": rule.id, "business_id": rule.business_id,
-        "beneficiary_type": rule.beneficiary_type,
-        "loyalty_program": rule.loyalty_program, "reward_type": rule.reward_type,
-        "reward_amount": str(rule.reward_amount),
-        "eligible_condition": rule.eligible_condition,
-        "period_limit": rule.period_limit, "period_unit": rule.period_unit,
-        "valid_from": rule.valid_from.isoformat() if rule.valid_from else None,
-        "valid_until": rule.valid_until.isoformat() if rule.valid_until else None,
-        "status": rule.status, "version": rule.version,
+        "beneficiary_type": historical.get("beneficiary_type", rule.beneficiary_type),
+        "loyalty_program": historical.get("loyalty_program", rule.loyalty_program),
+        "reward_type": historical.get("reward_type", rule.reward_type),
+        "reward_amount": historical.get("reward_amount", str(rule.reward_amount)),
+        "eligible_condition": historical.get("eligible_condition", rule.eligible_condition),
+        "period_limit": historical.get("period_limit", rule.period_limit),
+        "period_unit": historical.get("period_unit", rule.period_unit),
+        "valid_from": historical.get("valid_from", rule.valid_from.isoformat() if rule.valid_from else None),
+        "valid_until": historical.get("valid_until", rule.valid_until.isoformat() if rule.valid_until else None),
+        "status": historical.get("status", rule.status),
+        "version": historical.get("version", rule.version),
         "created_at": rule.created_at.isoformat(), "updated_at": rule.updated_at.isoformat(),
     }
 
@@ -261,13 +266,15 @@ def _create_incentive_rule(actor, business_id):
     request_id = request.headers.get("Idempotency-Key") or data.get("request_id")
 
     def apply():
-        rule, replayed = create_rule(
+        result = create_rule(
             business=actor.business, actor=actor, data=data, request_id=request_id
         )
         return jsonify({
-            "status": "success", "rule": _rule_json(rule), "dry_run_only": True,
-            "idempotent_replay": replayed,
-        }), 200 if replayed else 201
+            "status": "success",
+            "rule": _rule_json(result.rule, result.response_snapshot),
+            "current_rule_version": result.rule.version,
+            "dry_run_only": True, "idempotent_replay": result.replayed,
+        }), 200 if result.replayed else 201
 
     return _incentive_error(apply)
 
@@ -281,13 +288,15 @@ def _update_incentive_rule(actor, business_id, rule_id):
     request_id = request.headers.get("Idempotency-Key") or data.get("request_id")
 
     def apply():
-        rule, replayed = update_rule(
+        result = update_rule(
             business=actor.business, actor=actor, rule_id=rule_id, data=data,
             request_id=request_id,
         )
         return jsonify({
-            "status": "success", "rule": _rule_json(rule),
-            "idempotent_replay": replayed, "dry_run_only": True,
+            "status": "success",
+            "rule": _rule_json(result.rule, result.response_snapshot),
+            "current_rule_version": result.rule.version,
+            "idempotent_replay": result.replayed, "dry_run_only": True,
         }), 200
 
     return _incentive_error(apply)

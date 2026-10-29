@@ -51,6 +51,50 @@ def _append_only_guards(bind):
             """)
 
 
+def _record_integrity_guard(bind):
+    if bind.dialect.name == "postgresql":
+        op.execute("""
+            CREATE OR REPLACE FUNCTION validate_referral_incentive_record_subject()
+            RETURNS trigger AS $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM referral_eligibilities e
+                    WHERE e.business_id = NEW.business_id
+                      AND e.id = NEW.eligibility_id
+                      AND e.attribution_id = NEW.attribution_id
+                      AND e.source_transaction_id = NEW.source_transaction_id
+                      AND NEW.beneficiary_type = 'external_promoter'
+                      AND e.promoter_id = NEW.beneficiary_id
+                ) THEN
+                    RAISE EXCEPTION 'referral incentive subject mismatch';
+                END IF;
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
+        """)
+        op.execute("DROP TRIGGER IF EXISTS trg_referral_incentive_record_subject ON referral_incentive_records")
+        op.execute("""
+            CREATE TRIGGER trg_referral_incentive_record_subject
+            BEFORE INSERT ON referral_incentive_records
+            FOR EACH ROW EXECUTE FUNCTION validate_referral_incentive_record_subject()
+        """)
+    elif bind.dialect.name == "sqlite":
+        op.execute("""
+            CREATE TRIGGER IF NOT EXISTS trg_referral_incentive_record_subject
+            BEFORE INSERT ON referral_incentive_records
+            WHEN NOT EXISTS (
+                SELECT 1 FROM referral_eligibilities e
+                WHERE e.business_id = NEW.business_id
+                  AND e.id = NEW.eligibility_id
+                  AND e.attribution_id = NEW.attribution_id
+                  AND e.source_transaction_id = NEW.source_transaction_id
+                  AND NEW.beneficiary_type = 'external_promoter'
+                  AND e.promoter_id = NEW.beneficiary_id
+            )
+            BEGIN SELECT RAISE(ABORT, 'referral incentive subject mismatch'); END
+        """)
+
+
 def upgrade():
     bind = op.get_bind()
     inspector = sa.inspect(bind)
@@ -76,7 +120,8 @@ def upgrade():
                 "reason", "request_id", "request_fingerprint", "created_at",
             },
             "referral_incentive_records": {
-                "id", "business_id", "eligibility_id", "rule_id", "rule_version",
+                "id", "business_id", "eligibility_id", "attribution_id",
+                "source_transaction_id", "rule_id", "rule_version",
                 "beneficiary_type", "beneficiary_id", "event_key", "status", "reason",
                 "reverses_record_id", "audit_reference", "created_by_type", "created_by_id",
                 "created_at",
@@ -100,6 +145,7 @@ def upgrade():
             for table in incentive_tables:
                 op.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
         _append_only_guards(bind)
+        _record_integrity_guard(bind)
         return
     op.create_table(
         "referral_incentive_rules",
@@ -168,6 +214,8 @@ def upgrade():
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("business_id", sa.Integer(), nullable=False),
         sa.Column("eligibility_id", sa.Integer(), nullable=False),
+        sa.Column("attribution_id", sa.Integer(), nullable=False),
+        sa.Column("source_transaction_id", sa.Integer(), nullable=False),
         sa.Column("rule_id", sa.Integer(), nullable=False),
         sa.Column("rule_version", sa.Integer(), nullable=False),
         sa.Column("beneficiary_type", sa.String(30), nullable=False),
@@ -189,6 +237,16 @@ def upgrade():
             ondelete="RESTRICT", name="fk_referral_incentive_record_eligibility_tenant",
         ),
         sa.ForeignKeyConstraint(
+            ["business_id", "attribution_id"],
+            ["referral_attributions.business_id", "referral_attributions.id"],
+            ondelete="RESTRICT", name="fk_referral_incentive_record_attribution_tenant",
+        ),
+        sa.ForeignKeyConstraint(
+            ["business_id", "source_transaction_id"],
+            ["transactions.business_id", "transactions.id"],
+            ondelete="RESTRICT", name="fk_referral_incentive_record_transaction_tenant",
+        ),
+        sa.ForeignKeyConstraint(
             ["business_id", "rule_id"],
             ["referral_incentive_rules.business_id", "referral_incentive_rules.id"],
             ondelete="RESTRICT", name="fk_referral_incentive_record_rule_tenant",
@@ -202,13 +260,14 @@ def upgrade():
         sa.UniqueConstraint("business_id", "id", name="uq_referral_incentive_record_business_id_id"),
         sa.UniqueConstraint("business_id", "event_key", name="uq_referral_incentive_record_event"),
         sa.UniqueConstraint(
-            "business_id", "eligibility_id", "rule_id", "rule_version",
-            "beneficiary_type", "beneficiary_id", "status",
+            "business_id", "source_transaction_id", "beneficiary_type", "status",
             name="uq_referral_incentive_record_subject",
         ),
     )
     op.create_index("ix_referral_incentive_records_business_id", "referral_incentive_records", ["business_id"])
     op.create_index("ix_referral_incentive_records_eligibility_id", "referral_incentive_records", ["eligibility_id"])
+    op.create_index("ix_referral_incentive_records_attribution_id", "referral_incentive_records", ["attribution_id"])
+    op.create_index("ix_referral_incentive_records_source_transaction_id", "referral_incentive_records", ["source_transaction_id"])
     op.create_index("ix_referral_incentive_records_rule_id", "referral_incentive_records", ["rule_id"])
 
     if bind.dialect.name == "postgresql":
@@ -218,6 +277,7 @@ def upgrade():
         ):
             op.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
     _append_only_guards(bind)
+    _record_integrity_guard(bind)
 
 
 def downgrade():
@@ -231,10 +291,13 @@ def downgrade():
             "Downgrade bloqueado: existe historial de reglas o incentivos que debe conservarse."
         )
     if bind.dialect.name == "postgresql":
+        op.execute("DROP TRIGGER IF EXISTS trg_referral_incentive_record_subject ON referral_incentive_records")
+        op.execute("DROP FUNCTION IF EXISTS validate_referral_incentive_record_subject()")
         op.execute("DROP TRIGGER IF EXISTS trg_referral_rule_audits_append_only ON referral_incentive_rule_audits")
         op.execute("DROP TRIGGER IF EXISTS trg_referral_incentive_records_append_only ON referral_incentive_records")
         op.execute("DROP FUNCTION IF EXISTS prevent_referral_incentive_history_mutation()")
     elif bind.dialect.name == "sqlite":
+        op.execute("DROP TRIGGER IF EXISTS trg_referral_incentive_record_subject")
         for trigger in (
             "trg_referral_rule_audits_no_update", "trg_referral_rule_audits_no_delete",
             "trg_referral_incentive_records_no_update", "trg_referral_incentive_records_no_delete",

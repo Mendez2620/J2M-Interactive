@@ -1,8 +1,9 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import event
+from sqlalchemy import event, select
 
 from app.extensions import db
+from app.models.promoter import ReferralEligibility
 
 
 def _utcnow():
@@ -122,6 +123,8 @@ class ReferralIncentiveRecord(db.Model):
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     business_id = db.Column(db.Integer, nullable=False, index=True)
     eligibility_id = db.Column(db.Integer, nullable=False, index=True)
+    attribution_id = db.Column(db.Integer, nullable=False, index=True)
+    source_transaction_id = db.Column(db.Integer, nullable=False, index=True)
     rule_id = db.Column(db.Integer, nullable=False, index=True)
     rule_version = db.Column(db.Integer, nullable=False)
     beneficiary_type = db.Column(db.String(30), nullable=False)
@@ -155,6 +158,16 @@ class ReferralIncentiveRecord(db.Model):
             ondelete="RESTRICT", name="fk_referral_incentive_record_eligibility_tenant",
         ),
         db.ForeignKeyConstraint(
+            ["business_id", "attribution_id"],
+            ["referral_attributions.business_id", "referral_attributions.id"],
+            ondelete="RESTRICT", name="fk_referral_incentive_record_attribution_tenant",
+        ),
+        db.ForeignKeyConstraint(
+            ["business_id", "source_transaction_id"],
+            ["transactions.business_id", "transactions.id"],
+            ondelete="RESTRICT", name="fk_referral_incentive_record_transaction_tenant",
+        ),
+        db.ForeignKeyConstraint(
             ["business_id", "rule_id"],
             ["referral_incentive_rules.business_id", "referral_incentive_rules.id"],
             ondelete="RESTRICT", name="fk_referral_incentive_record_rule_tenant",
@@ -171,8 +184,7 @@ class ReferralIncentiveRecord(db.Model):
             "business_id", "event_key", name="uq_referral_incentive_record_event"
         ),
         db.UniqueConstraint(
-            "business_id", "eligibility_id", "rule_id", "rule_version",
-            "beneficiary_type", "beneficiary_id", "status",
+            "business_id", "source_transaction_id", "beneficiary_type", "status",
             name="uq_referral_incentive_record_subject",
         ),
     )
@@ -184,3 +196,19 @@ class ReferralIncentiveRecord(db.Model):
 @event.listens_for(ReferralIncentiveRecord, "before_delete")
 def _referral_incentive_history_is_append_only(_mapper, _connection, _target):
     raise ValueError("El historial de incentivos es append-only.")
+
+
+@event.listens_for(ReferralIncentiveRecord, "before_insert")
+def _referral_incentive_subject_must_match(_mapper, connection, target):
+    if target.beneficiary_type != "external_promoter":
+        raise ValueError("Este tipo de beneficiario permanece cerrado hasta 8C.2B.")
+    eligibility = ReferralEligibility.__table__
+    query = select(eligibility.c.id).where(
+        eligibility.c.business_id == target.business_id,
+        eligibility.c.id == target.eligibility_id,
+        eligibility.c.attribution_id == target.attribution_id,
+        eligibility.c.source_transaction_id == target.source_transaction_id,
+    )
+    query = query.where(eligibility.c.promoter_id == target.beneficiary_id)
+    if connection.execute(query).first() is None:
+        raise ValueError("La identidad económica del incentivo no coincide con la elegibilidad.")

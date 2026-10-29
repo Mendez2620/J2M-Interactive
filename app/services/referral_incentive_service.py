@@ -3,7 +3,7 @@
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
 from sqlalchemy import update
@@ -32,6 +32,14 @@ class IncentivePreview:
     beneficiary_type: str
     beneficiary_id: int | None
     dry_run: bool = True
+
+
+@dataclass(frozen=True)
+class RuleMutationResult:
+    rule: ReferralIncentiveRule
+    replayed: bool
+    response_snapshot: str
+    response_version: int
 
 
 _RULE_FIELDS = {
@@ -111,6 +119,10 @@ def _normalize_rule_payload(business, data, *, partial=False):
         values["status"] = data["status"]
     elif not partial:
         values["status"] = "disabled"
+    if partial and (("period_limit" in required) != ("period_unit" in required)):
+        raise ReferralIncentiveError(
+            "period_limit y period_unit deben actualizarse juntos."
+        )
     if {"period_limit", "period_unit"} & required:
         limit, unit = data.get("period_limit"), data.get("period_unit")
         if limit is None and unit is None:
@@ -201,7 +213,10 @@ def create_rule(*, business, actor, data, request_id):
     if previous:
         if previous.new_snapshot != candidate_snapshot or previous.reason != reason:
             raise ReferralIncentiveError("El identificador de solicitud ya fue utilizado.", 409)
-        return db.session.get(ReferralIncentiveRule, previous.rule_id), True
+        return RuleMutationResult(
+            db.session.get(ReferralIncentiveRule, previous.rule_id), True,
+            previous.new_snapshot, previous.rule_version,
+        )
     db.session.add(rule)
     try:
         db.session.flush()
@@ -220,9 +235,12 @@ def create_rule(*, business, actor, data, request_id):
             business_id=business.id, request_id=request_id
         ).first()
         if winner and winner.new_snapshot == candidate_snapshot and winner.reason == reason:
-            return db.session.get(ReferralIncentiveRule, winner.rule_id), True
+            return RuleMutationResult(
+                db.session.get(ReferralIncentiveRule, winner.rule_id), True,
+                winner.new_snapshot, winner.rule_version,
+            )
         raise ReferralIncentiveError("No fue posible crear la regla sin duplicados.", 409) from exc
-    return rule, False
+    return RuleMutationResult(rule, False, snapshot, 1)
 
 
 def update_rule(*, business, actor, rule_id, data, request_id):
@@ -244,7 +262,10 @@ def update_rule(*, business, actor, rule_id, data, request_id):
     if previous:
         if previous.request_fingerprint != request_fingerprint:
             raise ReferralIncentiveError("El identificador ya se utilizó para otro cambio.", 409)
-        return db.session.get(ReferralIncentiveRule, previous.rule_id), True
+        return RuleMutationResult(
+            db.session.get(ReferralIncentiveRule, previous.rule_id), True,
+            previous.new_snapshot, previous.rule_version,
+        )
     rule = ReferralIncentiveRule.query.filter_by(id=rule_id, business_id=business.id).first()
     if not rule:
         raise ReferralIncentiveError("Regla no encontrada.", 404)
@@ -265,6 +286,14 @@ def update_rule(*, business, actor, rule_id, data, request_id):
              updated_at=_utcnow()))
     if changed.rowcount != 1:
         db.session.rollback()
+        winner = ReferralIncentiveRuleAudit.query.filter_by(
+            business_id=business.id, request_id=request_id
+        ).first()
+        if winner and winner.request_fingerprint == request_fingerprint:
+            return RuleMutationResult(
+                db.session.get(ReferralIncentiveRule, winner.rule_id), True,
+                winner.new_snapshot, winner.rule_version,
+            )
         raise ReferralIncentiveError("La regla cambió en otra solicitud.", 409)
     db.session.add(ReferralIncentiveRuleAudit(
         business_id=business.id, rule_id=rule.id, rule_version=new_version,
@@ -280,9 +309,15 @@ def update_rule(*, business, actor, rule_id, data, request_id):
             business_id=business.id, request_id=request_id
         ).first()
         if winner and winner.request_fingerprint == request_fingerprint:
-            return db.session.get(ReferralIncentiveRule, winner.rule_id), True
+            return RuleMutationResult(
+                db.session.get(ReferralIncentiveRule, winner.rule_id), True,
+                winner.new_snapshot, winner.rule_version,
+            )
         raise ReferralIncentiveError("La regla cambió en otra solicitud.", 409) from exc
-    return db.session.get(ReferralIncentiveRule, rule.id), False
+    return RuleMutationResult(
+        db.session.get(ReferralIncentiveRule, rule.id), False,
+        preview_snapshot, new_version,
+    )
 
 
 def preview_incentive(*, business, eligibility_id, rule_id, now=None):
@@ -325,21 +360,15 @@ def preview_incentive(*, business, eligibility_id, rule_id, now=None):
     if rule.valid_until and now >= rule.valid_until.replace(tzinfo=timezone.utc):
         return result("not_eligible", "La regla ya no está vigente.")
     duplicate = ReferralIncentiveRecord.query.filter_by(
-        business_id=business.id, eligibility_id=eligibility.id, rule_id=rule.id,
-        rule_version=rule.version, beneficiary_type=rule.beneficiary_type,
-        beneficiary_id=beneficiary_id,
+        business_id=business.id,
+        source_transaction_id=eligibility.source_transaction_id,
+        beneficiary_type=rule.beneficiary_type,
     ).first()
     if duplicate:
         return result("conflict_or_duplicate", "Ya existe un registro para este evento y regla.")
     if rule.period_limit:
-        start = now - (timedelta(days=1) if rule.period_unit == "day" else timedelta(days=31))
-        used = ReferralIncentiveRecord.query.filter(
-            ReferralIncentiveRecord.business_id == business.id,
-            ReferralIncentiveRecord.beneficiary_type == rule.beneficiary_type,
-            ReferralIncentiveRecord.beneficiary_id == beneficiary_id,
-            ReferralIncentiveRecord.status == "proposed",
-            ReferralIncentiveRecord.created_at >= start,
-        ).count()
-        if used >= rule.period_limit:
-            return result("not_eligible", "El beneficiario alcanzó el límite del periodo.")
+        return result(
+            "not_eligible",
+            "El límite calendario permanece deshabilitado hasta configurar la zona horaria del negocio.",
+        )
     return result("eligible_for_proposal", "Cumple las condiciones para una propuesta en modo DRY-RUN.")

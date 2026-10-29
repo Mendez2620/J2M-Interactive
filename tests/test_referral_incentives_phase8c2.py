@@ -191,7 +191,7 @@ class ReferralIncentivesPhase8C2TestCase(unittest.TestCase):
         self.assertEqual(rejected.status_code, 400)
 
     def test_dry_run_distinguishes_all_core_outcomes_without_side_effects(self):
-        self.assertEqual(self._create_rule().status_code, 201)
+        self.assertEqual(self._create_rule(period_limit=None, period_unit=None).status_code, 201)
         rule = ReferralIncentiveRule.query.one()
         balances = (self.customer.current_points, self.customer.current_stamps)
         counts = (
@@ -218,6 +218,7 @@ class ReferralIncentivesPhase8C2TestCase(unittest.TestCase):
         rule = ReferralIncentiveRule.query.one()
         record = ReferralIncentiveRecord(
             business_id=self.points.id, eligibility_id=self.eligibility.id,
+            attribution_id=self.attribution.id, source_transaction_id=self.purchase.id,
             rule_id=rule.id, rule_version=rule.version,
             beneficiary_type="external_promoter", beneficiary_id=self.promoter.id,
             event_key="first-purchase:1", status="proposed",
@@ -228,6 +229,7 @@ class ReferralIncentivesPhase8C2TestCase(unittest.TestCase):
         self.assertEqual(self._preview(rule).get_json()["outcome"], "conflict_or_duplicate")
         duplicate = ReferralIncentiveRecord(
             business_id=self.points.id, eligibility_id=self.eligibility.id,
+            attribution_id=self.attribution.id, source_transaction_id=self.purchase.id,
             rule_id=rule.id, rule_version=rule.version,
             beneficiary_type="external_promoter", beneficiary_id=self.promoter.id,
             event_key="different", status="proposed", reason="Duplicado",
@@ -240,6 +242,7 @@ class ReferralIncentivesPhase8C2TestCase(unittest.TestCase):
         db.session.rollback()
         reversal = ReferralIncentiveRecord(
             business_id=self.points.id, eligibility_id=self.eligibility.id,
+            attribution_id=self.attribution.id, source_transaction_id=self.purchase.id,
             rule_id=rule.id, rule_version=rule.version,
             beneficiary_type="external_promoter", beneficiary_id=self.promoter.id,
             event_key="reverse:first-purchase:1", status="voided",
@@ -256,6 +259,19 @@ class ReferralIncentivesPhase8C2TestCase(unittest.TestCase):
         response = self._preview(rule)
         self.assertEqual(response.get_json()["outcome"], "not_eligible")
         self.assertIsNone(response.get_json()["beneficiary_id"])
+        blocked = ReferralIncentiveRecord(
+            business_id=self.points.id, eligibility_id=self.eligibility.id,
+            attribution_id=self.attribution.id, source_transaction_id=self.purchase.id,
+            rule_id=rule.id, rule_version=rule.version, beneficiary_type="staff",
+            beneficiary_id=self.manager.id, event_key="staff:closed",
+            status="proposed", reason="Debe permanecer cerrado.",
+            audit_reference="closed-8c2b", created_by_type="staff",
+            created_by_id=self.manager.id,
+        )
+        db.session.add(blocked)
+        with self.assertRaises(ValueError):
+            db.session.commit()
+        db.session.rollback()
 
     def test_tenant_permission_csrf_and_suspensions_fail_closed(self):
         self.assertEqual(self._create_rule(headers=self._auth(self.denied)).status_code, 403)
@@ -293,6 +309,110 @@ class ReferralIncentivesPhase8C2TestCase(unittest.TestCase):
         db.session.refresh(rule)
         self.assertEqual((rule.version, rule.reward_amount), (2, Decimal("7.000000")))
         self.assertEqual(ReferralIncentiveRuleAudit.query.count(), 2)
+
+    def test_replays_return_historical_snapshot_after_later_changes(self):
+        created = self._create_rule(period_limit=None, period_unit=None)
+        self.assertEqual(created.status_code, 201)
+        rule_id = created.get_json()["rule"]["id"]
+        url = f"/manager/business/{self.points.id}/referral-incentive-rules/{rule_id}"
+        first_payload = {"version": 1, "reward_amount": "7", "reason": "Primer ajuste."}
+        first = self.client.patch(
+            url, json=first_payload,
+            headers={**self.headers, "Idempotency-Key": "historical-update-1"},
+        )
+        self.assertEqual(first.status_code, 200, first.get_json())
+        second = self.client.patch(
+            url, json={"version": 2, "reward_amount": "9", "reason": "Segundo ajuste."},
+            headers={**self.headers, "Idempotency-Key": "historical-update-2"},
+        )
+        self.assertEqual(second.status_code, 200, second.get_json())
+
+        create_replay = self._create_rule(
+            request_id="create-rule", period_limit=None, period_unit=None,
+        )
+        self.assertEqual(create_replay.status_code, 200)
+        self.assertEqual(create_replay.get_json()["rule"]["version"], 1)
+        self.assertEqual(create_replay.get_json()["rule"]["reward_amount"], "5.000000")
+        self.assertEqual(create_replay.get_json()["current_rule_version"], 3)
+
+        update_replay = self.client.patch(
+            url, json=first_payload,
+            headers={**self.headers, "Idempotency-Key": "historical-update-1"},
+        )
+        self.assertEqual(update_replay.status_code, 200)
+        self.assertTrue(update_replay.get_json()["idempotent_replay"])
+        self.assertEqual(update_replay.get_json()["rule"]["version"], 2)
+        self.assertEqual(update_replay.get_json()["rule"]["reward_amount"], "7")
+        self.assertEqual(update_replay.get_json()["current_rule_version"], 3)
+        self.assertEqual(ReferralIncentiveRule.query.count(), 1)
+        self.assertEqual(ReferralIncentiveRuleAudit.query.count(), 3)
+
+        conflict = self.client.patch(
+            url, json={**first_payload, "reward_amount": "8"},
+            headers={**self.headers, "Idempotency-Key": "historical-update-1"},
+        )
+        self.assertEqual(conflict.status_code, 409)
+
+    def test_partial_period_updates_require_the_pair_and_calendar_limits_fail_closed(self):
+        self.assertEqual(self._create_rule().status_code, 201)
+        rule = ReferralIncentiveRule.query.one()
+        url = f"/manager/business/{self.points.id}/referral-incentive-rules/{rule.id}"
+        for index, change in enumerate(({"period_limit": 3}, {"period_unit": "day"})):
+            response = self.client.patch(
+                url,
+                json={"version": 1, "reason": "Cambio parcial inválido.", **change},
+                headers={**self.headers, "Idempotency-Key": f"partial-period-{index}"},
+            )
+            self.assertEqual(response.status_code, 400)
+        preview = self._preview(rule)
+        self.assertEqual(preview.get_json()["outcome"], "not_eligible")
+        self.assertIn("zona horaria", preview.get_json()["reason"])
+        self.assertEqual(ReferralIncentiveRecord.query.count(), 0)
+
+    def test_stable_economic_event_identity_survives_rule_versions(self):
+        self.assertEqual(
+            self._create_rule(period_limit=None, period_unit=None).status_code, 201
+        )
+        rule = ReferralIncentiveRule.query.one()
+        original = ReferralIncentiveRecord(
+            business_id=self.points.id, eligibility_id=self.eligibility.id,
+            attribution_id=self.attribution.id, source_transaction_id=self.purchase.id,
+            rule_id=rule.id, rule_version=1, beneficiary_type="external_promoter",
+            beneficiary_id=self.promoter.id, event_key="purchase:stable-event",
+            status="proposed", reason="Propuesta sin concesión.",
+            audit_reference="stable-1", created_by_type="staff",
+            created_by_id=self.manager.id,
+        )
+        db.session.add(original); db.session.commit()
+        rule.version = 2; db.session.commit()
+        repeated = ReferralIncentiveRecord(
+            business_id=self.points.id, eligibility_id=self.eligibility.id,
+            attribution_id=self.attribution.id, source_transaction_id=self.purchase.id,
+            rule_id=rule.id, rule_version=2, beneficiary_type="external_promoter",
+            beneficiary_id=self.promoter.id, event_key="purchase:new-version",
+            status="proposed", reason="Intento duplicado.",
+            audit_reference="stable-2", created_by_type="staff",
+            created_by_id=self.manager.id,
+        )
+        db.session.add(repeated)
+        with self.assertRaises(IntegrityError):
+            db.session.commit()
+        db.session.rollback()
+        self.assertEqual(self._preview(rule).get_json()["outcome"], "conflict_or_duplicate")
+
+        mismatched = ReferralIncentiveRecord(
+            business_id=self.points.id, eligibility_id=self.eligibility.id,
+            attribution_id=self.attribution.id + 1000,
+            source_transaction_id=self.purchase.id, rule_id=rule.id, rule_version=2,
+            beneficiary_type="external_promoter", beneficiary_id=self.promoter.id,
+            event_key="purchase:mismatch", status="proposed", reason="Cruce inválido.",
+            audit_reference="stable-3", created_by_type="staff",
+            created_by_id=self.manager.id,
+        )
+        db.session.add(mismatched)
+        with self.assertRaises(ValueError):
+            db.session.commit()
+        db.session.rollback()
 
     def test_concurrent_rule_updates_have_one_version_winner(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
@@ -352,6 +472,35 @@ class ReferralIncentivesPhase8C2TestCase(unittest.TestCase):
                 rule = db.session.get(ReferralIncentiveRule, rule_id)
                 self.assertEqual(rule.version, 2)
                 self.assertEqual(ReferralIncentiveRuleAudit.query.count(), 2)
+
+            def replay_same_update(_index):
+                local = app.test_client()
+                with local.session_transaction() as browser:
+                    browser["csrf_token"] = "concurrent-csrf"
+                return local.patch(
+                    f"/manager/business/{ids[0]}/referral-incentive-rules/{rule_id}",
+                    json={
+                        "version": 2, "reward_amount": "12",
+                        "reason": "Misma actualización concurrente.",
+                    },
+                    headers={
+                        "Authorization": f"Bearer {access}",
+                        "X-CSRFToken": "concurrent-csrf",
+                        "Idempotency-Key": "same-concurrent-update",
+                    },
+                )
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                responses = list(pool.map(replay_same_update, (1, 2)))
+            self.assertEqual(sorted(item.status_code for item in responses), [200, 200])
+            self.assertEqual(
+                sorted(item.get_json()["idempotent_replay"] for item in responses),
+                [False, True],
+            )
+            with app.app_context():
+                rule = db.session.get(ReferralIncentiveRule, rule_id)
+                self.assertEqual(rule.version, 3)
+                self.assertEqual(ReferralIncentiveRuleAudit.query.count(), 3)
 
     def test_history_is_append_only_and_prevents_parent_deletion(self):
         self.assertEqual(self._create_rule().status_code, 201)
