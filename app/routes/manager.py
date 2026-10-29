@@ -12,7 +12,7 @@ from app.access_audit import access_audit, staff_access_state
 from app.manager_auth import create_manager_browser_session, manager_portal_required, revoke_current_manager_session
 from app.permissions import effective_permissions, has_permission
 from app.services.auth_rate_limit_service import AuthRateLimitUnavailable, clear_auth_attempts, reserve_auth_attempt
-from app.services.unified_staff_access_service import unified_staff_access
+from app.services.unified_staff_access_service import bounded_password_matches, unified_staff_access
 
 manager_bp = Blueprint("manager", __name__, url_prefix="/manager")
 # Legacy test hook; authentication throttling is persisted in auth_rate_limit_slots.
@@ -283,27 +283,23 @@ def manager_login():
         password = request.form.get("password") or ""
         remember = request.form.get("remember") == "1"
         business_slug = (request.form.get("business_slug") or "").strip()
+        rate_identity = identity if valid_email(identity) else f"{business_slug}:{identity}"
         try:
-            reservation = reserve_auth_attempt("manager", f"{business_slug}:{identity}", request.remote_addr)
+            reservation = reserve_auth_attempt("staff-access", rate_identity, request.remote_addr)
         except AuthRateLimitUnavailable:
             current_app.logger.exception("auth_rate_limit_unavailable component=manager_login")
             error, status, reservation = "Inicio de sesión temporalmente no disponible.", 503, None
         if status == 200 and reservation is None:
             error, status = "Demasiados intentos. Intenta más tarde.", 429
         elif status == 200:
-            query = Staff.query.join(Staff.business).filter(
-                or_(func.lower(Staff.email) == identity, Staff.username == identity)
+            eligible = bounded_password_matches(
+                identity, password, allowed_roles={"manager"},
+                business_slug=business_slug or None, allow_username=True,
             )
-            if business_slug:
-                query = query.filter(Business.slug == business_slug)
-            candidates = query.all() if identity and password else []
-            matches = [item for item in candidates if item.check_password(password)]
-            eligible = [item for item in matches if item.role == "manager" and item.is_active
-                        and item.business.is_active and item.web_access_enabled and item.business.web_access_enabled]
             if not eligible:
                 error, status = "No fue posible iniciar sesión con esas credenciales.", 401
             elif len(eligible) > 1 and not business_slug:
-                clear_auth_attempts("manager", reservation)
+                clear_auth_attempts("staff-access", reservation)
                 session["manager_account_choice"] = {
                     "accounts": [
                         {"staff_id": item.id, "auth_version": item.auth_version}
@@ -314,7 +310,7 @@ def manager_login():
                 }
                 account_choices = eligible
             else:
-                clear_auth_attempts("manager", reservation)
+                clear_auth_attempts("staff-access", reservation)
                 staff = eligible[0]
                 create_manager_browser_session(staff, remember=remember)
                 return redirect(_portal_destination(staff))

@@ -7,7 +7,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 from app.extensions import db
 from app.manager_auth import create_manager_browser_session, create_staff_browser_session
-from app.models import Staff
+from app.models import Business, Staff
 from app.permissions import has_permission
 from app.security import valid_email
 from app.services.auth_rate_limit_service import (
@@ -83,15 +83,21 @@ def _select_pending_account(account_id):
     return _start_session(staff, bool(pending.get("remember")))
 
 
-def _password_matches(email, password):
+def bounded_password_matches(identity, password, *, allowed_roles=None, business_slug=None, allow_username=False):
+    """Authenticate against a bounded candidate set with a fixed hash budget."""
     maximum = max(1, min(current_app.config["STAFF_ACCESS_MAX_EMAIL_CANDIDATES"], 20))
-    candidates = (
-        Staff.query.options(joinedload(Staff.business))
-        .filter(func.lower(Staff.email) == email)
-        .order_by(Staff.id)
-        .limit(maximum + 1)
-        .all()
-    ) if email and password and valid_email(email) else []
+    query = Staff.query.options(joinedload(Staff.business)).join(Business)
+    if identity and password and valid_email(identity):
+        query = query.filter(func.lower(Staff.email) == identity)
+    elif identity and password and allow_username and business_slug:
+        query = query.filter(Staff.username == identity)
+    else:
+        query = None
+    if query is not None and business_slug:
+        query = query.filter(Business.slug == business_slug)
+    if query is not None and allowed_roles:
+        query = query.filter(Staff.role.in_(allowed_roles))
+    candidates = query.order_by(Staff.id).limit(maximum + 1).all() if query is not None else []
     overflow = len(candidates) > maximum
     candidates = candidates[:maximum]
     matches = []
@@ -102,7 +108,10 @@ def _password_matches(email, password):
             matched = check_password_hash(password_hash, password)
         except (TypeError, ValueError):
             matched = False
-        if candidate and matched and _eligible(candidate):
+        if (
+            candidate and matched and _eligible(candidate)
+            and (not allowed_roles or candidate.role in allowed_roles)
+        ):
             matches.append(candidate)
     return [] if overflow else matches
 
@@ -133,7 +142,7 @@ def unified_staff_access():
             if status == 200 and reservation is None:
                 error, status = "Demasiados intentos. Intenta más tarde.", 429
             elif status == 200:
-                matches = _password_matches(email, password)
+                matches = bounded_password_matches(email, password)
                 if not matches:
                     error, status = _GENERIC_ERROR, 401
                 else:

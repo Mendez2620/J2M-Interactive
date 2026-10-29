@@ -8,6 +8,8 @@ Los cajeros históricos sin correo conservan temporalmente `/staff/login?legacy=
 
 Las rutas históricas `/manager/login` y `/staff/login` muestran el acceso unificado en GET. El POST histórico de gerente se conserva para compatibilidad controlada; el POST histórico de cajero queda restringido a cuentas sin correo. El acceso legacy debe retirarse en una fase posterior solamente después de medir que no queden cajeros activos sin correo.
 
+El POST histórico de gerente reutiliza la misma búsqueda acotada y el mismo presupuesto fijo de hashes que `/staff-access`. Solo admite roles `manager`; una identidad por correo puede producir el selector únicamente después de validar la contraseña, mientras que `username + business_slug` queda ligado a ese tenant. Ambos endpoints reservan la cuota persistente `staff-access`, por lo que alternarlos no duplica el presupuesto por identidad o IP.
+
 ## Correos compartidos por más cuentas que el límite
 
 Si más cuentas comparten un correo que `STAFF_ACCESS_MAX_EMAIL_CANDIDATES`, el acceso falla de forma cerrada con el mismo mensaje genérico y no crea selector ni sesión. No se amplía la consulta, no se prueban candidatos fuera del presupuesto y no se revelan negocios. La resolución actual es administrativa: un Super Admin o gerente autorizado debe identificar de forma privada las cuentas vigentes, asignar correos individuales a las cuentas activas y retirar o corregir correos de cuentas obsoletas. Después de dejar el grupo dentro del límite, el acceso vuelve a funcionar normalmente. Cambiar el límite requiere una revisión explícita de capacidad y temporización y nunca debe superar el tope interno acotado.

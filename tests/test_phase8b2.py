@@ -1,10 +1,12 @@
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 from app import create_app
 from app.extensions import db
 from app.models import Business, Staff, StaffSession
 from app.staff_auth import revoke_staff_sessions
+from app.services import unified_staff_access_service
 
 
 class UnifiedStaffAccessPhase8B2TestCase(unittest.TestCase):
@@ -190,6 +192,98 @@ class UnifiedStaffAccessPhase8B2TestCase(unittest.TestCase):
         self.assertNotIn("'/staff-access'", worker)
         self.assertIn("SAFE_ASSETS.includes(url.pathname)", worker)
         self.assertIn("request.mode === 'navigate'", worker)
+
+    def test_legacy_manager_post_uses_bounded_hash_budget_and_manager_role_only(self):
+        self.app.config["STAFF_ACCESS_MAX_EMAIL_CANDIDATES"] = 3
+        shared = []
+        for index in range(4):
+            business = self.business_record(f"Compartido {index}", f"compartido-{index}")
+            shared.append(self.staff(
+                business, f"manager-{index}", "manager", "many@example.test",
+                "ManyPassword123!", "view_stats",
+            ))
+        with patch.object(
+            unified_staff_access_service, "check_password_hash",
+            wraps=unified_staff_access_service.check_password_hash,
+        ) as hashes:
+            overflow = self.client.post("/manager/login", data={
+                "email": "many@example.test", "password": "ManyPassword123!",
+            })
+        self.assertEqual(overflow.status_code, 401); self.assertEqual(hashes.call_count, 3)
+        for account in shared:
+            self.assertNotIn(account.business.name, overflow.get_data(as_text=True))
+        with patch.object(
+            unified_staff_access_service, "check_password_hash",
+            wraps=unified_staff_access_service.check_password_hash,
+        ) as hashes:
+            missing = self.client.post("/manager/login", data={
+                "email": "missing-manager@example.test", "password": "WrongPassword123!",
+            })
+        self.assertEqual(missing.status_code, 401); self.assertEqual(hashes.call_count, 3)
+
+        second_manager = self.staff(
+            self.other, "manager-second", "manager", "bounded-manager@example.test",
+            "BoundedManager123!", "view_stats",
+        )
+        cashier = self.staff(
+            self.other, "cashier-same-email", "cashier", "bounded-manager@example.test",
+            "BoundedManager123!", "scanner_operate_web",
+        )
+        first_manager = self.staff(
+            self.business, "manager-first", "manager", "bounded-manager@example.test",
+            "BoundedManager123!", "view_stats",
+        )
+        with patch.object(
+            unified_staff_access_service, "check_password_hash",
+            wraps=unified_staff_access_service.check_password_hash,
+        ) as hashes:
+            wrong = self.client.post("/manager/login", data={
+                "email": "bounded-manager@example.test", "password": "WrongPassword123!",
+            })
+        self.assertEqual(wrong.status_code, 401); self.assertEqual(hashes.call_count, 3)
+        self.assertNotIn(first_manager.business.name, wrong.get_data(as_text=True))
+        with patch.object(
+            unified_staff_access_service, "check_password_hash",
+            wraps=unified_staff_access_service.check_password_hash,
+        ) as hashes:
+            valid = self.client.post("/manager/login", data={
+                "email": "bounded-manager@example.test", "password": "BoundedManager123!",
+            })
+        self.assertEqual(valid.status_code, 200); self.assertEqual(hashes.call_count, 3)
+        self.assertIn(first_manager.business.name, valid.get_data(as_text=True))
+        self.assertIn(second_manager.business.name, valid.get_data(as_text=True))
+        self.assertNotIn(cashier.name, valid.get_data(as_text=True))
+
+    def test_legacy_manager_username_is_tenant_bound_and_cannot_authenticate_cashier(self):
+        correct = self.client.post("/manager/login", data={
+            "identity": self.manager.username, "business_slug": self.business.slug,
+            "password": "Password123!",
+        })
+        self.assertEqual(correct.status_code, 302); self.assertIn("/manager/portal", correct.location)
+        self.client.post("/manager/logout")
+        wrong_tenant = self.client.post("/manager/login", data={
+            "identity": self.manager.username, "business_slug": self.other.slug,
+            "password": "Password123!",
+        })
+        self.assertEqual(wrong_tenant.status_code, 401)
+        cashier = self.client.post("/manager/login", data={
+            "identity": self.cashier.username, "business_slug": self.business.slug,
+            "password": "Password123!",
+        })
+        self.assertEqual(cashier.status_code, 401)
+
+    def test_manager_and_unified_login_share_persistent_rate_limit(self):
+        self.app.config["AUTH_RATE_LIMIT_ATTEMPTS"] = 2
+        first = self.client.post("/manager/login", data={
+            "email": "alternating@example.test", "password": "WrongPassword123!",
+        })
+        second = self.client.post("/staff-access", data={
+            "email": "alternating@example.test", "password": "WrongPassword123!",
+        })
+        third = self.client.post("/manager/login", data={
+            "email": "alternating@example.test", "password": "WrongPassword123!",
+        })
+        self.assertEqual((first.status_code, second.status_code, third.status_code), (401, 401, 429))
 
     def test_unified_ui_replaces_role_choice_and_keeps_pwa_contract(self):
         for path in ("/staff-access", "/manager/login", "/staff/login"):
