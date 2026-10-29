@@ -35,6 +35,7 @@ class Transaction(db.Model):
     staff = db.relationship("Staff", back_populates="transactions")
 
     __table_args__ = (
+        db.UniqueConstraint("business_id", "id", name="uq_transactions_business_id_id"),
         db.UniqueConstraint("business_id", "request_id", name="uq_transactions_business_request_id"),
     )
 

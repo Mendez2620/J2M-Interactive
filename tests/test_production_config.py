@@ -12,6 +12,7 @@ class ProductionConfigTestCase(unittest.TestCase):
             "SECRET_KEY": "a-robust-production-secret-key-with-entropy-123",
             "JWT_SECRET_KEY": "another-independent-jwt-key-with-entropy-456",
             "REGISTRATION_IDENTITY_HMAC_KEY": "stable-registration-identity-key-with-entropy-789",
+            "REFERRAL_EVIDENCE_HMAC_KEYS": "stable-referral-evidence-key-with-entropy-321",
             "REGISTRATION_EMAIL_ENCRYPTION_KEY": "stable-registration-email-encryption-key-456",
             "CORS_ORIGINS": "https://app.example.com",
             "DATABASE_URL": "postgresql://user:password@db.example.test:5432/postgres",
@@ -42,6 +43,20 @@ class ProductionConfigTestCase(unittest.TestCase):
                  patch.object(ProductionConfig, "PUBLIC_BASE_URL", "https://app.example.com"), \
                  self.assertRaisesRegex(RuntimeError, "REGISTRATION_IDENTITY_HMAC_KEY"):
                 create_app("production")
+
+    def test_production_requires_independent_referral_evidence_key_ring(self):
+        valid = self.valid_environment()
+        for evidence_keys in ("", "short", valid["SECRET_KEY"], valid["REGISTRATION_IDENTITY_HMAC_KEY"]):
+            with self.subTest(evidence_keys=evidence_keys), \
+                 patch.dict(os.environ, self.valid_environment(REFERRAL_EVIDENCE_HMAC_KEYS=evidence_keys), clear=True), \
+                 patch.object(ProductionConfig, "PUBLIC_BASE_URL", "https://app.example.com"), \
+                 self.assertRaisesRegex(RuntimeError, "REFERRAL_EVIDENCE_HMAC_KEYS"):
+                create_app("production")
+        with patch.dict(os.environ, self.valid_environment(
+            REFERRAL_EVIDENCE_HMAC_KEYS="new-stable-referral-key-with-entropy-123,old-stable-referral-key-with-entropy-456"
+        ), clear=True), patch.object(ProductionConfig, "PUBLIC_BASE_URL", "https://app.example.com"):
+            app = create_app("production")
+        self.assertEqual(len(app.config["REFERRAL_EVIDENCE_HMAC_KEYS"]), 2)
 
     def test_production_no_longer_depends_on_registration_email_encryption_key(self):
         environment = self.valid_environment()

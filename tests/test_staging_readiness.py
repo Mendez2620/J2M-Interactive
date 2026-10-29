@@ -15,7 +15,7 @@ from app.staging_preflight import _https_endpoint_url
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_HEAD = "0a1b2c3d4e5f"
+EXPECTED_HEAD = "1b2c3d4e5f6a"
 
 
 class StagingReadinessTestCase(unittest.TestCase):
@@ -26,6 +26,7 @@ class StagingReadinessTestCase(unittest.TestCase):
             SECRET_KEY="local-preflight-session-secret-0123456789",
             JWT_SECRET_KEY="local-preflight-jwt-secret-012345678901",
             REGISTRATION_IDENTITY_HMAC_KEY="local-preflight-identity-secret-0123456",
+            REFERRAL_EVIDENCE_HMAC_KEYS="local-preflight-referral-evidence-key-0123456",
             REGISTRATION_EMAIL_ENCRYPTION_KEY="local-preflight-email-secret-012345678",
             SQLALCHEMY_DATABASE_URI="postgresql://hidden:hidden@db.invalid/postgres?sslmode=require",
             DATABASE_SSLMODE="require",
@@ -93,6 +94,7 @@ class StagingReadinessTestCase(unittest.TestCase):
             "SECRET_KEY": "blocked-command-session-secret-0123456789",
             "JWT_SECRET_KEY": "blocked-command-jwt-secret-0123456789012",
             "REGISTRATION_IDENTITY_HMAC_KEY": "blocked-command-identity-secret-012345",
+            "REFERRAL_EVIDENCE_HMAC_KEYS": "blocked-command-referral-evidence-key-012345",
             "REGISTRATION_EMAIL_ENCRYPTION_KEY": "blocked-command-email-secret-01234567",
             "DATABASE_URL": "postgresql://hidden:hidden@db.invalid/postgres",
             "DATABASE_SSLMODE": "require", "PUBLIC_BASE_URL": "https://staging.invalid",

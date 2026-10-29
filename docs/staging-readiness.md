@@ -23,9 +23,15 @@ backup no restaurable; CI fallido o workers sin configuración.
 
 Parta de `.env.example`, pero configure los valores reales exclusivamente en el
 almacén privado de la plataforma. Genere por separado `SECRET_KEY`,
-`JWT_SECRET_KEY` y `REGISTRATION_IDENTITY_HMAC_KEY`. La última debe permanecer
-estable: rotarla sin transición rompería las reservas HMAC de teléfono. El alta
+`JWT_SECRET_KEY`, `REGISTRATION_IDENTITY_HMAC_KEY` y
+`REFERRAL_EVIDENCE_HMAC_KEYS`. Las claves HMAC deben permanecer
+estables: rotarlas sin transición rompería sus controles históricos. El alta
 pública y la recuperación ya no requieren SMTP ni un worker de correo.
+
+Para rotar evidencia, anteponga la clave nueva y conserve las anteriores,
+separadas por comas, durante toda la retención del historial. Retirar una clave
+antigua impediría reconocer comprobantes firmados con ella; el preflight exige
+que todas sean robustas, distintas y no sean placeholders.
 
 Use `FLASK_ENV=production`, `FLASK_DEBUG=false`, `SESSION_COOKIE_SECURE=true`,
 `UPLOAD_STORAGE_BACKEND=disabled` y el número exacto de proxies controlados en
@@ -61,7 +67,7 @@ flask --app run.py staging-preflight --check-database
 ```
 
 Esta opción ejecuta únicamente `SELECT 1` y una lectura de `alembic_version`.
-Nunca crea tablas ni aplica migraciones. El head esperado es `0a1b2c3d4e5f`.
+Nunca crea tablas ni aplica migraciones. El head esperado es `1b2c3d4e5f6a`.
 
 ## 4. Migración controlada
 
@@ -167,7 +173,7 @@ limitación y confirme que la interfaz no la ofrece como operativa.
 - [ ] Entorno de staging aislado y sin datos reales.
 - [ ] Secretos independientes, estables y guardados fuera de Git.
 - [ ] PostgreSQL con TLS y respaldo restaurado de prueba.
-- [ ] Preflight sin errores y revisión `0a1b2c3d4e5f` confirmada.
+- [ ] Preflight sin errores y revisión `1b2c3d4e5f6a` confirmada.
 - [ ] CI, `pip check`, Tailwind, suite y Docker Linux aprobados.
 - [ ] Web y workers configurados como procesos separados.
 - [ ] Health, readiness, alertas y colas observados.
