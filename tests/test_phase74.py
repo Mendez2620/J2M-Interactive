@@ -123,7 +123,7 @@ class Phase74TestCase(unittest.TestCase):
         cookie_seconds = (cookie_expiry - datetime.now(timezone.utc)).total_seconds()
         self.assertLess(abs(cookie_seconds - remembered_seconds), 5)
         login_html = self.client.get("/staff/login", base_url="https://localhost").get_data(as_text=True)
-        self.assertIn('value="negocio-web"', login_html); self.assertNotIn("PasswordSeguro123", login_html)
+        self.assertNotIn('name="business_slug"', login_html); self.assertIn('name="email"', login_html); self.assertNotIn("PasswordSeguro123", login_html)
 
         with self.client.session_transaction() as browser_session:
             remembered_data = dict(browser_session)
@@ -263,7 +263,7 @@ class Phase74TestCase(unittest.TestCase):
         self.assertNotIn("then(() => self.skipWaiting())", source); self.assertIn("SKIP_WAITING", source)
         scanner_js = (root / "js/web-scanner.js").read_text(encoding="utf-8")
         self.assertIn("data-start-camera", scanner_js); self.assertIn("Idempotency-Key", scanner_js); self.assertNotIn("console.log", scanner_js); self.assertNotIn("localStorage", scanner_js)
-        access = self.client.get("/staff-access"); self.assertEqual(access.status_code, 200); self.assertIn(b"/manager/login", access.data); self.assertIn(b"/staff/login", access.data)
+        access = self.client.get("/staff-access"); self.assertEqual(access.status_code, 200); self.assertIn(b'name="email"', access.data); self.assertNotIn(b'name="business_slug"', access.data)
         login = self.client.get("/staff/login").get_data(as_text=True); self.assertIn("manifest.webmanifest", login); self.assertIn("Añadir a pantalla de inicio", login)
         self.admin_login(); self.assertNotIn("manifest.webmanifest", self.client.get("/admin").get_data(as_text=True))
         self.assertNotIn("manifest.webmanifest", self.client.get(f"/join/{self.business.slug}").get_data(as_text=True))

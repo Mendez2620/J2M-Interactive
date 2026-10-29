@@ -15,7 +15,7 @@ from app.staging_preflight import _https_endpoint_url
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_HEAD = "f9a0b1c2d3e4"
+EXPECTED_HEAD = "0a1b2c3d4e5f"
 
 
 class StagingReadinessTestCase(unittest.TestCase):
@@ -193,7 +193,7 @@ class StagingReadinessTestCase(unittest.TestCase):
             FLASK_ENV="development",
         )
         result = subprocess.run(
-            [sys.executable, "-m", "flask", "--app", "run.py", "db", "upgrade"],
+            [sys.executable, "-m", "flask", "--app", "run.py", "db", "upgrade", "f9a0b1c2d3e4"],
             cwd=ROOT, env=environment, capture_output=True, text=True,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -201,9 +201,29 @@ class StagingReadinessTestCase(unittest.TestCase):
             normalize_database_url(url),
             connect_args={"sslmode": "disable"},
         )
+        with engine.begin() as connection:
+            connection.execute(text(
+                "INSERT INTO businesses (id, name, slug, primary_color, secondary_color, loyalty_type, points_per_currency, stamps_reward_limit, cooldown_minutes, is_active, web_access_enabled, mobile_access_enabled, created_at) VALUES (1, 'Existente', 'existente', '#000000', '#FFFFFF', 'stamps', 1.0, 10, 0, true, true, false, '2026-01-01')"
+            ))
+            connection.execute(text(
+                "INSERT INTO staff (id, business_id, username, email, password_hash, role, is_active, web_access_enabled, mobile_access_enabled, auth_version, permissions, created_at) VALUES (1, 1, 'existente', 'Mixto@Example.Test', 'hash', 'manager', true, true, false, 1, 'view_stats', '2026-01-01')"
+            ))
+        result = subprocess.run(
+            [sys.executable, "-m", "flask", "--app", "run.py", "db", "upgrade", EXPECTED_HEAD],
+            cwd=ROOT, env=environment, capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         with engine.connect() as connection:
             self.assertEqual(connection.execute(text("SELECT version_num FROM alembic_version")).scalar(), EXPECTED_HEAD)
-            self.assertEqual(connection.execute(text("SELECT COUNT(*) FROM businesses")).scalar(), 0)
+            self.assertEqual(
+                connection.execute(text("SELECT username, email FROM staff WHERE id = 1")).one(),
+                ("existente", "Mixto@Example.Test"),
+            )
+            index_definition = connection.execute(text(
+                "SELECT indexdef FROM pg_indexes WHERE schemaname = current_schema() AND tablename = 'staff' AND indexname = 'ix_staff_email_lower'"
+            )).scalar()
+            self.assertIsNotNone(index_definition)
+            self.assertIn("lower((email)::text)", index_definition.lower())
         engine.dispose()
 
 
