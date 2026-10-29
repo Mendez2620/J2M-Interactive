@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta, timezone
 
 from flask import Blueprint, current_app, flash, g, jsonify, redirect, render_template, request, send_file, session, url_for
@@ -5,7 +6,7 @@ from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
 
 from app.extensions import db
-from app.models import Business, Customer, Staff, Transaction
+from app.models import Business, Customer, ReferralIncentiveRule, Staff, Transaction
 from app.security import valid_email, validate_password, validate_csrf
 from app.staff_auth import revoke_staff_sessions, staff_required
 from app.access_audit import access_audit, staff_access_state
@@ -15,6 +16,9 @@ from app.services.auth_rate_limit_service import AuthRateLimitUnavailable, clear
 from app.services.unified_staff_access_service import bounded_password_matches, unified_staff_access
 from app.services.referral_eligibility_service import (
     ReferralEligibilityError, decide_referral_eligibility,
+)
+from app.services.referral_incentive_service import (
+    ReferralIncentiveError, create_rule, preview_incentive, update_rule,
 )
 
 manager_bp = Blueprint("manager", __name__, url_prefix="/manager")
@@ -225,6 +229,164 @@ def _apply_referral_decision(actor, business_id, eligibility_id):
             "updated_at": result.eligibility.updated_at.isoformat(),
         }, "idempotent_replay": result.replayed,
     }), 200
+
+
+def _rule_json(rule, snapshot=None):
+    historical = json.loads(snapshot) if snapshot else {}
+    return {
+        "id": rule.id, "business_id": rule.business_id,
+        "beneficiary_type": historical.get("beneficiary_type", rule.beneficiary_type),
+        "loyalty_program": historical.get("loyalty_program", rule.loyalty_program),
+        "reward_type": historical.get("reward_type", rule.reward_type),
+        "reward_amount": historical.get("reward_amount", str(rule.reward_amount)),
+        "eligible_condition": historical.get("eligible_condition", rule.eligible_condition),
+        "period_limit": historical.get("period_limit", rule.period_limit),
+        "period_unit": historical.get("period_unit", rule.period_unit),
+        "valid_from": historical.get("valid_from", rule.valid_from.isoformat() if rule.valid_from else None),
+        "valid_until": historical.get("valid_until", rule.valid_until.isoformat() if rule.valid_until else None),
+        "status": historical.get("status", rule.status),
+        "version": historical.get("version", rule.version),
+        "created_at": rule.created_at.isoformat(), "updated_at": rule.updated_at.isoformat(),
+    }
+
+
+def _incentive_error(callable_):
+    try:
+        return callable_()
+    except ReferralIncentiveError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), exc.status_code
+
+
+def _create_incentive_rule(actor, business_id):
+    if actor.business_id != business_id:
+        return jsonify({"status": "error", "message": "Acceso a negocio no autorizado."}), 403
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"status": "error", "message": "Solicitud inválida."}), 400
+    request_id = request.headers.get("Idempotency-Key") or data.get("request_id")
+
+    def apply():
+        result = create_rule(
+            business=actor.business, actor=actor, data=data, request_id=request_id
+        )
+        return jsonify({
+            "status": "success",
+            "rule": _rule_json(result.rule, result.response_snapshot),
+            "current_rule_version": result.rule.version,
+            "dry_run_only": True, "idempotent_replay": result.replayed,
+        }), 200 if result.replayed else 201
+
+    return _incentive_error(apply)
+
+
+def _update_incentive_rule(actor, business_id, rule_id):
+    if actor.business_id != business_id:
+        return jsonify({"status": "error", "message": "Acceso a negocio no autorizado."}), 403
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"status": "error", "message": "Solicitud inválida."}), 400
+    request_id = request.headers.get("Idempotency-Key") or data.get("request_id")
+
+    def apply():
+        result = update_rule(
+            business=actor.business, actor=actor, rule_id=rule_id, data=data,
+            request_id=request_id,
+        )
+        return jsonify({
+            "status": "success",
+            "rule": _rule_json(result.rule, result.response_snapshot),
+            "current_rule_version": result.rule.version,
+            "idempotent_replay": result.replayed, "dry_run_only": True,
+        }), 200
+
+    return _incentive_error(apply)
+
+
+def _preview_incentive(actor, business_id, eligibility_id, rule_id):
+    if actor.business_id != business_id:
+        return jsonify({"status": "error", "message": "Acceso a negocio no autorizado."}), 403
+
+    def apply():
+        preview = preview_incentive(
+            business=actor.business, eligibility_id=eligibility_id, rule_id=rule_id
+        )
+        return jsonify({
+            "status": "success", "dry_run": True, "outcome": preview.outcome,
+            "reason": preview.reason, "eligibility_id": preview.eligibility_id,
+            "rule_id": preview.rule_id, "rule_version": preview.rule_version,
+            "beneficiary_type": preview.beneficiary_type,
+            "beneficiary_id": preview.beneficiary_id,
+        }), 200
+
+    return _incentive_error(apply)
+
+
+def _list_incentive_rules(actor, business_id):
+    if actor.business_id != business_id:
+        return jsonify({"status": "error", "message": "Acceso a negocio no autorizado."}), 403
+    rules = ReferralIncentiveRule.query.filter_by(business_id=business_id).order_by(
+        ReferralIncentiveRule.updated_at.desc(), ReferralIncentiveRule.id.desc()
+    ).all()
+    return jsonify({
+        "status": "success", "rules": [_rule_json(rule) for rule in rules],
+        "dry_run_only": True,
+    }), 200
+
+
+@manager_bp.get("/business/<int:business_id>/referral-incentive-rules")
+@staff_required("web", "manage_referral_incentives", roles={"manager"})
+def list_referral_incentive_rules(business_id):
+    return _list_incentive_rules(g.staff, business_id)
+
+
+@manager_bp.post("/business/<int:business_id>/referral-incentive-rules")
+@staff_required("web", "manage_referral_incentives", roles={"manager"})
+def create_referral_incentive_rule(business_id):
+    if not validate_csrf():
+        return jsonify({"status": "error", "message": "Token CSRF inválido o ausente."}), 400
+    return _create_incentive_rule(g.staff, business_id)
+
+
+@manager_bp.patch("/business/<int:business_id>/referral-incentive-rules/<int:rule_id>")
+@staff_required("web", "manage_referral_incentives", roles={"manager"})
+def update_referral_incentive_rule(business_id, rule_id):
+    if not validate_csrf():
+        return jsonify({"status": "error", "message": "Token CSRF inválido o ausente."}), 400
+    return _update_incentive_rule(g.staff, business_id, rule_id)
+
+
+@manager_bp.post("/business/<int:business_id>/referral-eligibilities/<int:eligibility_id>/incentive-preview/<int:rule_id>")
+@staff_required("web", "manage_referral_incentives", roles={"manager"})
+def preview_referral_incentive(business_id, eligibility_id, rule_id):
+    if not validate_csrf():
+        return jsonify({"status": "error", "message": "Token CSRF inválido o ausente."}), 400
+    return _preview_incentive(g.staff, business_id, eligibility_id, rule_id)
+
+
+@manager_bp.post("/portal/referral-incentive-rules")
+@manager_portal_required("manage_referral_incentives")
+def portal_create_referral_incentive_rule():
+    return _create_incentive_rule(g.manager, g.manager.business_id)
+
+
+@manager_bp.get("/portal/referral-incentive-rules")
+@manager_portal_required("manage_referral_incentives")
+def portal_list_referral_incentive_rules():
+    return _list_incentive_rules(g.manager, g.manager.business_id)
+
+
+@manager_bp.patch("/portal/referral-incentive-rules/<int:rule_id>")
+@manager_portal_required("manage_referral_incentives")
+def portal_update_referral_incentive_rule(rule_id):
+    return _update_incentive_rule(g.manager, g.manager.business_id, rule_id)
+
+
+@manager_bp.post("/portal/referral-eligibilities/<int:eligibility_id>/incentive-preview/<int:rule_id>")
+@manager_portal_required("manage_referral_incentives")
+def portal_preview_referral_incentive(eligibility_id, rule_id):
+    return _preview_incentive(
+        g.manager, g.manager.business_id, eligibility_id, rule_id
+    )
 
 
 @manager_bp.route("/business/<int:business_id>/export/excel", methods=["GET"])
