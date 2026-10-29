@@ -26,6 +26,7 @@ from app.models.promoter import (
 from app.models.referral_incentive import (
     ReferralIncentiveRecord, ReferralIncentiveRule, ReferralIncentiveRuleAudit,
 )
+from app.models.referral_participant import ReferralParticipant, ReferralParticipantAudit
 
 __all__ = [
     "db",
@@ -50,4 +51,5 @@ __all__ = [
     "Promoter", "PromoterSession", "ReferralAttribution", "ReferralEligibility",
     "ReferralEligibilityDecision",
     "ReferralIncentiveRule", "ReferralIncentiveRuleAudit", "ReferralIncentiveRecord",
+    "ReferralParticipant", "ReferralParticipantAudit",
 ]

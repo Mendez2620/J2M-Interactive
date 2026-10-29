@@ -55,16 +55,22 @@ class ReferralAttribution(db.Model):
 
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     business_id = db.Column(db.Integer, db.ForeignKey("businesses.id", ondelete="CASCADE"), nullable=False, index=True)
-    promoter_id = db.Column(db.Integer, nullable=False, index=True)
+    promoter_id = db.Column(db.Integer, nullable=True, index=True)
+    participant_id = db.Column(db.Integer, nullable=True, index=True)
     customer_id = db.Column(db.Integer, nullable=False, unique=True)
     created_at = db.Column(db.DateTime, nullable=False, default=lambda: datetime.now(timezone.utc), index=True)
 
     promoter = db.relationship("Promoter", overlaps="customer")
-    customer = db.relationship("Customer", overlaps="promoter")
+    participant = db.relationship("ReferralParticipant", overlaps="promoter")
+    customer = db.relationship("Customer", overlaps="promoter,participant")
     __table_args__ = (
         db.CheckConstraint("business_id > 0", name="ck_referral_business_positive"),
         db.UniqueConstraint("business_id", "id", name="uq_referral_attribution_business_id_id"),
         db.UniqueConstraint("business_id", "customer_id", name="uq_referral_business_customer"),
+        db.ForeignKeyConstraint(
+            ["business_id", "participant_id"], ["referral_participants.business_id", "referral_participants.id"],
+            ondelete="RESTRICT", name="fk_referral_attribution_participant_tenant",
+        ),
         db.ForeignKeyConstraint(
             ["business_id", "promoter_id"], ["promoters.business_id", "promoters.id"],
             ondelete="RESTRICT", name="fk_referral_promoter_tenant",
@@ -84,7 +90,8 @@ class ReferralEligibility(db.Model):
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     business_id = db.Column(db.Integer, nullable=False, index=True)
     attribution_id = db.Column(db.Integer, nullable=False, unique=True)
-    promoter_id = db.Column(db.Integer, nullable=False, index=True)
+    promoter_id = db.Column(db.Integer, nullable=True, index=True)
+    participant_id = db.Column(db.Integer, nullable=True, index=True)
     customer_id = db.Column(db.Integer, nullable=False, unique=True)
     status = db.Column(db.String(20), nullable=False, default="pending", index=True)
     source_transaction_id = db.Column(db.Integer, nullable=True, unique=True)
@@ -99,6 +106,7 @@ class ReferralEligibility(db.Model):
     version = db.Column(db.Integer, nullable=False, default=0)
 
     attribution = db.relationship("ReferralAttribution")
+    participant = db.relationship("ReferralParticipant", overlaps="attribution")
     decisions = db.relationship("ReferralEligibilityDecision", back_populates="eligibility",
                                 order_by="ReferralEligibilityDecision.id", passive_deletes=True)
 
@@ -109,6 +117,11 @@ class ReferralEligibility(db.Model):
         ),
         db.UniqueConstraint("business_id", "id", name="uq_referral_eligibility_business_id_id"),
         db.UniqueConstraint("business_id", "evidence_reference_hash", name="uq_referral_evidence_business_hash"),
+        db.ForeignKeyConstraint(
+            ["business_id", "participant_id"],
+            ["referral_participants.business_id", "referral_participants.id"],
+            ondelete="RESTRICT", name="fk_referral_eligibility_participant_tenant",
+        ),
         db.ForeignKeyConstraint(
             ["business_id", "attribution_id"],
             ["referral_attributions.business_id", "referral_attributions.id"],

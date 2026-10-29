@@ -22,6 +22,9 @@ from app.access_audit import access_audit, staff_access_state
 from app.permissions import (
     detect_profile, permissions_for_profile, public_catalog, validate_permissions,
 )
+from app.services.referral_participant_service import (
+    ReferralParticipantError, configure_staff_referrals,
+)
 
 admin_bp = Blueprint("admin", __name__, url_prefix="/admin")
 
@@ -719,6 +722,32 @@ def toggle_staff_status(staff_id: int):
 
     next_url = request.args.get("next") or request.referrer or f"/admin/business/{staff.business_id}?tab=staff"
     return redirect(next_url)
+
+
+@admin_bp.post("/business/<int:business_id>/staff/<int:staff_id>/referrals")
+@platform_admin_required
+def configure_staff_referrals_admin(business_id, staff_id):
+    business = db.session.get(Business, business_id)
+    if not business:
+        return jsonify({"status": "error", "message": "Negocio no encontrado."}), 404
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or set(data) - {"enabled", "reason", "request_id"}:
+        return jsonify({"status": "error", "message": "Solicitud inválida."}), 400
+    if not isinstance(data.get("enabled"), bool):
+        return jsonify({"status": "error", "message": "enabled debe ser booleano."}), 400
+    admin = current_platform_admin()
+    try:
+        participant, replayed = configure_staff_referrals(
+            business=business, target_staff_id=staff_id, enabled=data["enabled"],
+            actor=admin, actor_type="platform_admin", reason=data.get("reason"),
+            request_id=request.headers.get("Idempotency-Key") or data.get("request_id"),
+        )
+    except ReferralParticipantError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), exc.status_code
+    return jsonify({
+        "status": "success", "participant_id": participant.id,
+        "enabled": participant.is_enabled, "idempotent_replay": replayed,
+    }), 200
 
 
 @admin_bp.route("/staff/<int:staff_id>/delete", methods=["POST"])

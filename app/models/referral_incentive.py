@@ -4,6 +4,7 @@ from sqlalchemy import event, select
 
 from app.extensions import db
 from app.models.promoter import ReferralEligibility
+from app.models.referral_participant import ReferralParticipant
 
 
 def _utcnow():
@@ -200,15 +201,36 @@ def _referral_incentive_history_is_append_only(_mapper, _connection, _target):
 
 @event.listens_for(ReferralIncentiveRecord, "before_insert")
 def _referral_incentive_subject_must_match(_mapper, connection, target):
-    if target.beneficiary_type != "external_promoter":
-        raise ValueError("Este tipo de beneficiario permanece cerrado hasta 8C.2B.")
     eligibility = ReferralEligibility.__table__
+    participant = ReferralParticipant.__table__
+    if target.beneficiary_type == "external_promoter":
+        legacy = select(eligibility.c.id).where(
+            eligibility.c.business_id == target.business_id,
+            eligibility.c.id == target.eligibility_id,
+            eligibility.c.attribution_id == target.attribution_id,
+            eligibility.c.source_transaction_id == target.source_transaction_id,
+            eligibility.c.promoter_id == target.beneficiary_id,
+        )
+        if connection.execute(legacy).first() is not None:
+            return
     query = select(eligibility.c.id).where(
         eligibility.c.business_id == target.business_id,
         eligibility.c.id == target.eligibility_id,
         eligibility.c.attribution_id == target.attribution_id,
         eligibility.c.source_transaction_id == target.source_transaction_id,
     )
-    query = query.where(eligibility.c.promoter_id == target.beneficiary_id)
+    query = query.join(
+        participant,
+        (participant.c.business_id == eligibility.c.business_id)
+        & (participant.c.id == eligibility.c.participant_id),
+    ).where(participant.c.participant_type == target.beneficiary_type)
+    identity_column = {
+        "external_promoter": participant.c.promoter_id,
+        "staff": participant.c.staff_id,
+        "customer_ambassador": participant.c.customer_id,
+    }.get(target.beneficiary_type)
+    if identity_column is None:
+        raise ValueError("Tipo de beneficiario inválido.")
+    query = query.where(identity_column == target.beneficiary_id)
     if connection.execute(query).first() is None:
         raise ValueError("La identidad económica del incentivo no coincide con la elegibilidad.")

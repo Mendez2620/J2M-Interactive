@@ -6,7 +6,7 @@ from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
 
 from app.extensions import db
-from app.models import Business, Customer, ReferralIncentiveRule, Staff, Transaction
+from app.models import Business, Customer, ReferralIncentiveRule, ReferralParticipant, Staff, Transaction
 from app.security import valid_email, validate_password, validate_csrf
 from app.staff_auth import revoke_staff_sessions, staff_required
 from app.access_audit import access_audit, staff_access_state
@@ -19,6 +19,9 @@ from app.services.referral_eligibility_service import (
 )
 from app.services.referral_incentive_service import (
     ReferralIncentiveError, create_rule, preview_incentive, update_rule,
+)
+from app.services.referral_participant_service import (
+    ReferralParticipantError, configure_staff_referrals, staff_can_issue,
 )
 
 manager_bp = Blueprint("manager", __name__, url_prefix="/manager")
@@ -102,6 +105,49 @@ def _own_cashier(business_id, staff_id):
     if not cashier or cashier.business_id != business_id or cashier.role != "cashier":
         return None, (jsonify({"status": "error", "message": "Cajero no encontrado."}), 404)
     return cashier, None
+
+
+@manager_bp.post("/business/<int:business_id>/staff/<int:staff_id>/referrals")
+@staff_required("web", "manage_referral_participants", roles={"manager"})
+def configure_staff_referral_access(business_id, staff_id):
+    denied = _own_business(business_id)
+    if denied:
+        return denied
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or set(data) - {"enabled", "reason", "request_id"}:
+        return jsonify({"status": "error", "message": "Solicitud inválida."}), 400
+    if not isinstance(data.get("enabled"), bool):
+        return jsonify({"status": "error", "message": "enabled debe ser booleano."}), 400
+    try:
+        participant, replayed = configure_staff_referrals(
+            business=g.staff.business, target_staff_id=staff_id,
+            enabled=data["enabled"], actor=g.staff, reason=data.get("reason"),
+            request_id=request.headers.get("Idempotency-Key") or data.get("request_id"),
+        )
+    except ReferralParticipantError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), exc.status_code
+    return jsonify({
+        "status": "success", "participant_id": participant.id,
+        "enabled": participant.is_enabled, "idempotent_replay": replayed,
+    }), 200
+
+
+@manager_bp.get("/portal/referral-invitation")
+@manager_portal_required("refer_customers")
+def own_referral_invitation():
+    participant = ReferralParticipant.query.filter_by(
+        business_id=g.manager.business_id, staff_id=g.manager.id,
+        participant_type="staff", is_enabled=True,
+    ).first()
+    if not staff_can_issue(participant):
+        return jsonify({"status": "error", "message": "Los referidos no están habilitados."}), 403
+    return jsonify({
+        "status": "success", "invitation_code": participant.invitation_code,
+        "invitation_path": url_for(
+            "business.join_business", slug=g.manager.business.slug,
+            ref=participant.invitation_code,
+        ),
+    }), 200
 
 
 @manager_bp.route("/business/<int:business_id>/staff/<int:staff_id>", methods=["PATCH"])

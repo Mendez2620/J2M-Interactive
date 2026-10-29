@@ -329,7 +329,16 @@ def preview_incentive(*, business, eligibility_id, rule_id, now=None):
     ).first()
     if not rule or not eligibility:
         raise ReferralIncentiveError("Regla o elegibilidad no encontrada.", 404)
-    beneficiary_id = eligibility.promoter_id if rule.beneficiary_type == "external_promoter" else None
+    participant = eligibility.participant
+    beneficiary_id = None
+    if participant and participant.participant_type == rule.beneficiary_type:
+        beneficiary_id = (
+            participant.promoter_id if rule.beneficiary_type == "external_promoter"
+            else participant.staff_id if rule.beneficiary_type == "staff"
+            else participant.customer_id
+        )
+    elif rule.beneficiary_type == "external_promoter":
+        beneficiary_id = eligibility.promoter_id
 
     def result(outcome, reason):
         return IncentivePreview(
@@ -349,10 +358,13 @@ def preview_incentive(*, business, eligibility_id, rule_id, now=None):
         return result("not_eligible", "El negocio está suspendido.")
     if rule.loyalty_program != business.loyalty_type or rule.reward_type != business.loyalty_type:
         return result("not_eligible", "La regla no corresponde al programa vigente.")
-    if rule.beneficiary_type != "external_promoter":
-        return result("not_eligible", "Este tipo de beneficiario se habilitará en 8C.2B.")
-    if not eligibility.attribution or not eligibility.attribution.promoter.is_active:
-        return result("not_eligible", "El promotor o la atribución no están activos.")
+    if not participant and rule.beneficiary_type == "external_promoter":
+        if not eligibility.attribution or not eligibility.attribution.promoter.is_active:
+            return result("not_eligible", "El promotor o la atribución no están activos.")
+    elif not participant or participant.participant_type != rule.beneficiary_type:
+        return result("not_eligible", "La regla no corresponde al tipo de referidor.")
+    elif not eligibility.attribution or not participant.currently_eligible():
+        return result("not_eligible", "El referidor o la atribución no están activos.")
     if not eligibility.source_transaction_id or not eligibility.evidence_reference_hash:
         return result("not_eligible", "Falta evidencia auditada de la primera compra.")
     if rule.valid_from and now < rule.valid_from.replace(tzinfo=timezone.utc):
