@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 
 from app.access_audit import access_audit
 from app.extensions import db
-from app.models import Business, Promoter, ReferralAttribution
+from app.models import Business, Promoter, ReferralAttribution, ReferralEligibility
 from app.phone_numbers import normalize_phone
 from app.promoter_auth import (
     create_promoter_session, promoter_required, revoke_current_promoter_session,
@@ -94,9 +94,12 @@ def promoter_logout():
 @promoter_required
 def promoter_portal():
     promoter = g.promoter
-    total = ReferralAttribution.query.filter_by(promoter_id=promoter.id, business_id=promoter.business_id).count()
+    verified = ReferralEligibility.query.filter_by(
+        promoter_id=promoter.id, business_id=promoter.business_id, status="verified"
+    )
+    total = verified.count()
     month_start = _utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    month = ReferralAttribution.query.filter_by(promoter_id=promoter.id, business_id=promoter.business_id).filter(ReferralAttribution.created_at >= month_start).count()
+    month = verified.filter(ReferralEligibility.reviewed_at >= month_start).count()
     return render_template("promoter/portal.html", promoter=promoter, total=total, month=month, referral_url=_referral_url(promoter))
 
 

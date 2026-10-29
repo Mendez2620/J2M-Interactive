@@ -38,6 +38,8 @@ Obligatorias antes de arrancar:
 - `FLASK_ENV`
 - `SECRET_KEY`
 - `JWT_SECRET_KEY`
+- `REGISTRATION_IDENTITY_HMAC_KEY`
+- `REFERRAL_EVIDENCE_HMAC_KEYS`
 - `DATABASE_URL`
 - `CORS_ORIGINS`
 - `PUBLIC_BASE_URL`
@@ -81,7 +83,7 @@ flask --app run.py db upgrade
 flask --app run.py db current
 ```
 
-El resultado final esperado es `0a1b2c3d4e5f (head)`. No ejecute `seed-db`, `db.drop_all()`, downgrades ni scripts de semillas. No añada `db upgrade` al `CMD`, al health check ni a una petición web: dos réplicas podrían intentar migrar simultáneamente.
+El resultado final esperado es `1b2c3d4e5f6a (head)`. No ejecute `seed-db`, `db.drop_all()`, downgrades ni scripts de semillas. No añada `db upgrade` al `CMD`, al health check ni a una petición web: dos réplicas podrían intentar migrar simultáneamente.
 
 Un `/api/ready` con estado `200` solo demuestra que `SELECT 1` funciona. No demuestra que las migraciones estén aplicadas. Confirme `flask --app run.py db current`, ejecute el upgrade controlado y vuelva a confirmar el head antes de abrir los paneles.
 

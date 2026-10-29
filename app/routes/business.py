@@ -9,7 +9,7 @@ from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
 from app.extensions import db
 from app.models import (Business, Customer, CustomerRegistrationIdentityClaim,
-                        Promoter, ReferralAttribution)
+                        Promoter, ReferralAttribution, ReferralEligibility)
 from app.phone_numbers import normalize_phone
 from app.routes.customer_recovery import _reserve_rate_limit
 from app.wallet_access import issue_wallet_token
@@ -271,9 +271,16 @@ def join_business(slug):
                 Promoter.is_active.is_(True),
             ).with_for_update().one_or_none()
             if locked_promoter and locked_promoter.phone != phone:
-                db.session.add(ReferralAttribution(
+                attribution = ReferralAttribution(
                     business_id=business.id, promoter_id=locked_promoter.id,
                     customer_id=customer.id,
+                )
+                db.session.add(attribution)
+                db.session.flush()
+                db.session.add(ReferralEligibility(
+                    business_id=business.id, attribution_id=attribution.id,
+                    promoter_id=locked_promoter.id, customer_id=customer.id,
+                    status="pending",
                 ))
         db.session.commit()
     except IntegrityError:
