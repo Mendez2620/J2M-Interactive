@@ -5,6 +5,7 @@ PERMISSION_CATALOG = {
     "view_transactions": {"label": "Transacciones", "description": "Consultar transacciones del negocio.", "channel": "web", "roles": {"manager"}},
     "view_customers": {"label": "Clientes", "description": "Consultar clientes del negocio.", "channel": "web", "roles": {"manager"}},
     "review_referrals": {"label": "Revisar referidos", "description": "Revisar manualmente la elegibilidad de referidos.", "channel": "web", "roles": {"manager"}},
+    "manage_referral_incentives": {"label": "Configurar incentivos", "description": "Configurar reglas deshabilitadas y consultar vistas previas de incentivos.", "channel": "web", "roles": {"manager"}},
     "export_reports": {"label": "Exportar reportes", "description": "Descargar reportes PDF y Excel.", "channel": "web", "roles": {"manager"}},
     "view_cashiers": {"label": "Consultar cajeros", "description": "Consultar empleados cajeros.", "channel": "web", "roles": {"manager"}},
     "create_cashiers": {"label": "Crear cajeros", "description": "Crear cuentas de cajero.", "channel": "web", "roles": {"manager"}},
