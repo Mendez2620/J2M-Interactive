@@ -9,12 +9,12 @@ from app import create_app
 from app.extensions import db
 from app.models import (
     Business, Customer, GoogleWalletSyncJob, LoyaltyLedgerEntry,
-    ReferralAttribution, ReferralEligibility, ReferralParticipant,
+    Promoter, ReferralAttribution, ReferralEligibility, ReferralParticipant,
     ReferralParticipantAudit, ReferralIncentiveRule, Staff, Transaction,
 )
 from app.services.referral_participant_service import (
     ReferralParticipantError, configure_customer_ambassador,
-    configure_staff_referrals, resolve_invitation,
+    configure_staff_referrals, ensure_external_promoter, resolve_invitation,
 )
 from app.staff_auth import issue_token_pair
 from app.services.referral_incentive_service import preview_incentive
@@ -101,6 +101,83 @@ class ReferralParticipantsPhase8C2BTestCase(unittest.TestCase):
         )
         self.assertEqual(denied.status_code, 403)
 
+    def test_staff_replay_returns_historical_result_without_reactivating(self):
+        self.assertEqual(self._enable_worker().status_code, 200)
+        self.headers["Idempotency-Key"] = "disable-worker"
+        disabled = self.client.post(
+            f"/manager/business/{self.business.id}/staff/{self.worker.id}/referrals",
+            json={"enabled": False, "reason": "Participación revocada."},
+            headers=self.headers,
+        )
+        self.assertEqual(disabled.status_code, 200)
+        self.headers["Idempotency-Key"] = "enable-worker"
+        replay = self._enable_worker()
+        participant = ReferralParticipant.query.filter_by(staff_id=self.worker.id).one()
+        self.assertEqual(replay.status_code, 200)
+        self.assertTrue(replay.get_json()["enabled"])
+        self.assertTrue(replay.get_json()["idempotent_replay"])
+        self.assertFalse(participant.is_enabled)
+        self.assertEqual(ReferralParticipantAudit.query.count(), 2)
+        conflict = self.client.post(
+            f"/manager/business/{self.business.id}/staff/{self.worker.id}/referrals",
+            json={"enabled": True, "reason": "Motivo diferente."},
+            headers=self.headers,
+        )
+        self.assertEqual(conflict.status_code, 409)
+
+    def test_manager_referral_configuration_requires_csrf(self):
+        headers = dict(self.headers)
+        headers.pop("X-CSRFToken")
+        response = self.client.post(
+            f"/manager/business/{self.business.id}/staff/{self.worker.id}/referrals",
+            json={"enabled": True, "reason": "Participación autorizada."},
+            headers=headers,
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(ReferralParticipant.query.count(), 0)
+
+    def test_public_get_never_reactivates_disabled_historical_promoter(self):
+        promoter = Promoter(
+            business_id=self.business.id, name="Histórico", username="historico",
+            referral_code="legacy-compatible-code",
+        )
+        promoter.set_password("PasswordSeguro123!")
+        db.session.add(promoter); db.session.flush()
+        participant = ensure_external_promoter(promoter)
+        participant.is_enabled = False
+        participant.revoked_at = datetime.now(timezone.utc)
+        db.session.commit()
+        before_updated = participant.updated_at
+        for _ in range(2):
+            page = self.client.get(
+                f"/join/{self.business.slug}?ref={promoter.referral_code}"
+            )
+            self.assertEqual(page.status_code, 200)
+            self.assertIn('name="referral_context" value=""', page.get_data(as_text=True))
+        db.session.refresh(participant)
+        self.assertFalse(participant.is_enabled)
+        self.assertIsNotNone(participant.revoked_at)
+        self.assertEqual(participant.updated_at, before_updated)
+        self.assertEqual(ReferralParticipantAudit.query.count(), 0)
+
+    def test_historical_enabled_promoter_link_remains_compatible(self):
+        promoter = Promoter(
+            business_id=self.business.id, name="Histórico", username="historico-activo",
+            referral_code="legacy-active-code-compatible",
+        )
+        promoter.set_password("PasswordSeguro123!")
+        db.session.add(promoter); db.session.flush()
+        participant = ensure_external_promoter(promoter)
+        db.session.commit()
+        page = self.client.get(
+            f"/join/{self.business.slug}?ref={promoter.referral_code}"
+        ).get_data(as_text=True)
+        context = re.search(r'name="referral_context" value="([^"]*)"', page).group(1)
+        self.assertTrue(context)
+        self.assertEqual(resolve_invitation(
+            business_id=self.business.id, code=promoter.referral_code,
+        ).id, participant.id)
+
     def test_staff_invitation_registers_pending_attribution_without_economic_effects(self):
         self.assertEqual(self._enable_worker().status_code, 200)
         participant = ReferralParticipant.query.filter_by(staff_id=self.worker.id).one()
@@ -142,7 +219,7 @@ class ReferralParticipantsPhase8C2BTestCase(unittest.TestCase):
                 authorization_verified=False,
             )
         self.assertIsNone(ReferralParticipant.query.filter_by(customer_id=self.customer.id).first())
-        participant, _ = configure_customer_ambassador(
+        participant, _, _ = configure_customer_ambassador(
             customer=self.customer, enabled=True, consent_version="v1",
             consent_evidence="evidence-bound-to-future-auth",
             actor_type="customer", actor_id=self.customer.id,
@@ -158,6 +235,49 @@ class ReferralParticipantsPhase8C2BTestCase(unittest.TestCase):
         )
         self.assertFalse(participant.currently_eligible())
         self.assertEqual(ReferralParticipantAudit.query.count(), 2)
+
+    def test_customer_replay_binds_consent_and_preserves_historical_result(self):
+        participant, _, enabled_state = configure_customer_ambassador(
+            customer=self.customer, enabled=True, consent_version="v1",
+            consent_evidence="evidence-bound-to-future-auth",
+            actor_type="customer", actor_id=self.customer.id,
+            reason="Consentimiento voluntario.", request_id="customer-consent-replay",
+            authorization_verified=True,
+        )
+        self.assertTrue(enabled_state["is_enabled"])
+        configure_customer_ambassador(
+            customer=self.customer, enabled=False, consent_version=None,
+            consent_evidence=None, actor_type="customer", actor_id=self.customer.id,
+            reason="Revocación solicitada.", request_id="customer-revoke-replay",
+            authorization_verified=True,
+        )
+        _, replayed, replay_state = configure_customer_ambassador(
+            customer=self.customer, enabled=True, consent_version="v1",
+            consent_evidence="evidence-bound-to-future-auth",
+            actor_type="customer", actor_id=self.customer.id,
+            reason="Consentimiento voluntario.", request_id="customer-consent-replay",
+            authorization_verified=True,
+        )
+        self.assertTrue(replayed)
+        self.assertTrue(replay_state["is_enabled"])
+        self.assertFalse(participant.is_enabled)
+        with self.assertRaises(ReferralParticipantError) as conflict:
+            configure_customer_ambassador(
+                customer=self.customer, enabled=True, consent_version="v2",
+                consent_evidence="different-evidence-for-consent",
+                actor_type="customer", actor_id=self.customer.id,
+                reason="Consentimiento voluntario.", request_id="customer-consent-replay",
+                authorization_verified=True,
+            )
+        self.assertEqual(conflict.exception.status_code, 409)
+
+    def test_orm_participant_default_is_disabled(self):
+        participant = ReferralParticipant(
+            business_id=self.business.id, participant_type="staff",
+            staff_id=self.denied.id, invitation_code="inactive-by-default-code",
+        )
+        db.session.add(participant); db.session.flush()
+        self.assertFalse(participant.is_enabled)
 
     def test_customer_public_emission_endpoint_does_not_exist(self):
         response = self.client.post(

@@ -18,6 +18,7 @@ from app.promoter_auth import (
 )
 from app.security import current_platform_admin, platform_admin_required, valid_email, validate_password
 from app.services.auth_rate_limit_service import AuthRateLimitUnavailable, clear_auth_attempts, reserve_auth_attempt
+from app.services.referral_participant_service import ensure_external_promoter
 
 
 promoter_bp = Blueprint("promoter", __name__)
@@ -158,6 +159,7 @@ def admin_promoters(business_id):
             db.session.add(promoter)
             try:
                 db.session.flush()
+                ensure_external_promoter(promoter)
                 db.session.add(access_audit(
                     "promoter_created", business_id=business.id,
                     platform_admin_id=current_platform_admin().id,

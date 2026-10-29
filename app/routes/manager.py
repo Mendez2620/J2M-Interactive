@@ -110,6 +110,8 @@ def _own_cashier(business_id, staff_id):
 @manager_bp.post("/business/<int:business_id>/staff/<int:staff_id>/referrals")
 @staff_required("web", "manage_referral_participants", roles={"manager"})
 def configure_staff_referral_access(business_id, staff_id):
+    if not validate_csrf():
+        return jsonify({"status": "error", "message": "Token CSRF inválido o ausente."}), 400
     denied = _own_business(business_id)
     if denied:
         return denied
@@ -119,7 +121,7 @@ def configure_staff_referral_access(business_id, staff_id):
     if not isinstance(data.get("enabled"), bool):
         return jsonify({"status": "error", "message": "enabled debe ser booleano."}), 400
     try:
-        participant, replayed = configure_staff_referrals(
+        participant, replayed, response_state = configure_staff_referrals(
             business=g.staff.business, target_staff_id=staff_id,
             enabled=data["enabled"], actor=g.staff, reason=data.get("reason"),
             request_id=request.headers.get("Idempotency-Key") or data.get("request_id"),
@@ -128,7 +130,7 @@ def configure_staff_referral_access(business_id, staff_id):
         return jsonify({"status": "error", "message": str(exc)}), exc.status_code
     return jsonify({
         "status": "success", "participant_id": participant.id,
-        "enabled": participant.is_enabled, "idempotent_replay": replayed,
+        "enabled": response_state["is_enabled"], "idempotent_replay": replayed,
     }), 200
 
 

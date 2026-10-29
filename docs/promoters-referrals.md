@@ -24,6 +24,8 @@ La revisión `3d4e5f6a7b8c` introduce `referral_participants` como identidad ten
 
 Un gerente necesita `manage_referral_participants` para habilitar o revocar a otro empleado; el empleado necesita además `refer_customers`, cuenta activa y participación habilitada para que su código produzca una atribución. La suspensión, retirada del permiso o revocación invalida inmediatamente nuevas invitaciones. Cada cambio exige motivo, clave idempotente y auditoría append-only. Super Admin dispone del mismo contrato administrativo global, sin habilitación automática de empleados nuevos.
 
+La participación nace deshabilitada por defecto. El backfill habilita únicamente a los promotores externos históricos que ya existían al aplicar la migración, y la creación administrativa de un promotor crea ambas identidades dentro de la misma transacción. Resolver un enlace público es una operación de solo lectura: nunca crea ni reactiva participantes. Un replay administrativo devuelve el snapshot producido por la solicitud original sin revertir cambios posteriores; la huella incluye negocio, sujeto, actor, acción y motivo, y para embajadores también versión y hash de la evidencia de consentimiento.
+
 Los clientes embajadores requieren consentimiento específico versionado y evidencia hash. El servicio interno está preparado, pero **no existe endpoint público para emitir su enlace**: Customer no dispone actualmente de una sesión persistente que pruebe titularidad. La autorización temporal de entrega Wallet, el teléfono, el ID, el QR de caja y el enlace Wallet no son prueba suficiente. Una fase posterior deberá incorporar autorización fuerte o recuperación asistida antes de exponer esta función.
 
 Contrato backend para 8C.3:

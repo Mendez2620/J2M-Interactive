@@ -226,6 +226,50 @@ class StagingReadinessTestCase(unittest.TestCase):
             )).scalar()
             self.assertIsNotNone(index_definition)
             self.assertIn("lower((email)::text)", index_definition.lower())
+        with engine.begin() as connection:
+            connection.execute(text(
+                "INSERT INTO referral_participants (business_id, participant_type, staff_id, invitation_code, created_at, updated_at) VALUES (1, 'staff', 1, 'postgres-direct-default', now(), now())"
+            ))
+            self.assertIs(
+                connection.execute(text(
+                    "SELECT is_enabled FROM referral_participants WHERE invitation_code = 'postgres-direct-default'"
+                )).scalar(),
+                False,
+            )
+            connection.execute(text(
+                "DELETE FROM referral_participants WHERE invitation_code = 'postgres-direct-default'"
+            ))
+        result = subprocess.run(
+            [sys.executable, "-m", "flask", "--app", "run.py", "db", "downgrade", "2c3d4e5f6a7b"],
+            cwd=ROOT, env=environment, capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        with engine.connect() as connection:
+            guard = connection.execute(text(
+                "SELECT pg_get_functiondef('validate_referral_incentive_record_subject()'::regprocedure)"
+            )).scalar().lower()
+            self.assertIn("e.promoter_id = new.beneficiary_id", guard)
+            self.assertNotIn("referral_participants", guard)
+        result = subprocess.run(
+            [sys.executable, "-m", "flask", "--app", "run.py", "db", "upgrade", EXPECTED_HEAD],
+            cwd=ROOT, env=environment, capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        with engine.begin() as connection:
+            connection.execute(text(
+                "INSERT INTO referral_participants (business_id, participant_type, staff_id, invitation_code, created_at, updated_at) VALUES (1, 'staff', 1, 'blocks-destructive-downgrade', now(), now())"
+            ))
+        blocked = subprocess.run(
+            [sys.executable, "-m", "flask", "--app", "run.py", "db", "downgrade", "2c3d4e5f6a7b"],
+            cwd=ROOT, env=environment, capture_output=True, text=True,
+        )
+        self.assertNotEqual(blocked.returncode, 0)
+        self.assertIn("Downgrade bloqueado", blocked.stdout + blocked.stderr)
+        with engine.connect() as connection:
+            self.assertEqual(
+                connection.execute(text("SELECT version_num FROM alembic_version")).scalar(),
+                EXPECTED_HEAD,
+            )
         engine.dispose()
 
 

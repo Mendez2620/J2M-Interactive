@@ -48,11 +48,30 @@ def _reason(value):
     return value
 
 
-def _mutation_fingerprint(subject_type, subject_id, action, reason):
+def _mutation_fingerprint(*, business_id, subject_type, subject_id, actor_type,
+                          actor_id, action, reason, consent_version=None,
+                          consent_evidence_hash=None):
     return hashlib.sha256(json.dumps({
-        "subject_type": subject_type, "subject_id": subject_id,
-        "action": action, "reason": reason,
+        "business_id": business_id,
+        "subject_type": subject_type,
+        "subject_id": subject_id,
+        "actor_type": actor_type,
+        "actor_id": actor_id,
+        "action": action,
+        "reason": reason,
+        "consent_version": consent_version,
+        "consent_evidence_hash": consent_evidence_hash,
     }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _historical_state(audit):
+    try:
+        state = json.loads(audit.new_state)
+    except (TypeError, ValueError):
+        raise ReferralParticipantError("El resultado histórico no es válido.", 409)
+    if not isinstance(state, dict) or not isinstance(state.get("is_enabled"), bool):
+        raise ReferralParticipantError("El resultado histórico no es válido.", 409)
+    return state
 
 
 def _audit(participant, actor_type, actor_id, action, reason, request_id, previous,
@@ -71,7 +90,6 @@ def ensure_external_promoter(promoter):
         business_id=promoter.business_id, promoter_id=promoter.id,
     ).first()
     if participant:
-        participant.is_enabled = True
         return participant
     participant = ReferralParticipant(
         business_id=promoter.business_id, participant_type="external_promoter",
@@ -87,14 +105,20 @@ def configure_staff_referrals(*, business, target_staff_id, enabled, actor,
                               actor_type="staff", reason, request_id):
     request_id, reason = _request(request_id), _reason(reason)
     action = "staff_referrals_enabled" if enabled else "staff_referrals_disabled"
-    fingerprint = _mutation_fingerprint("staff", target_staff_id, action, reason)
+    fingerprint = _mutation_fingerprint(
+        business_id=business.id, subject_type="staff", subject_id=target_staff_id,
+        actor_type=actor_type, actor_id=actor.id, action=action, reason=reason,
+    )
     existing = ReferralParticipantAudit.query.filter_by(
         business_id=business.id, request_id=request_id,
     ).first()
     if existing:
         if existing.request_fingerprint != fingerprint:
             raise ReferralParticipantError("El identificador ya se utilizó para otro cambio.", 409)
-        return db.session.get(ReferralParticipant, existing.participant_id), True
+        return (
+            db.session.get(ReferralParticipant, existing.participant_id), True,
+            _historical_state(existing),
+        )
     if actor_type == "staff" and actor.id == target_staff_id:
         raise ReferralParticipantError("No puedes habilitar tus propios referidos.", 403)
     target = Staff.query.filter_by(id=target_staff_id, business_id=business.id).first()
@@ -122,9 +146,12 @@ def configure_staff_referrals(*, business, target_staff_id, enabled, actor,
             business_id=business.id, request_id=request_id,
         ).first()
         if winner and winner.request_fingerprint == fingerprint:
-            return db.session.get(ReferralParticipant, winner.participant_id), True
+            return (
+                db.session.get(ReferralParticipant, winner.participant_id), True,
+                _historical_state(winner),
+            )
         raise ReferralParticipantError("El cambio entró en conflicto con otra solicitud.", 409) from exc
-    return participant, False
+    return participant, False, json.loads(_snapshot(participant))
 
 
 def configure_customer_ambassador(*, customer, enabled, consent_version,
@@ -135,14 +162,31 @@ def configure_customer_ambassador(*, customer, enabled, consent_version,
         raise ReferralParticipantError("La emisión pública requiere autorización del titular.", 403)
     request_id, reason = _request(request_id), _reason(reason)
     action = "customer_ambassador_consented" if enabled else "customer_ambassador_revoked"
-    fingerprint = _mutation_fingerprint("customer", customer.id, action, reason)
+    normalized_version = None
+    evidence_hash = None
+    if enabled:
+        if not isinstance(consent_version, str) or not consent_version.strip():
+            raise ReferralParticipantError("Se requiere la versión del consentimiento.")
+        if not isinstance(consent_evidence, str) or len(consent_evidence) < 16:
+            raise ReferralParticipantError("Se requiere evidencia de consentimiento válida.")
+        normalized_version = consent_version.strip()[:32]
+        evidence_hash = hashlib.sha256(consent_evidence.encode()).hexdigest()
+    fingerprint = _mutation_fingerprint(
+        business_id=customer.business_id, subject_type="customer",
+        subject_id=customer.id, actor_type=actor_type, actor_id=actor_id,
+        action=action, reason=reason, consent_version=normalized_version,
+        consent_evidence_hash=evidence_hash,
+    )
     existing = ReferralParticipantAudit.query.filter_by(
         business_id=customer.business_id, request_id=request_id,
     ).first()
     if existing:
         if existing.request_fingerprint != fingerprint:
             raise ReferralParticipantError("El identificador ya se utilizó para otro cambio.", 409)
-        return db.session.get(ReferralParticipant, existing.participant_id), True
+        return (
+            db.session.get(ReferralParticipant, existing.participant_id), True,
+            _historical_state(existing),
+        )
     participant = ReferralParticipant.query.filter_by(
         business_id=customer.business_id, customer_id=customer.id,
     ).first()
@@ -157,13 +201,9 @@ def configure_customer_ambassador(*, customer, enabled, consent_version,
         db.session.add(participant)
     previous = _snapshot(participant) if participant.id else None
     if enabled:
-        if not isinstance(consent_version, str) or not consent_version.strip():
-            raise ReferralParticipantError("Se requiere la versión del consentimiento.")
-        if not isinstance(consent_evidence, str) or len(consent_evidence) < 16:
-            raise ReferralParticipantError("Se requiere evidencia de consentimiento válida.")
-        participant.consent_version = consent_version.strip()[:32]
+        participant.consent_version = normalized_version
         participant.consented_at = _utcnow()
-        participant.consent_evidence_hash = hashlib.sha256(consent_evidence.encode()).hexdigest()
+        participant.consent_evidence_hash = evidence_hash
         participant.is_enabled = True
         participant.revoked_at = None
     else:
@@ -179,13 +219,18 @@ def configure_customer_ambassador(*, customer, enabled, consent_version,
             business_id=customer.business_id, request_id=request_id,
         ).first()
         if winner and winner.request_fingerprint == fingerprint:
-            return db.session.get(ReferralParticipant, winner.participant_id), True
+            return (
+                db.session.get(ReferralParticipant, winner.participant_id), True,
+                _historical_state(winner),
+            )
         raise ReferralParticipantError("El cambio entró en conflicto con otra solicitud.", 409) from exc
-    return participant, False
+    return participant, False, json.loads(_snapshot(participant))
 
 
 def resolve_invitation(*, business_id, code):
-    if not isinstance(code, str) or not 20 <= len(code) <= 48:
+    # Newly issued codes are high-entropy and at least 20 characters. Existing
+    # promoter codes may be shorter and remain valid after the migration.
+    if not isinstance(code, str) or not 1 <= len(code) <= 48:
         return None
     participant = ReferralParticipant.query.filter_by(
         business_id=business_id, invitation_code=code, is_enabled=True,

@@ -737,7 +737,7 @@ def configure_staff_referrals_admin(business_id, staff_id):
         return jsonify({"status": "error", "message": "enabled debe ser booleano."}), 400
     admin = current_platform_admin()
     try:
-        participant, replayed = configure_staff_referrals(
+        participant, replayed, response_state = configure_staff_referrals(
             business=business, target_staff_id=staff_id, enabled=data["enabled"],
             actor=admin, actor_type="platform_admin", reason=data.get("reason"),
             request_id=request.headers.get("Idempotency-Key") or data.get("request_id"),
@@ -746,7 +746,7 @@ def configure_staff_referrals_admin(business_id, staff_id):
         return jsonify({"status": "error", "message": str(exc)}), exc.status_code
     return jsonify({
         "status": "success", "participant_id": participant.id,
-        "enabled": participant.is_enabled, "idempotent_replay": replayed,
+        "enabled": response_state["is_enabled"], "idempotent_replay": replayed,
     }), 200
 
 

@@ -9,12 +9,12 @@ from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
 from app.extensions import db
 from app.models import (Business, Customer, CustomerRegistrationIdentityClaim,
-                        Promoter, ReferralParticipant)
+                        ReferralParticipant)
 from app.phone_numbers import normalize_phone
 from app.routes.customer_recovery import _reserve_rate_limit
 from app.wallet_access import issue_wallet_token
 from app.services.referral_participant_service import (
-    create_pending_attribution, ensure_external_promoter, resolve_invitation,
+    create_pending_attribution, resolve_invitation,
 )
 
 business_bp = Blueprint("business", __name__)
@@ -202,13 +202,6 @@ def join_business(slug):
     if request.method == "GET":
         referral_code = (request.args.get("ref") or "").strip()
         participant = resolve_invitation(business_id=business.id, code=referral_code)
-        if not participant and referral_code and len(referral_code) <= 32:
-            promoter = Promoter.query.filter_by(
-                business_id=business.id, referral_code=referral_code, is_active=True
-            ).first()
-            if promoter:
-                participant = ensure_external_promoter(promoter)
-                db.session.commit()
         # A referral link is an explicit new-registration context. Never expose
         # a previous browser user's delivery capability on that page.
         active_delivery = None if referral_code else _active_wallet_delivery(business)

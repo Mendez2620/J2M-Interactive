@@ -9,6 +9,7 @@ from app.models import (
     CustomerRegistrationChallenge, CustomerRegistrationIdentityClaim,
     Promoter, ReferralAttribution, RegistrationEmailJob,
 )
+from app.services.referral_participant_service import ensure_external_promoter
 
 
 class Phase8ATestCase(unittest.TestCase):
@@ -93,7 +94,10 @@ class Phase8ATestCase(unittest.TestCase):
         second_promoter = Promoter(business_id=self.one.id, name="Segundo", username="segundo", referral_code="PROMO-B")
         first_promoter.set_password("Seguro12345")
         second_promoter.set_password("Seguro12345")
-        db.session.add_all([first_promoter, second_promoter]); db.session.commit()
+        db.session.add_all([first_promoter, second_promoter]); db.session.flush()
+        ensure_external_promoter(first_promoter)
+        ensure_external_promoter(second_promoter)
+        db.session.commit()
 
         first_page = self.client.get("/join/uno?ref=PROMO-A").get_data(as_text=True)
         first_context = re.search(r'name="referral_context" value="([^"]*)"', first_page).group(1)

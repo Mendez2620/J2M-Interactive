@@ -83,6 +83,23 @@ class MigrationTestCase(unittest.TestCase):
                 self.assertEqual(connection.execute(
                     "SELECT version_num FROM alembic_version"
                 ).fetchone()[0], "3d4e5f6a7b8c")
+                default_sql = {
+                    row[1]: row[4]
+                    for row in connection.execute("PRAGMA table_info(referral_participants)")
+                }
+                self.assertIn(str(default_sql["is_enabled"]).strip("()'\""), {"0", "false", "FALSE"})
+                connection.execute(
+                    "INSERT INTO businesses (id, name, slug, primary_color, secondary_color, loyalty_type, points_per_currency, stamps_reward_limit, cooldown_minutes, is_active, web_access_enabled, mobile_access_enabled, created_at) VALUES (1, 'Default', 'default', '#000000', '#FFFFFF', 'points', 1, 10, 0, 1, 1, 0, '2026-01-03')"
+                )
+                connection.execute(
+                    "INSERT INTO staff (id, business_id, username, password_hash, role, is_active, web_access_enabled, mobile_access_enabled, auth_version, permissions, created_at) VALUES (1, 1, 'staff-default', 'hash', 'cashier', 1, 1, 0, 0, '', '2026-01-03')"
+                )
+                connection.execute(
+                    "INSERT INTO referral_participants (business_id, participant_type, staff_id, invitation_code, created_at, updated_at) VALUES (1, 'staff', 1, 'direct-sql-disabled', '2026-01-03', '2026-01-03')"
+                )
+                self.assertEqual(connection.execute(
+                    "SELECT is_enabled FROM referral_participants WHERE staff_id = 1"
+                ).fetchone()[0], 0)
 
     def test_upgrade_preserves_existing_business_data(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:

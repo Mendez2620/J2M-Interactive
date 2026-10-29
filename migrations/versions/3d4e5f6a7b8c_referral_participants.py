@@ -136,7 +136,7 @@ def upgrade():
         sa.Column("staff_id", sa.Integer(), nullable=True),
         sa.Column("customer_id", sa.Integer(), nullable=True),
         sa.Column("invitation_code", sa.String(48), nullable=False),
-        sa.Column("is_enabled", sa.Boolean(), nullable=False, server_default=sa.true()),
+        sa.Column("is_enabled", sa.Boolean(), nullable=False, server_default=sa.false()),
         sa.Column("consent_version", sa.String(32), nullable=True),
         sa.Column("consented_at", sa.DateTime(), nullable=True),
         sa.Column("consent_evidence_hash", sa.String(64), nullable=True),
@@ -239,7 +239,16 @@ def downgrade():
         "SELECT COUNT(*) FROM referral_participants WHERE participant_type != 'external_promoter'"
     )).scalar_one()
     audits = bind.execute(sa.text("SELECT COUNT(*) FROM referral_participant_audits")).scalar_one()
-    if non_legacy or audits:
+    changed_legacy = bind.execute(sa.text("""
+        SELECT COUNT(*)
+        FROM referral_participants rp
+        JOIN promoters p
+          ON p.business_id = rp.business_id AND p.id = rp.promoter_id
+        WHERE rp.participant_type = 'external_promoter'
+          AND (rp.is_enabled = FALSE OR rp.revoked_at IS NOT NULL
+               OR rp.invitation_code != p.referral_code)
+    """)).scalar_one()
+    if non_legacy or audits or changed_legacy:
         raise RuntimeError("Downgrade bloqueado: existe participación o auditoría 8C.2B.")
     if bind.dialect.name == "postgresql":
         op.execute("DROP TRIGGER IF EXISTS trg_referral_participant_audits_append_only ON referral_participant_audits")
@@ -249,6 +258,26 @@ def downgrade():
         op.execute("DROP TRIGGER IF EXISTS trg_referral_participant_audits_no_delete")
         op.execute("DROP TRIGGER IF EXISTS trg_referral_incentive_record_subject")
     op.drop_table("referral_participant_audits")
+    if bind.dialect.name == "postgresql":
+        op.execute("""
+            CREATE OR REPLACE FUNCTION validate_referral_incentive_record_subject()
+            RETURNS trigger AS $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM referral_eligibilities e
+                    WHERE e.business_id = NEW.business_id
+                      AND e.id = NEW.eligibility_id
+                      AND e.attribution_id = NEW.attribution_id
+                      AND e.source_transaction_id = NEW.source_transaction_id
+                      AND NEW.beneficiary_type = 'external_promoter'
+                      AND e.promoter_id = NEW.beneficiary_id
+                ) THEN
+                    RAISE EXCEPTION 'referral incentive subject mismatch';
+                END IF;
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql SET search_path = pg_catalog, public
+        """)
     with op.batch_alter_table("referral_eligibilities") as batch:
         batch.drop_constraint("fk_referral_eligibility_participant_tenant", type_="foreignkey")
         batch.drop_index("ix_referral_eligibilities_participant_id")
