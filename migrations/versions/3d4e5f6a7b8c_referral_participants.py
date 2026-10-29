@@ -95,7 +95,7 @@ def upgrade():
         op.execute("""
             INSERT INTO referral_participants
                 (business_id, participant_type, promoter_id, invitation_code, is_enabled, created_at, updated_at)
-            SELECT p.business_id, 'external_promoter', p.id, p.referral_code, 1, p.created_at, p.created_at
+            SELECT p.business_id, 'external_promoter', p.id, p.referral_code, TRUE, p.created_at, p.created_at
             FROM promoters p
             WHERE NOT EXISTS (
                 SELECT 1 FROM referral_participants rp
@@ -171,7 +171,7 @@ def upgrade():
     op.execute("""
         INSERT INTO referral_participants
             (business_id, participant_type, promoter_id, invitation_code, is_enabled, created_at, updated_at)
-        SELECT business_id, 'external_promoter', id, referral_code, 1, created_at, created_at
+        SELECT business_id, 'external_promoter', id, referral_code, TRUE, created_at, created_at
         FROM promoters
     """)
 
