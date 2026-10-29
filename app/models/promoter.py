@@ -62,6 +62,7 @@ class ReferralAttribution(db.Model):
     customer = db.relationship("Customer", overlaps="promoter")
     __table_args__ = (
         db.CheckConstraint("business_id > 0", name="ck_referral_business_positive"),
+        db.UniqueConstraint("business_id", "id", name="uq_referral_attribution_business_id_id"),
         db.UniqueConstraint("business_id", "customer_id", name="uq_referral_business_customer"),
         db.ForeignKeyConstraint(
             ["business_id", "promoter_id"], ["promoters.business_id", "promoters.id"],
@@ -70,5 +71,87 @@ class ReferralAttribution(db.Model):
         db.ForeignKeyConstraint(
             ["business_id", "customer_id"], ["customers.business_id", "customers.id"],
             ondelete="RESTRICT", name="fk_referral_customer_tenant",
+        ),
+    )
+
+
+class ReferralEligibility(db.Model):
+    """Current anti-fraud review state for one referral attribution."""
+
+    __tablename__ = "referral_eligibilities"
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    business_id = db.Column(db.Integer, nullable=False, index=True)
+    attribution_id = db.Column(db.Integer, nullable=False, unique=True)
+    promoter_id = db.Column(db.Integer, nullable=False, index=True)
+    customer_id = db.Column(db.Integer, nullable=False, unique=True)
+    status = db.Column(db.String(20), nullable=False, default="pending", index=True)
+    source_transaction_id = db.Column(db.Integer, nullable=True, unique=True)
+    evidence_reference_hash = db.Column(db.String(64), nullable=True)
+    reviewed_by_staff_id = db.Column(db.Integer, db.ForeignKey("staff.id", ondelete="SET NULL"), nullable=True)
+    reviewed_at = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = db.Column(db.DateTime, nullable=False, default=lambda: datetime.now(timezone.utc),
+                           onupdate=lambda: datetime.now(timezone.utc))
+    version = db.Column(db.Integer, nullable=False, default=0)
+
+    attribution = db.relationship("ReferralAttribution")
+    decisions = db.relationship("ReferralEligibilityDecision", back_populates="eligibility",
+                                order_by="ReferralEligibilityDecision.id", passive_deletes=True)
+
+    __table_args__ = (
+        db.CheckConstraint(
+            "status IN ('pending','in_review','verified','rejected','revoked')",
+            name="ck_referral_eligibility_status",
+        ),
+        db.UniqueConstraint("business_id", "id", name="uq_referral_eligibility_business_id_id"),
+        db.UniqueConstraint("business_id", "evidence_reference_hash", name="uq_referral_evidence_business_hash"),
+        db.ForeignKeyConstraint(
+            ["business_id", "attribution_id"],
+            ["referral_attributions.business_id", "referral_attributions.id"],
+            ondelete="CASCADE", name="fk_referral_eligibility_attribution_tenant",
+        ),
+        db.ForeignKeyConstraint(
+            ["business_id", "promoter_id"], ["promoters.business_id", "promoters.id"],
+            ondelete="RESTRICT", name="fk_referral_eligibility_promoter_tenant",
+        ),
+        db.ForeignKeyConstraint(
+            ["business_id", "customer_id"], ["customers.business_id", "customers.id"],
+            ondelete="RESTRICT", name="fk_referral_eligibility_customer_tenant",
+        ),
+        db.ForeignKeyConstraint(
+            ["business_id", "source_transaction_id"],
+            ["transactions.business_id", "transactions.id"],
+            ondelete="RESTRICT", name="fk_referral_eligibility_transaction_tenant",
+        ),
+    )
+
+
+class ReferralEligibilityDecision(db.Model):
+    """Immutable decision history; contains no promoter/customer personal data."""
+
+    __tablename__ = "referral_eligibility_decisions"
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    business_id = db.Column(db.Integer, nullable=False, index=True)
+    eligibility_id = db.Column(db.Integer, nullable=False, index=True)
+    actor_staff_id = db.Column(db.Integer, db.ForeignKey("staff.id", ondelete="SET NULL"), nullable=True)
+    from_status = db.Column(db.String(20), nullable=False)
+    to_status = db.Column(db.String(20), nullable=False)
+    source_transaction_id = db.Column(db.Integer, nullable=True)
+    evidence_reference_hash = db.Column(db.String(64), nullable=True)
+    reason = db.Column(db.String(500), nullable=False)
+    request_id = db.Column(db.String(64), nullable=False)
+    request_fingerprint = db.Column(db.String(64), nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+
+    eligibility = db.relationship("ReferralEligibility", back_populates="decisions")
+
+    __table_args__ = (
+        db.UniqueConstraint("business_id", "request_id", name="uq_referral_decision_business_request"),
+        db.ForeignKeyConstraint(
+            ["business_id", "eligibility_id"],
+            ["referral_eligibilities.business_id", "referral_eligibilities.id"],
+            ondelete="CASCADE", name="fk_referral_decision_eligibility_tenant",
         ),
     )

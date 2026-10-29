@@ -15,7 +15,7 @@ from app.staging_preflight import _https_endpoint_url
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_HEAD = "0a1b2c3d4e5f"
+EXPECTED_HEAD = "1b2c3d4e5f6a"
 
 
 class StagingReadinessTestCase(unittest.TestCase):

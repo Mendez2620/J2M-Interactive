@@ -19,7 +19,10 @@ from app.models.customer_registration import (
     CustomerRegistrationChallenge, CustomerRegistrationIdentityClaim,
 )
 from app.models.registration_email_job import RegistrationEmailJob
-from app.models.promoter import Promoter, PromoterSession, ReferralAttribution
+from app.models.promoter import (
+    Promoter, PromoterSession, ReferralAttribution, ReferralEligibility,
+    ReferralEligibilityDecision,
+)
 
 __all__ = [
     "db",
@@ -41,5 +44,6 @@ __all__ = [
     "CustomerRegistrationChallenge",
     "CustomerRegistrationIdentityClaim",
     "RegistrationEmailJob",
-    "Promoter", "PromoterSession", "ReferralAttribution",
+    "Promoter", "PromoterSession", "ReferralAttribution", "ReferralEligibility",
+    "ReferralEligibilityDecision",
 ]

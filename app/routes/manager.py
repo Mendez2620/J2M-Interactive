@@ -6,13 +6,16 @@ from sqlalchemy.exc import IntegrityError
 
 from app.extensions import db
 from app.models import Business, Customer, Staff, Transaction
-from app.security import valid_email, validate_password
+from app.security import valid_email, validate_password, validate_csrf
 from app.staff_auth import revoke_staff_sessions, staff_required
 from app.access_audit import access_audit, staff_access_state
 from app.manager_auth import create_manager_browser_session, manager_portal_required, revoke_current_manager_session
 from app.permissions import effective_permissions, has_permission
 from app.services.auth_rate_limit_service import AuthRateLimitUnavailable, clear_auth_attempts, reserve_auth_attempt
 from app.services.unified_staff_access_service import bounded_password_matches, unified_staff_access
+from app.services.referral_eligibility_service import (
+    ReferralEligibilityError, decide_referral_eligibility,
+)
 
 manager_bp = Blueprint("manager", __name__, url_prefix="/manager")
 # Legacy test hook; authentication throttling is persisted in auth_rate_limit_slots.
@@ -179,6 +182,37 @@ def manager_customers(business_id):
         "page": pagination.page, "pages": pagination.pages, "total": pagination.total,
         "per_page": pagination.per_page,
     }}), 200
+
+
+@manager_bp.post("/business/<int:business_id>/referrals/<int:eligibility_id>/decision")
+@staff_required("web", "review_referrals", roles={"manager"})
+def review_referral_eligibility(business_id, eligibility_id):
+    if not validate_csrf():
+        return jsonify({"status": "error", "message": "Token CSRF inválido o ausente."}), 400
+    denied = _own_business(business_id)
+    if denied:
+        return denied
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or set(data) - {
+        "status", "transaction_id", "evidence_reference", "reason", "request_id"
+    }:
+        return jsonify({"status": "error", "message": "Solicitud de revisión inválida."}), 400
+    request_id = request.headers.get("Idempotency-Key") or data.get("request_id")
+    try:
+        result = decide_referral_eligibility(
+            business=g.staff.business, actor=g.staff, eligibility_id=eligibility_id,
+            to_status=data.get("status"), transaction_id=data.get("transaction_id"),
+            evidence_reference=data.get("evidence_reference"), reason=data.get("reason"),
+            request_id=request_id,
+        )
+    except ReferralEligibilityError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), exc.status_code
+    return jsonify({
+        "status": "success", "eligibility": {
+            "id": result.eligibility.id, "status": result.eligibility.status,
+            "updated_at": result.eligibility.updated_at.isoformat(),
+        }, "idempotent_replay": result.replayed,
+    }), 200
 
 
 @manager_bp.route("/business/<int:business_id>/export/excel", methods=["GET"])

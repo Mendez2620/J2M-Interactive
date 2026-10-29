@@ -61,7 +61,7 @@ flask --app run.py staging-preflight --check-database
 ```
 
 Esta opción ejecuta únicamente `SELECT 1` y una lectura de `alembic_version`.
-Nunca crea tablas ni aplica migraciones. El head esperado es `0a1b2c3d4e5f`.
+Nunca crea tablas ni aplica migraciones. El head esperado es `1b2c3d4e5f6a`.
 
 ## 4. Migración controlada
 
@@ -167,7 +167,7 @@ limitación y confirme que la interfaz no la ofrece como operativa.
 - [ ] Entorno de staging aislado y sin datos reales.
 - [ ] Secretos independientes, estables y guardados fuera de Git.
 - [ ] PostgreSQL con TLS y respaldo restaurado de prueba.
-- [ ] Preflight sin errores y revisión `0a1b2c3d4e5f` confirmada.
+- [ ] Preflight sin errores y revisión `1b2c3d4e5f6a` confirmada.
 - [ ] CI, `pip check`, Tailwind, suite y Docker Linux aprobados.
 - [ ] Web y workers configurados como procesos separados.
 - [ ] Health, readiness, alertas y colas observados.
