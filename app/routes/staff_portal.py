@@ -102,6 +102,7 @@ def staff_scanner():
     return render_template(
         "staff/scanner.html", staff=g.staff_browser, business=g.staff_browser.business,
         can_refer=staff_can_issue(participant),
+        can_link_customers=has_permission(g.staff_browser, "authorize_customer_identity"),
     )
 
 

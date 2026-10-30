@@ -36,3 +36,6 @@ Contrato backend para 8C.3:
 - `GET /manager/portal/referral-invitation`, con sesión revocable y `refer_customers`, devuelve código y ruta relativa; no devuelve datos de invitados.
 - El registro público sigue usando `GET/POST /join/<slug>` y crea la atribución únicamente después de completar el alta.
 - La futura pestaña Referidos podrá agrupar métricas, equipo/promotores, embajadores, reglas y auditoría, sin modificar los contratos Wallet.
+# Clientes embajadores y autorización
+
+La base de autorización 8C.3B1 se documenta en `docs/customer-passkey-authorization.md`. La presencia de una passkey no crea ni habilita automáticamente un `ReferralParticipant`; consentimiento, participación y programa del negocio continúan siendo estados separados. La emisión pública de invitaciones de clientes permanece bloqueada hasta 8C.3B2.

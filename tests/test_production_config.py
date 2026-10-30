@@ -157,6 +157,28 @@ class ProductionConfigTestCase(unittest.TestCase):
              self.assertRaisesRegex(RuntimeError, "UPLOAD_STORAGE_BACKEND=disabled"):
             create_app("production")
 
+    def test_production_validates_webauthn_origin_and_rp_id(self):
+        invalid = (
+            ("http://app.example.com", "app.example.com"),
+            ("https://user:pass@app.example.com", "app.example.com"),
+            ("https://app.example.com/path", "app.example.com"),
+            ("https://app.example.com", "unrelated.example"),
+        )
+        for origin, rp_id in invalid:
+            with self.subTest(origin=origin, rp_id=rp_id), \
+                 patch.dict(os.environ, self.valid_environment(), clear=True), \
+                 patch.object(ProductionConfig, "PUBLIC_BASE_URL", "https://app.example.com"), \
+                 patch.object(ProductionConfig, "WEBAUTHN_ORIGIN", origin), \
+                 patch.object(ProductionConfig, "WEBAUTHN_RP_ID", rp_id), \
+                 self.assertRaisesRegex(RuntimeError, "WEBAUTHN"):
+                create_app("production")
+        with patch.dict(os.environ, self.valid_environment(), clear=True), \
+             patch.object(ProductionConfig, "PUBLIC_BASE_URL", "https://login.app.example.com"), \
+             patch.object(ProductionConfig, "WEBAUTHN_ORIGIN", "https://login.app.example.com"), \
+             patch.object(ProductionConfig, "WEBAUTHN_RP_ID", "app.example.com"):
+            app = create_app("production")
+        self.assertEqual(app.config["WEBAUTHN_RP_ID"], "app.example.com")
+
     def test_production_never_allows_google_wallet_mock_or_incomplete_real_mode(self):
         with patch.dict(os.environ, self.valid_environment(GOOGLE_WALLET_MODE="mock"), clear=True), \
              patch.object(ProductionConfig, "PUBLIC_BASE_URL", "https://app.example.com"), \

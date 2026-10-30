@@ -83,9 +83,9 @@ flask --app run.py db upgrade
 flask --app run.py db current
 ```
 
-El resultado final esperado para Fase 8C.3A es `4e5f6a7b8c9d (head)`. No ejecute `seed-db`, `db.drop_all()`, downgrades ni scripts de semillas. No añada `db upgrade` al `CMD`, al health check ni a una petición web: dos réplicas podrían intentar migrar simultáneamente.
+El resultado final esperado para Fase 8C.3B1 es `5f6a7b8c9d0e (head)`. No ejecute `seed-db`, `db.drop_all()`, downgrades ni scripts de semillas. No añada `db upgrade` al `CMD`, al health check ni a una petición web: dos réplicas podrían intentar migrar simultáneamente.
 
-Para pasar desde `3d4e5f6a7b8c`, no despliegue primero los procesos con el nuevo `EXPECTED_ALEMBIC_HEAD`: fallarían correctamente hasta migrar. Prepare la imagen fijada al SHA aprobado, pause coordinadamente web y workers, confirme respaldo y revisión actual, ejecute una única tarea de migración con esa imagen, verifique `4e5f6a7b8c9d` y después actualice los procesos. Si no se puede garantizar esta secuencia sin tráfico concurrente, mantenga la versión anterior y programe una ventana de mantenimiento; no desactive el preflight.
+Para pasar desde `4e5f6a7b8c9d` a `5f6a7b8c9d0e`, no despliegue primero los procesos con el nuevo `EXPECTED_ALEMBIC_HEAD`: fallarían correctamente hasta migrar. Prepare la imagen fijada al SHA aprobado, pause coordinadamente web y workers, confirme respaldo y revisión actual, ejecute una única tarea de migración con esa imagen, verifique las tablas tenant-scoped, RLS, ausencia de grants públicos y el trigger append-only, y después actualice los procesos. Si no se puede garantizar esta secuencia sin tráfico concurrente, mantenga la versión anterior y programe una ventana de mantenimiento; no desactive el preflight.
 
 Un `/api/ready` con estado `200` solo demuestra que `SELECT 1` funciona. No demuestra que las migraciones estén aplicadas. Confirme `flask --app run.py db current`, ejecute el upgrade controlado y vuelva a confirmar el head antes de abrir los paneles.
 
