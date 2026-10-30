@@ -1,4 +1,5 @@
 import json
+import uuid
 from datetime import datetime, timedelta, timezone
 
 from flask import Blueprint, current_app, flash, g, jsonify, redirect, render_template, request, send_file, session, url_for
@@ -6,7 +7,10 @@ from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
 
 from app.extensions import db
-from app.models import Business, Customer, ReferralIncentiveRule, ReferralParticipant, Staff, Transaction
+from app.models import (
+    Business, Customer, ReferralAttribution, ReferralEligibility,
+    ReferralIncentiveRule, ReferralParticipant, Staff, Transaction,
+)
 from app.security import valid_email, validate_password, validate_csrf
 from app.staff_auth import revoke_staff_sessions, staff_required
 from app.access_audit import access_audit, staff_access_state
@@ -681,6 +685,71 @@ def portal_customers():
         query = query.filter(or_(Customer.full_name.ilike(like), Customer.email.ilike(like), Customer.phone.ilike(like)))
     pagination = query.order_by(Customer.created_at.desc()).paginate(page=page, per_page=20, error_out=False)
     return render_template("manager/customers.html", pagination=pagination, search=search, **_portal_context("customers"))
+
+
+@manager_bp.get("/portal/referrals")
+@manager_portal_required("manage_referral_participants")
+def portal_referrals():
+    business = g.manager.business
+    status_counts = dict(db.session.query(
+        ReferralEligibility.status, func.count(ReferralEligibility.id),
+    ).filter_by(business_id=business.id).group_by(ReferralEligibility.status).all())
+    participant_counts = dict(db.session.query(
+        ReferralParticipant.participant_type, func.count(ReferralParticipant.id),
+    ).filter_by(business_id=business.id, is_enabled=True).group_by(
+        ReferralParticipant.participant_type,
+    ).all())
+    staff = db.session.query(Staff, ReferralParticipant).outerjoin(
+        ReferralParticipant,
+        (ReferralParticipant.business_id == Staff.business_id)
+        & (ReferralParticipant.staff_id == Staff.id),
+    ).filter(
+        Staff.business_id == business.id,
+        Staff.id != g.manager.id,
+    ).order_by(Staff.created_at.desc()).all()
+    metrics = {
+        "registered": ReferralAttribution.query.filter_by(business_id=business.id).count(),
+        "pending": status_counts.get("pending", 0),
+        "verified": status_counts.get("verified", 0),
+        "staff": participant_counts.get("staff", 0),
+    }
+    return render_template(
+        "manager/referrals.html", staff_rows=staff, metrics=metrics,
+        **_portal_context("referrals"),
+    )
+
+
+@manager_bp.post("/portal/referrals/program")
+@manager_portal_required("manage_referral_participants")
+def portal_configure_referral_program():
+    enabled = request.form.get("enabled") == "true"
+    reason = (request.form.get("reason") or "").strip()
+    try:
+        configure_referral_program(
+            business=g.manager.business, enabled=enabled, actor_type="staff",
+            actor_id=g.manager.id, reason=reason,
+            request_id=request.form.get("request_id") or str(uuid.uuid4()),
+        )
+        flash("Programa de referidos actualizado.", "success")
+    except ReferralProgramError as exc:
+        flash(str(exc), "error")
+    return redirect(url_for("manager.portal_referrals"))
+
+
+@manager_bp.post("/portal/referrals/staff/<int:staff_id>")
+@manager_portal_required("manage_referral_participants")
+def portal_configure_staff_referrals(staff_id):
+    try:
+        configure_staff_referrals(
+            business=g.manager.business, target_staff_id=staff_id,
+            enabled=request.form.get("enabled") == "true", actor=g.manager,
+            reason=(request.form.get("reason") or "").strip(),
+            request_id=request.form.get("request_id") or str(uuid.uuid4()),
+        )
+        flash("Participación del empleado actualizada.", "success")
+    except ReferralParticipantError as exc:
+        flash(str(exc), "error")
+    return redirect(url_for("manager.portal_referrals"))
 
 
 @manager_bp.route("/portal/transactions", methods=["GET"])

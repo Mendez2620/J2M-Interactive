@@ -101,12 +101,19 @@ def promoter_portal():
     total = verified.count()
     month_start = _utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     month = verified.filter(ReferralEligibility.reviewed_at >= month_start).count()
-    return render_template("promoter/portal.html", promoter=promoter, total=total, month=month, referral_url=_referral_url(promoter))
+    program_enabled = bool(promoter.business.referrals_enabled)
+    return render_template(
+        "promoter/portal.html", promoter=promoter, total=total, month=month,
+        program_enabled=program_enabled,
+        referral_url=_referral_url(promoter) if program_enabled else None,
+    )
 
 
 @promoter_bp.route("/promoter/referral-qr.svg")
 @promoter_required
 def promoter_qr():
+    if not g.promoter.business.referrals_enabled:
+        return {"status": "error", "message": "El programa de referidos está pausado."}, 409
     return _qr_response(g.promoter)
 
 
@@ -125,6 +132,8 @@ def _qr_response(promoter):
 @platform_admin_required
 def admin_promoter_qr(business_id, promoter_id):
     promoter = Promoter.query.filter_by(id=promoter_id, business_id=business_id).first_or_404()
+    if not promoter.business.referrals_enabled:
+        return {"status": "error", "message": "El programa de referidos está pausado."}, 409
     return _qr_response(promoter)
 
 

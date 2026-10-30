@@ -264,7 +264,7 @@ def join_business(slug):
     try:
         active_business = db.session.query(Business).filter(
             Business.id == business.id, Business.is_active.is_(True)
-        ).with_for_update().one_or_none()
+        ).populate_existing().with_for_update().one_or_none()
         if active_business is None:
             db.session.rollback()
             return jsonify({"status": "error", "message": "El programa no está disponible en este momento."}), 403
@@ -277,7 +277,7 @@ def join_business(slug):
             business_id=business.id, identity_type="phone",
             identity_hash=phone_hash, customer_id=customer.id,
         ))
-        if participant:
+        if participant and active_business.referrals_enabled:
             locked_participant = db.session.query(ReferralParticipant).filter(
                 ReferralParticipant.id == participant.id,
                 ReferralParticipant.business_id == business.id,
@@ -296,7 +296,7 @@ def join_business(slug):
                     and locked_participant.customer_id == customer.id
                 ) and referrer_phone != phone:
                     create_pending_attribution(
-                        business=business, customer=customer,
+                        business=active_business, customer=customer,
                         participant=locked_participant,
                     )
         db.session.commit()

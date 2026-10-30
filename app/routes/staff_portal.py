@@ -115,12 +115,17 @@ def _staff_invitation():
 def _invitation_url(participant):
     base = (current_app.config.get("PUBLIC_BASE_URL") or "").strip().rstrip("/")
     parsed = urlparse(base)
-    if current_app.config.get("ENV") == "production" and (
-        parsed.scheme != "https" or not parsed.hostname
-    ):
-        return None
-    if not base:
-        base = request.url_root.rstrip("/")
+    valid = bool(
+        parsed.scheme in {"http", "https"} and parsed.hostname
+        and not parsed.username and not parsed.password
+        and not parsed.query and not parsed.fragment and parsed.path in {"", "/"}
+    )
+    if current_app.config.get("APP_ENV") == "production":
+        if not valid or parsed.scheme != "https":
+            return None
+    elif not valid:
+        request_origin = urlparse(request.url_root)
+        base = request.url_root.rstrip("/") if request_origin.hostname in {"localhost", "127.0.0.1", "::1"} else "http://localhost"
     path = url_for(
         "business.join_business", slug=g.staff_browser.business.slug,
         ref=participant.invitation_code,

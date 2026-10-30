@@ -6,7 +6,7 @@ import json
 from sqlalchemy.exc import IntegrityError
 
 from app.extensions import db
-from app.models import ReferralProgramAudit
+from app.models import Business, ReferralProgramAudit
 
 
 class ReferralProgramError(ValueError):
@@ -42,8 +42,16 @@ def configure_referral_program(*, business, enabled, actor_type, actor_id,
         if existing.request_fingerprint != fingerprint:
             raise ReferralProgramError("La clave idempotente ya se utilizó para otro cambio.", 409)
         return existing.new_enabled, True
-    previous = bool(business.referrals_enabled)
-    business.referrals_enabled = enabled
+    # The conditional UPDATE is the serialization point. PostgreSQL rechecks
+    # the predicate after waiting on the row lock; SQLite serializes writers.
+    # A changed row necessarily held the opposite boolean immediately before
+    # this operation, so the audit never depends on stale ORM identity state.
+    changed = db.session.query(Business).filter(
+        Business.id == business.id,
+        Business.referrals_enabled.isnot(enabled),
+    ).update({Business.referrals_enabled: enabled}, synchronize_session=False)
+    previous = (not enabled) if changed else enabled
+    db.session.expire(business, ["referrals_enabled"])
     db.session.add(ReferralProgramAudit(
         business_id=business.id, actor_type=actor_type, actor_id=actor_id,
         previous_enabled=previous, new_enabled=enabled, reason=reason,
