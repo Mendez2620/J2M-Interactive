@@ -123,8 +123,10 @@ def decide_referral_eligibility(*, business, actor, eligibility_id, to_status,
     if to_status not in _TRANSITIONS.get(eligibility.status, set()):
         raise ReferralEligibilityError("La transición de estado no está permitida.", 409)
     if not eligibility.attribution or (
-        eligibility.attribution.promoter_id != eligibility.promoter_id
+        eligibility.attribution.participant_id != eligibility.participant_id
         or eligibility.attribution.customer_id != eligibility.customer_id
+        or (eligibility.participant_id is None and
+            eligibility.attribution.promoter_id != eligibility.promoter_id)
     ):
         raise ReferralEligibilityError("La atribución no es consistente.", 409)
 
@@ -157,8 +159,13 @@ def decide_referral_eligibility(*, business, actor, eligibility_id, to_status,
                 raise ReferralEligibilityError("Selecciona evidencia de importe registrado.")
         else:
             raise ReferralEligibilityError("La compra indicada no es elegible.")
-        if not eligibility.attribution.promoter.is_active:
-            raise ReferralEligibilityError("El promotor está suspendido.", 409)
+        participant = eligibility.participant
+        active_referrer = (
+            participant.currently_eligible() if participant
+            else bool(eligibility.attribution.promoter and eligibility.attribution.promoter.is_active)
+        )
+        if not active_referrer:
+            raise ReferralEligibilityError("El referidor está suspendido o deshabilitado.", 409)
         hashes = _evidence_hashes(reference)
         evidence_hash, evidence_key_id = hashes[0]
         duplicate = ReferralEligibility.query.filter(

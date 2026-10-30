@@ -9,12 +9,13 @@ from unittest.mock import patch
 
 from app import create_app
 from app.extensions import db
-from app.models import (AccessAudit, Business, Customer,
-                        PlatformAdmin, Promoter, PromoterSession, ReferralAttribution)
+from app.models import (AccessAudit, Business, Customer, PlatformAdmin, Promoter,
+                        PromoterSession, ReferralAttribution, ReferralParticipant)
 from app.config import TestingConfig
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import text
 from app.routes.promoter import _referral_url
+from app.services.referral_participant_service import ensure_external_promoter
 
 
 class PromotersPhase78TestCase(unittest.TestCase):
@@ -32,7 +33,8 @@ class PromotersPhase78TestCase(unittest.TestCase):
         self.admin_id = admin.id
         self.promoter = Promoter(business_id=self.business.id, name="Promotora Uno", username="promo", email="promo@example.test", phone="+525500000099")
         self.promoter.set_password("PromotorSeguro123")
-        db.session.add(self.promoter); db.session.commit()
+        db.session.add(self.promoter); db.session.flush()
+        ensure_external_promoter(self.promoter); db.session.commit()
         self.payload = {"full_name":"Cliente Referido", "email":"cliente@example.test", "phone_country":"+52", "phone":"55 1234 5678", "birthdate":"1990-01-02", "terms_accepted":True, "privacy_accepted":True}
 
     def tearDown(self):
@@ -63,7 +65,8 @@ class PromotersPhase78TestCase(unittest.TestCase):
     def test_invalid_cross_tenant_suspended_and_self_referrals_are_not_attributed(self):
         other_promoter = Promoter(business_id=self.other.id, name="Otro", username="otro")
         other_promoter.set_password("PromotorSeguro123")
-        db.session.add(other_promoter); db.session.commit()
+        db.session.add(other_promoter); db.session.flush()
+        ensure_external_promoter(other_promoter); db.session.commit()
         invalid_payload = dict(self.payload, phone="55 0000 0001", referral_context="invalid")
         self.assertEqual(self.client.post("/join/uno", json=invalid_payload).status_code, 201)
         cross_page = self.client.get(f"/join/dos?ref={other_promoter.referral_code}").get_data(as_text=True)
@@ -106,6 +109,9 @@ class PromotersPhase78TestCase(unittest.TestCase):
         duplicate = self.client.post(f"/admin/business/{self.business.id}/promoters", data=data)
         self.assertEqual(duplicate.status_code, 409)
         created_promoter = Promoter.query.filter_by(username="nueva").one()
+        participant = ReferralParticipant.query.filter_by(promoter_id=created_promoter.id).one()
+        self.assertTrue(participant.is_enabled)
+        self.assertEqual(participant.invitation_code, created_promoter.referral_code)
         changed = self.client.post(f"/admin/business/{self.business.id}/promoters/{created_promoter.id}", data={"action":"toggle"})
         self.assertEqual(changed.status_code, 302)
         self.assertFalse(created_promoter.is_active)
@@ -202,7 +208,8 @@ class PromotersPhase78TestCase(unittest.TestCase):
 
     def test_signed_referral_context_cannot_be_replaced_during_resend(self):
         other = Promoter(business_id=self.business.id, name="Otra", username="otra")
-        other.set_password("PromotorSeguro123"); db.session.add(other); db.session.commit()
+        other.set_password("PromotorSeguro123"); db.session.add(other); db.session.flush()
+        ensure_external_promoter(other); db.session.commit()
         first = self.referred_payload(promoter=self.promoter)
         self.assertEqual(self.client.post("/join/uno", json=first).status_code, 201)
         second = self.referred_payload(promoter=other)
@@ -212,7 +219,8 @@ class PromotersPhase78TestCase(unittest.TestCase):
 
     def test_new_identity_in_shared_browser_uses_its_own_referrer(self):
         other = Promoter(business_id=self.business.id, name="Otra", username="otra")
-        other.set_password("PromotorSeguro123"); db.session.add(other); db.session.commit()
+        other.set_password("PromotorSeguro123"); db.session.add(other); db.session.flush()
+        ensure_external_promoter(other); db.session.commit()
         self.assertEqual(self.client.post("/join/uno", json=self.referred_payload()).status_code, 201)
         second = self.referred_payload(promoter=other); second.update(phone="55 9999 1111")
         self.assertEqual(self.client.post("/join/uno", json=second).status_code, 201)
@@ -221,7 +229,7 @@ class PromotersPhase78TestCase(unittest.TestCase):
     def test_referral_lock_requires_same_complete_identity(self):
         other = Promoter(business_id=self.business.id, name="Otra", username="otra")
         other.set_password("PromotorSeguro123")
-        db.session.add(other); db.session.commit()
+        db.session.add(other); db.session.flush(); ensure_external_promoter(other); db.session.commit()
         other_context = self.referred_payload(promoter=other)["referral_context"]
         original = self.referred_payload(promoter=self.promoter)
         self.assertEqual(self.client.post("/join/uno", json=original).status_code, 201)
@@ -244,7 +252,8 @@ class PromotersPhase78TestCase(unittest.TestCase):
         other.set_password("PromotorSeguro123")
         cross = Promoter(business_id=self.other.id, name="Ajeno", username="ajeno")
         cross.set_password("PromotorSeguro123")
-        db.session.add_all([other, cross]); db.session.commit()
+        db.session.add_all([other, cross]); db.session.flush()
+        ensure_external_promoter(other); ensure_external_promoter(cross); db.session.commit()
         valid = self.referred_payload(promoter=other)["referral_context"]
         cross_context = self.referred_payload(slug="dos", promoter=cross)["referral_context"]
         other.is_active = False; db.session.commit()
@@ -297,7 +306,8 @@ class PromotersPhase78TestCase(unittest.TestCase):
                 business = Business(name="Concurrente", slug="concurrente")
                 db.session.add(business); db.session.flush()
                 promoter = Promoter(business_id=business.id, name="Promotor", username="promo")
-                promoter.set_password("PromotorSeguro123"); db.session.add(promoter); db.session.commit()
+                promoter.set_password("PromotorSeguro123"); db.session.add(promoter); db.session.flush()
+                ensure_external_promoter(promoter); db.session.commit()
                 referral_code = promoter.referral_code
             source = app.test_client()
             page = source.get(f"/join/concurrente?ref={referral_code}").get_data(as_text=True)

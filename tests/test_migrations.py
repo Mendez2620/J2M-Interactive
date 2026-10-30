@@ -27,6 +27,7 @@ EXPECTED_TABLES = {
     "referral_eligibilities", "referral_eligibility_decisions",
     "referral_incentive_rules", "referral_incentive_rule_audits",
     "referral_incentive_records",
+    "referral_participants", "referral_participant_audits",
 }
 
 
@@ -77,10 +78,28 @@ class MigrationTestCase(unittest.TestCase):
                     "trg_referral_decisions_no_update", "trg_referral_decisions_no_delete",
                     "trg_referral_rule_audits_no_update", "trg_referral_rule_audits_no_delete",
                     "trg_referral_incentive_records_no_update", "trg_referral_incentive_records_no_delete",
+                    "trg_referral_participant_audits_no_update", "trg_referral_participant_audits_no_delete",
                 } <= triggers)
                 self.assertEqual(connection.execute(
                     "SELECT version_num FROM alembic_version"
-                ).fetchone()[0], "2c3d4e5f6a7b")
+                ).fetchone()[0], "3d4e5f6a7b8c")
+                default_sql = {
+                    row[1]: row[4]
+                    for row in connection.execute("PRAGMA table_info(referral_participants)")
+                }
+                self.assertIn(str(default_sql["is_enabled"]).strip("()'\""), {"0", "false", "FALSE"})
+                connection.execute(
+                    "INSERT INTO businesses (id, name, slug, primary_color, secondary_color, loyalty_type, points_per_currency, stamps_reward_limit, cooldown_minutes, is_active, web_access_enabled, mobile_access_enabled, created_at) VALUES (1, 'Default', 'default', '#000000', '#FFFFFF', 'points', 1, 10, 0, 1, 1, 0, '2026-01-03')"
+                )
+                connection.execute(
+                    "INSERT INTO staff (id, business_id, username, password_hash, role, is_active, web_access_enabled, mobile_access_enabled, auth_version, permissions, created_at) VALUES (1, 1, 'staff-default', 'hash', 'cashier', 1, 1, 0, 0, '', '2026-01-03')"
+                )
+                connection.execute(
+                    "INSERT INTO referral_participants (business_id, participant_type, staff_id, invitation_code, created_at, updated_at) VALUES (1, 'staff', 1, 'direct-sql-disabled', '2026-01-03', '2026-01-03')"
+                )
+                self.assertEqual(connection.execute(
+                    "SELECT is_enabled FROM referral_participants WHERE staff_id = 1"
+                ).fetchone()[0], 0)
 
     def test_upgrade_preserves_existing_business_data(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
@@ -114,7 +133,7 @@ class MigrationTestCase(unittest.TestCase):
                 self.assertEqual(connection.execute("SELECT id, name, slug FROM businesses").fetchall(), [(1, "Negocio existente", "existente")])
                 columns = {row[1] for row in connection.execute("PRAGMA table_info(businesses)")}
                 self.assertTrue({"logo_path", "cover_path"} <= columns)
-                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "2c3d4e5f6a7b")
+                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "3d4e5f6a7b8c")
                 self.assertIn("ix_staff_email_lower", {row[1] for row in connection.execute("PRAGMA index_list(staff)")})
                 self.assertEqual(connection.execute("SELECT web_access_enabled, mobile_access_enabled FROM businesses WHERE id = 1").fetchone(), (0, 0))
                 self.assertEqual(connection.execute("SELECT visual_theme, font_style, text_size FROM businesses WHERE id = 1").fetchone(), ("modern", "modern", "standard"))
@@ -133,6 +152,11 @@ class MigrationTestCase(unittest.TestCase):
             self.assertEqual(
                 reversible_eligibility.returncode, 0,
                 reversible_eligibility.stdout + reversible_eligibility.stderr,
+            )
+            reversible_participant = self.run_db_command(path, "downgrade")
+            self.assertEqual(
+                reversible_participant.returncode, 0,
+                reversible_participant.stdout + reversible_participant.stderr,
             )
             result = self.run_db_command(path, "downgrade")
             self.assertNotEqual(result.returncode, 0)
@@ -260,7 +284,7 @@ class MigrationTestCase(unittest.TestCase):
                 self.assertEqual(connection.execute("SELECT username, auth_version, permissions FROM staff WHERE id = 1").fetchone(), ("gerente", 3, "view_stats,manage_cashiers"))
                 audit_columns = {row[1]: row[3] for row in connection.execute("PRAGMA table_info(access_audits)")}
                 self.assertEqual(audit_columns["affected_staff_id"], 0)
-                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "2c3d4e5f6a7b")
+                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "3d4e5f6a7b8c")
 
     def test_referral_incentive_migration_is_incremental_and_history_blocks_downgrade(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
@@ -309,6 +333,33 @@ class MigrationTestCase(unittest.TestCase):
                 self.assertEqual(connection.execute(
                     "SELECT version_num FROM alembic_version"
                 ).fetchone()[0], "2c3d4e5f6a7b")
+
+    def test_referral_participant_upgrade_backfills_historical_promoters(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            path = Path(directory) / "referral-participants.sqlite"
+            self.upgrade(path, "2c3d4e5f6a7b")
+            with sqlite3.connect(path) as connection:
+                connection.execute("INSERT INTO businesses (id, name, slug, primary_color, secondary_color, loyalty_type, points_per_currency, stamps_reward_limit, cooldown_minutes, is_active, created_at) VALUES (1, 'Negocio', 'negocio', '#000000', '#FFFFFF', 'points', 1, 10, 60, 1, '2026-01-01')")
+                connection.execute("INSERT INTO customers (id, business_id, full_name, phone, current_points, current_stamps, qr_code_token, created_at) VALUES (1, 1, 'Cliente', '+525500000001', 0, 0, 'qr-customer', '2026-01-01')")
+                connection.execute("INSERT INTO promoters (id, business_id, name, username, password_hash, referral_code, is_active, auth_version, created_at) VALUES (1, 1, 'Promotor', 'promotor', 'hash', 'legacy-referral-code', 1, 0, '2026-01-01')")
+                connection.execute("INSERT INTO referral_attributions (id, business_id, promoter_id, customer_id, created_at) VALUES (1, 1, 1, 1, '2026-01-02')")
+                connection.execute("INSERT INTO referral_eligibilities (id, business_id, attribution_id, promoter_id, customer_id, status, created_at, updated_at, version) VALUES (1, 1, 1, 1, 1, 'pending', '2026-01-02', '2026-01-02', 0)")
+                connection.commit()
+            self.upgrade(path)
+            with sqlite3.connect(path) as connection:
+                participant = connection.execute(
+                    "SELECT business_id, participant_type, promoter_id, invitation_code, is_enabled FROM referral_participants"
+                ).fetchone()
+                self.assertEqual(participant, (1, "external_promoter", 1, "legacy-referral-code", 1))
+                participant_id = connection.execute(
+                    "SELECT participant_id FROM referral_attributions WHERE id = 1"
+                ).fetchone()[0]
+                self.assertEqual(connection.execute(
+                    "SELECT participant_id FROM referral_eligibilities WHERE id = 1"
+                ).fetchone()[0], participant_id)
+                self.assertEqual(connection.execute(
+                    "SELECT version_num FROM alembic_version"
+                ).fetchone()[0], "3d4e5f6a7b8c")
 
     def test_customer_recovery_migration_preserves_customer_wallet_identity_and_transactions(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
