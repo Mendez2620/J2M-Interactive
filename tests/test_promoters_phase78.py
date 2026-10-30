@@ -25,8 +25,8 @@ class PromotersPhase78TestCase(unittest.TestCase):
         self.client = self.app.test_client()
         self.ctx = self.app.app_context(); self.ctx.push(); db.create_all()
         db.session.execute(text("PRAGMA foreign_keys=ON"))
-        self.business = Business(name="Uno", slug="uno")
-        self.other = Business(name="Dos", slug="dos")
+        self.business = Business(name="Uno", slug="uno", referrals_enabled=True)
+        self.other = Business(name="Dos", slug="dos", referrals_enabled=True)
         admin = PlatformAdmin(name="Admin", email="admin@example.test", is_active=True)
         admin.set_password("AdminSeguro123")
         db.session.add_all([self.business, self.other, admin]); db.session.commit()
@@ -101,24 +101,19 @@ class PromotersPhase78TestCase(unittest.TestCase):
         self.assertIsNotNone(db.session.get(PromoterSession, auth_session.id).revoked_at)
         self.assertEqual(self.client.get("/promoter/portal").status_code, 302)
 
-    def test_admin_creation_duplicate_suspension_audit_and_secret_hygiene(self):
+    def test_admin_creation_is_closed_and_historical_suspension_is_audited(self):
         self.admin_login()
         data = {"name":"Nueva Promotora", "username":"nueva", "email":"nueva@example.test", "password":"NuevaSegura123"}
         created = self.client.post(f"/admin/business/{self.business.id}/promoters", data=data)
-        self.assertEqual(created.status_code, 302)
-        duplicate = self.client.post(f"/admin/business/{self.business.id}/promoters", data=data)
-        self.assertEqual(duplicate.status_code, 409)
-        created_promoter = Promoter.query.filter_by(username="nueva").one()
-        participant = ReferralParticipant.query.filter_by(promoter_id=created_promoter.id).one()
-        self.assertTrue(participant.is_enabled)
-        self.assertEqual(participant.invitation_code, created_promoter.referral_code)
-        changed = self.client.post(f"/admin/business/{self.business.id}/promoters/{created_promoter.id}", data={"action":"toggle"})
+        self.assertEqual(created.status_code, 410)
+        self.assertIsNone(Promoter.query.filter_by(username="nueva").first())
+        changed = self.client.post(f"/admin/business/{self.business.id}/promoters/{self.promoter.id}", data={"action":"toggle"})
         self.assertEqual(changed.status_code, 302)
-        self.assertFalse(created_promoter.is_active)
+        self.assertFalse(self.promoter.is_active)
         serialized = " ".join((audit.previous_state or "") + (audit.new_state or "") for audit in AccessAudit.query.all())
         self.assertNotIn("NuevaSegura123", serialized)
         self.assertNotIn("password_hash", serialized)
-        self.assertEqual({audit.action for audit in AccessAudit.query.all()}, {"promoter_created", "promoter_suspended"})
+        self.assertEqual({audit.action for audit in AccessAudit.query.all()}, {"promoter_suspended"})
 
     def test_admin_and_promoter_csrf_protection(self):
         self.app.config["CSRF_ENABLED"] = True
@@ -188,11 +183,13 @@ class PromotersPhase78TestCase(unittest.TestCase):
         self.assertEqual(denied.status_code, 404)
         serializer = self.app.session_interface.get_signing_serializer(self.app)
         self.client.set_cookie("session", serializer.dumps({"platform_admin_id":self.admin_id}), domain="attacker.example")
-        page = self.client.get(
+        response = self.client.get(
             f"/admin/business/{self.business.id}/promoters", base_url="http://attacker.example"
-        ).get_data(as_text=True)
-        self.assertNotIn("attacker.example", page)
-        self.assertIn(f"http://localhost/join/uno?ref={self.promoter.referral_code}", page)
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(f"/admin/business/{self.business.id}?tab=referrals", response.location)
+        page = self.client.get(response.location).get_data(as_text=True)
+        self.assertNotIn(self.promoter.referral_code, page)
 
     def test_production_referral_url_requires_canonical_https_origin(self):
         self.app.config.update(APP_ENV="production", PUBLIC_BASE_URL="http://inseguro.example")
@@ -279,12 +276,12 @@ class PromotersPhase78TestCase(unittest.TestCase):
         self.assertEqual(verified.status_code, 201)
         attribution = ReferralAttribution.query.one()
         attribution.created_at -= timedelta(days=20); db.session.commit(); self.admin_login()
-        seven = self.client.get(f"/admin/business/{self.business.id}/promoters?period=7").get_data(as_text=True)
-        all_time = self.client.get(f"/admin/business/{self.business.id}/promoters?period=all").get_data(as_text=True)
-        self.assertIn("Periodo seleccionado</p><p class=\"mt-1 text-3xl font-black text-indigo-700\">0", seven)
-        self.assertIn("Periodo seleccionado</p><p class=\"mt-1 text-3xl font-black text-indigo-700\">1", all_time)
-        for private in ("cliente@example.test", "Cliente Referido", "+525512345678"):
-            self.assertNotIn(private, all_time)
+        legacy = self.client.get(f"/admin/business/{self.business.id}/promoters?period=7")
+        self.assertEqual(legacy.status_code, 302)
+        page = self.client.get(legacy.location).get_data(as_text=True)
+        self.assertIn("Clientes atribuidos", page)
+        self.assertIn("Promotora Uno", page)
+        self.assertIn("Cliente Referido", page)
 
     def test_database_rejects_cross_tenant_attribution(self):
         customer = Customer(business_id=self.other.id, full_name="Histórico", email="historico@example.test")
@@ -303,7 +300,7 @@ class PromotersPhase78TestCase(unittest.TestCase):
                 app = create_app("testing")
             with app.app_context():
                 db.create_all()
-                business = Business(name="Concurrente", slug="concurrente")
+                business = Business(name="Concurrente", slug="concurrente", referrals_enabled=True)
                 db.session.add(business); db.session.flush()
                 promoter = Promoter(business_id=business.id, name="Promotor", username="promo")
                 promoter.set_password("PromotorSeguro123"); db.session.add(promoter); db.session.flush()

@@ -21,8 +21,8 @@ class Phase8ATestCase(unittest.TestCase):
         )
         self.client = self.app.test_client()
         self.ctx = self.app.app_context(); self.ctx.push(); db.create_all()
-        self.one = Business(name="Uno", slug="uno", loyalty_type="points")
-        self.two = Business(name="Dos", slug="dos")
+        self.one = Business(name="Uno", slug="uno", loyalty_type="points", referrals_enabled=True)
+        self.two = Business(name="Dos", slug="dos", referrals_enabled=True)
         db.session.add_all([self.one, self.two]); db.session.commit()
 
     def tearDown(self):

@@ -9,7 +9,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.extensions import db
 from app.models import (
-    Customer, Promoter, ReferralAttribution, ReferralEligibility,
+    Business, Customer, Promoter, ReferralAttribution, ReferralEligibility,
     ReferralParticipant, ReferralParticipantAudit, Staff,
 )
 from app.permissions import has_permission
@@ -124,6 +124,10 @@ def configure_staff_referrals(*, business, target_staff_id, enabled, actor,
     target = Staff.query.filter_by(id=target_staff_id, business_id=business.id).first()
     if not target:
         raise ReferralParticipantError("Empleado no encontrado.", 404)
+    if enabled and (not target.is_active or not has_permission(target, "refer_customers")):
+        raise ReferralParticipantError(
+            "El empleado debe estar activo y tener el permiso refer_customers.", 409,
+        )
     participant = ReferralParticipant.query.filter_by(
         business_id=business.id, staff_id=target.id,
     ).first()
@@ -232,6 +236,9 @@ def resolve_invitation(*, business_id, code):
     # promoter codes may be shorter and remain valid after the migration.
     if not isinstance(code, str) or not 1 <= len(code) <= 48:
         return None
+    business = db.session.get(Business, business_id)
+    if not business or not business.referrals_enabled:
+        return None
     participant = ReferralParticipant.query.filter_by(
         business_id=business_id, invitation_code=code, is_enabled=True,
     ).first()
@@ -241,6 +248,8 @@ def resolve_invitation(*, business_id, code):
 def create_pending_attribution(*, business, customer, participant):
     if participant.business_id != business.id or customer.business_id != business.id:
         raise ReferralParticipantError("La invitación no corresponde al negocio.", 409)
+    if not business.referrals_enabled:
+        return None
     if not participant.currently_eligible():
         return None
     if participant.participant_type == "customer_ambassador" and participant.customer_id == customer.id:
@@ -264,6 +273,7 @@ def staff_can_issue(participant):
     return bool(
         participant and participant.participant_type == "staff"
         and participant.staff and participant.staff.is_active
+        and participant.staff.business.referrals_enabled
         and has_permission(participant.staff, "refer_customers")
         and participant.currently_eligible()
     )

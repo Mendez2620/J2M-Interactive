@@ -29,11 +29,11 @@ class ReferralParticipantsPhase8C2BTestCase(unittest.TestCase):
         self.client = self.app.test_client()
         self.business = Business(
             name="Uno", slug="uno-8c2b", loyalty_type="points",
-            is_active=True, web_access_enabled=True,
+            is_active=True, web_access_enabled=True, referrals_enabled=True,
         )
         self.other = Business(
             name="Dos", slug="dos-8c2b", loyalty_type="stamps",
-            is_active=True, web_access_enabled=True,
+            is_active=True, web_access_enabled=True, referrals_enabled=True,
         )
         db.session.add_all([self.business, self.other]); db.session.flush()
         self.manager = self._staff(
