@@ -1,16 +1,17 @@
-from flask import Blueprint, current_app, g, redirect, render_template, request, session, url_for
+from flask import Blueprint, current_app, g, jsonify, redirect, render_template, request, session, url_for
 from sqlalchemy import or_
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from app.manager_auth import (
     create_staff_browser_session, revoke_current_staff_session, staff_portal_required,
 )
-from app.models import Business, Staff
+from app.models import Business, ReferralParticipant, Staff
 from app.permissions import has_permission
 from app.services.auth_rate_limit_service import (
     AuthRateLimitUnavailable, clear_auth_attempts, reserve_auth_attempt,
 )
 from app.services.unified_staff_access_service import unified_staff_access
+from app.services.referral_participant_service import staff_can_issue
 
 
 staff_portal_bp = Blueprint("staff_portal", __name__, url_prefix="/staff")
@@ -92,3 +93,21 @@ def staff_logout():
 @staff_portal_required("scanner_operate_web")
 def staff_scanner():
     return render_template("staff/scanner.html", staff=g.staff_browser, business=g.staff_browser.business)
+
+
+@staff_portal_bp.get("/portal/referral-invitation")
+@staff_portal_required("refer_customers")
+def staff_referral_invitation():
+    participant = ReferralParticipant.query.filter_by(
+        business_id=g.staff_browser.business_id, staff_id=g.staff_browser.id,
+        participant_type="staff", is_enabled=True,
+    ).first()
+    if not staff_can_issue(participant):
+        return jsonify({"status": "error", "message": "Los referidos no están habilitados."}), 403
+    return jsonify({
+        "status": "success", "invitation_code": participant.invitation_code,
+        "invitation_path": url_for(
+            "business.join_business", slug=g.staff_browser.business.slug,
+            ref=participant.invitation_code,
+        ),
+    }), 200

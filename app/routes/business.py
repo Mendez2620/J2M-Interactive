@@ -9,10 +9,13 @@ from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
 from app.extensions import db
 from app.models import (Business, Customer, CustomerRegistrationIdentityClaim,
-                        Promoter, ReferralAttribution, ReferralEligibility)
+                        ReferralParticipant)
 from app.phone_numbers import normalize_phone
 from app.routes.customer_recovery import _reserve_rate_limit
 from app.wallet_access import issue_wallet_token
+from app.services.referral_participant_service import (
+    create_pending_attribution, resolve_invitation,
+)
 
 business_bp = Blueprint("business", __name__)
 _WALLET_DELIVERY_SESSION_KEY = "customer_wallet_delivery"
@@ -88,11 +91,15 @@ def _referral_serializer():
     return URLSafeTimedSerializer(current_app.config["SECRET_KEY"], salt="customer-referral-context-v1")
 
 
-def _referral_context(promoter):
-    return _referral_serializer().dumps({"business_id": promoter.business_id, "promoter_id": promoter.id})
+def _referral_context(participant):
+    return _referral_serializer().dumps({
+        "business_id": participant.business_id,
+        "participant_id": participant.id,
+        "participant_type": participant.participant_type,
+    })
 
 
-def _promoter_from_context(value, business_id):
+def _participant_from_context(value, business_id):
     if not isinstance(value, str) or not value:
         return None
     try:
@@ -103,10 +110,17 @@ def _promoter_from_context(value, business_id):
         return None
     if not isinstance(context, dict) or context.get("business_id") != business_id:
         return None
-    promoter_id = context.get("promoter_id")
-    if not isinstance(promoter_id, int):
+    participant_id = context.get("participant_id")
+    participant_type = context.get("participant_type")
+    if not isinstance(participant_id, int) or participant_type not in {
+        "external_promoter", "staff", "customer_ambassador"
+    }:
         return None
-    return Promoter.query.filter_by(id=promoter_id, business_id=business_id, is_active=True).first()
+    participant = ReferralParticipant.query.filter_by(
+        id=participant_id, business_id=business_id,
+        participant_type=participant_type, is_enabled=True,
+    ).first()
+    return participant if participant and participant.currently_eligible() else None
 
 
 def _payload():
@@ -187,9 +201,7 @@ def join_business(slug):
         return render_template("join.html", business=business)
     if request.method == "GET":
         referral_code = (request.args.get("ref") or "").strip()
-        promoter = Promoter.query.filter_by(
-            business_id=business.id, referral_code=referral_code, is_active=True
-        ).first() if referral_code and len(referral_code) <= 32 else None
+        participant = resolve_invitation(business_id=business.id, code=referral_code)
         # A referral link is an explicit new-registration context. Never expose
         # a previous browser user's delivery capability on that page.
         active_delivery = None if referral_code else _active_wallet_delivery(business)
@@ -203,7 +215,7 @@ def join_business(slug):
             )
         return render_template(
             "join.html", business=business,
-            referral_context=_referral_context(promoter) if promoter else "",
+            referral_context=_referral_context(participant) if participant else "",
             terms_version=current_app.config["TERMS_VERSION"],
             privacy_version=current_app.config["PRIVACY_NOTICE_VERSION"],
             wallet_delivery_url=wallet_delivery_url,
@@ -236,7 +248,7 @@ def join_business(slug):
         db.session.rollback()
         return jsonify({"status": "error", "message": "Demasiadas solicitudes. Intenta nuevamente más tarde."}), 429
 
-    promoter = _promoter_from_context(data.get("referral_context"), business.id)
+    participant = _participant_from_context(data.get("referral_context"), business.id)
     ua_hash = _hmac((request.user_agent.string or "unknown")[:512], "registration-user-agent")
     customer = Customer(
         business_id=business.id, full_name=name, email=None, phone=phone,
@@ -265,23 +277,28 @@ def join_business(slug):
             business_id=business.id, identity_type="phone",
             identity_hash=phone_hash, customer_id=customer.id,
         ))
-        if promoter and promoter.phone != phone:
-            locked_promoter = db.session.query(Promoter).filter(
-                Promoter.id == promoter.id, Promoter.business_id == business.id,
-                Promoter.is_active.is_(True),
+        if participant:
+            locked_participant = db.session.query(ReferralParticipant).filter(
+                ReferralParticipant.id == participant.id,
+                ReferralParticipant.business_id == business.id,
+                ReferralParticipant.is_enabled.is_(True),
             ).with_for_update().one_or_none()
-            if locked_promoter and locked_promoter.phone != phone:
-                attribution = ReferralAttribution(
-                    business_id=business.id, promoter_id=locked_promoter.id,
-                    customer_id=customer.id,
+            if locked_participant and locked_participant.currently_eligible():
+                referrer_phone = (
+                    locked_participant.promoter.phone if locked_participant.promoter
+                    else locked_participant.staff.phone if locked_participant.staff
+                    else locked_participant.customer.phone if locked_participant.customer
+                    else None
                 )
-                db.session.add(attribution)
-                db.session.flush()
-                db.session.add(ReferralEligibility(
-                    business_id=business.id, attribution_id=attribution.id,
-                    promoter_id=locked_promoter.id, customer_id=customer.id,
-                    status="pending",
-                ))
+                # A verifiable same-customer ambassador is always rejected.
+                if not (
+                    locked_participant.participant_type == "customer_ambassador"
+                    and locked_participant.customer_id == customer.id
+                ) and referrer_phone != phone:
+                    create_pending_attribution(
+                        business=business, customer=customer,
+                        participant=locked_participant,
+                    )
         db.session.commit()
     except IntegrityError:
         db.session.rollback()
