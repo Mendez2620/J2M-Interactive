@@ -86,7 +86,7 @@ class MigrationTestCase(unittest.TestCase):
                 } <= triggers)
                 self.assertEqual(connection.execute(
                     "SELECT version_num FROM alembic_version"
-                ).fetchone()[0], "5f6a7b8c9d0e")
+                ).fetchone()[0], "6a7b8c9d0e1f")
                 default_sql = {
                     row[1]: row[4]
                     for row in connection.execute("PRAGMA table_info(referral_participants)")
@@ -146,7 +146,7 @@ class MigrationTestCase(unittest.TestCase):
                 self.assertTrue({"logo_path", "cover_path"} <= columns)
                 self.assertIn("referrals_enabled", columns)
                 self.assertEqual(connection.execute("SELECT referrals_enabled FROM businesses WHERE id = 1").fetchone()[0], 0)
-                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "5f6a7b8c9d0e")
+                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "6a7b8c9d0e1f")
                 self.assertIn("ix_staff_email_lower", {row[1] for row in connection.execute("PRAGMA index_list(staff)")})
                 self.assertEqual(connection.execute("SELECT web_access_enabled, mobile_access_enabled FROM businesses WHERE id = 1").fetchone(), (0, 0))
                 self.assertEqual(connection.execute("SELECT visual_theme, font_style, text_size FROM businesses WHERE id = 1").fetchone(), ("modern", "modern", "standard"))
@@ -174,6 +174,11 @@ class MigrationTestCase(unittest.TestCase):
             self.upgrade(path)
             with sqlite3.connect(path) as connection:
                 connection.execute("INSERT INTO businesses (id, name, slug, primary_color, secondary_color, loyalty_type, points_per_currency, stamps_reward_limit, cooldown_minutes, is_active, created_at) VALUES (1, 'Conservar', 'conservar', '#000000', '#FFFFFF', 'stamps', 1.0, 10, 60, 1, '2026-01-01')")
+            reversible_wallet_referrals = self.run_db_command(path, "downgrade")
+            self.assertEqual(
+                reversible_wallet_referrals.returncode, 0,
+                reversible_wallet_referrals.stdout + reversible_wallet_referrals.stderr,
+            )
             reversible_customer_auth = self.run_db_command(path, "downgrade")
             self.assertEqual(
                 reversible_customer_auth.returncode, 0,
@@ -206,6 +211,33 @@ class MigrationTestCase(unittest.TestCase):
                 columns = {row[1] for row in connection.execute("PRAGMA table_info(businesses)")}
                 self.assertTrue({"logo_path", "cover_path"} <= columns)
                 self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "f9a0b1c2d3e4")
+
+    def test_wallet_referral_downgrade_blocks_inactive_unconsented_identity(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            path = Path(directory) / "wallet-referral-downgrade.sqlite"
+            self.upgrade(path)
+            with sqlite3.connect(path) as connection:
+                connection.execute(
+                    "INSERT INTO businesses (id, name, slug, primary_color, secondary_color, loyalty_type, points_per_currency, stamps_reward_limit, cooldown_minutes, is_active, referrals_enabled, created_at) VALUES (1, 'Conservar', 'wallet-ref', '#000000', '#FFFFFF', 'points', 1, 10, 0, 1, 1, '2026-01-01')"
+                )
+                connection.execute(
+                    "INSERT INTO customers (id, business_id, full_name, current_points, current_stamps, qr_code_token, created_at) VALUES (1, 1, 'Cliente', 0, 0, 'wallet-ref-qr', '2026-01-01')"
+                )
+                connection.execute(
+                    "INSERT INTO referral_participants (business_id, participant_type, customer_id, invitation_code, is_enabled, created_at, updated_at) VALUES (1, 'customer_ambassador', 1, 'inactive-wallet-invitation-code', 0, '2026-01-01', '2026-01-01')"
+                )
+                connection.commit()
+            blocked = self.run_db_command(path, "downgrade")
+            self.assertNotEqual(blocked.returncode, 0)
+            self.assertIn("Downgrade bloqueado", blocked.stdout + blocked.stderr)
+            with sqlite3.connect(path) as connection:
+                self.assertEqual(
+                    connection.execute("SELECT version_num FROM alembic_version").fetchone()[0],
+                    "6a7b8c9d0e1f",
+                )
+                self.assertEqual(connection.execute(
+                    "SELECT COUNT(*) FROM referral_participants WHERE customer_id = 1"
+                ).fetchone()[0], 1)
 
     def test_staff_email_index_upgrade_and_downgrade_preserve_existing_staff(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
@@ -324,7 +356,7 @@ class MigrationTestCase(unittest.TestCase):
                 self.assertEqual(connection.execute("SELECT username, auth_version, permissions FROM staff WHERE id = 1").fetchone(), ("gerente", 3, "view_stats,manage_cashiers"))
                 audit_columns = {row[1]: row[3] for row in connection.execute("PRAGMA table_info(access_audits)")}
                 self.assertEqual(audit_columns["affected_staff_id"], 0)
-                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "5f6a7b8c9d0e")
+                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "6a7b8c9d0e1f")
 
     def test_referral_incentive_migration_is_incremental_and_history_blocks_downgrade(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
@@ -399,7 +431,7 @@ class MigrationTestCase(unittest.TestCase):
                 ).fetchone()[0], participant_id)
                 self.assertEqual(connection.execute(
                     "SELECT version_num FROM alembic_version"
-                ).fetchone()[0], "5f6a7b8c9d0e")
+                ).fetchone()[0], "6a7b8c9d0e1f")
 
     def test_customer_recovery_migration_preserves_customer_wallet_identity_and_transactions(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
@@ -465,7 +497,7 @@ class MigrationTestCase(unittest.TestCase):
                 self.assertEqual(connection.execute(
                     "SELECT current_points, qr_code_token FROM customers WHERE id=1"
                 ).fetchone(), (31.0, "wallet-stable"))
-                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "5f6a7b8c9d0e")
+                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "6a7b8c9d0e1f")
             clean = self.run_db_command(path, "downgrade", "4e5f6a7b8c9d")
             self.assertEqual(clean.returncode, 0, clean.stdout + clean.stderr)
             self.upgrade(path)

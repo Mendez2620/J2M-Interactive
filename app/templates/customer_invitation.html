@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}Invita a tus amigos{% if business %} · {{ business.name }}{% endif %}{% endblock %}
+{% block head %}<meta name="referrer" content="no-referrer">{% endblock %}
+{% block content %}
+<main class="min-h-full bg-slate-100 px-4 py-8 sm:py-12">
+  <section class="mx-auto w-full max-w-lg overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-xl" aria-labelledby="invite-title">
+    <div class="px-6 py-7 text-center sm:px-9"{% if business %} style="border-top: 6px solid {{ business.primary_color }}"{% endif %}>
+      {% if invalid %}
+        <div class="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-slate-100 text-2xl" aria-hidden="true">×</div>
+        <h1 id="invite-title" class="text-2xl font-extrabold text-slate-900">Invitación no disponible</h1>
+        <p class="mt-3 text-sm leading-6 text-slate-600">El enlace no es válido o ya no está disponible. Solicita una invitación nueva a quien te la compartió.</p>
+      {% else %}
+        {% if business.logo_url %}<img src="{{ business.logo_url }}" alt="Logo de {{ business.name }}" class="mx-auto mb-4 h-16 max-w-48 object-contain" referrerpolicy="no-referrer">
+        {% elif business.logo_path %}<img src="{{ url_for('static', filename=business.logo_path) }}" alt="Logo de {{ business.name }}" class="mx-auto mb-4 h-16 max-w-48 object-contain">
+        {% else %}<div class="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-slate-900 text-2xl font-black text-white" aria-hidden="true">{{ business.name[:1]|upper }}</div>{% endif %}
+        <p class="text-sm font-semibold uppercase tracking-wider text-slate-500">{{ business.name }}</p>
+        <h1 id="invite-title" class="mt-2 text-3xl font-extrabold text-slate-900">Invita a tus amigos</h1>
+
+        {% if error %}<div class="mt-5 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800" role="alert">{{ error }}</div>{% endif %}
+
+        {% if share_enabled %}
+          <p class="mt-3 text-sm leading-6 text-slate-600">Comparte este enlace personal. Tus amigos podrán registrarse; cualquier beneficio dependerá de una primera compra válida y de las reglas del negocio.</p>
+          <div class="mx-auto mt-6 w-fit rounded-2xl border-4 border-white bg-white p-2 shadow ring-1 ring-slate-200">
+            <img src="{{ url_for('business.customer_invitation_qr', code=invitation_code) }}" alt="Código QR de invitación, distinto del QR de lealtad usado en caja" class="h-56 w-56" width="224" height="224">
+          </div>
+          <label for="invite-link" class="mt-6 block text-left text-xs font-bold uppercase tracking-wide text-slate-500">Enlace de invitación</label>
+          <input id="invite-link" value="{{ join_url }}" readonly class="mt-2 block w-full rounded-xl border border-slate-300 bg-slate-50 px-3 py-3 text-sm text-slate-800">
+          <div class="mt-4 grid gap-3 sm:grid-cols-2">
+            <button id="copy-invite" type="button" class="rounded-xl bg-indigo-700 px-4 py-3 text-sm font-bold text-white">Copiar enlace</button>
+            <button id="share-invite" type="button" class="rounded-xl border border-indigo-700 px-4 py-3 text-sm font-bold text-indigo-700">Compartir</button>
+          </div>
+          <a href="{{ whatsapp_url }}" target="_blank" rel="noopener noreferrer" class="mt-3 block rounded-xl border border-emerald-600 px-4 py-3 text-sm font-bold text-emerald-700">Compartir por WhatsApp</a>
+          <p id="share-status" class="mt-3 min-h-5 text-sm text-slate-600" aria-live="polite"></p>
+        {% elif can_consent %}
+          <p class="mt-3 text-sm leading-6 text-slate-600">Activa tu invitación personal con un solo toque. Esto no crea una cuenta, no da acceso a tu saldo y es independiente del consentimiento de marketing.</p>
+          <form method="POST" action="{{ url_for('business.consent_customer_invitation_route', code=invitation_code) }}" class="mt-6 text-left">
+            <input type="hidden" name="request_id" value="{{ consent_request_id }}">
+            <label class="flex items-start gap-3 rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm leading-5 text-slate-700">
+              <input type="checkbox" required name="referral_consent" class="mt-1 h-4 w-4 rounded border-slate-300 text-indigo-600">
+              <span>{{ consent_text }} <strong>Versión {{ consent_version }}.</strong></span>
+            </label>
+            <button class="mt-4 w-full rounded-xl bg-indigo-700 px-4 py-3 font-bold text-white">Aceptar y preparar mi invitación</button>
+          </form>
+        {% else %}
+          <div class="mt-6 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
+            El programa de invitaciones está pausado o esta participación fue revocada. Tu tarjeta de lealtad continúa funcionando normalmente.
+          </div>
+        {% endif %}
+        <p class="mt-6 text-xs leading-5 text-slate-500">La invitación sirve únicamente para atribuir registros. No permite consultar cuentas, saldos, movimientos ni datos personales.</p>
+      {% endif %}
+    </div>
+  </section>
+</main>
+{% endblock %}
+{% block scripts %}
+{% if share_enabled %}
+<script nonce="{{ csp_nonce() }}">
+  (() => {
+    const link = document.getElementById('invite-link');
+    const status = document.getElementById('share-status');
+    const businessName = {{ business.name|tojson }};
+    const copied = () => { status.textContent = 'Enlace copiado.'; };
+    document.getElementById('copy-invite').addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(link.value); copied(); }
+      catch (_) { link.focus(); link.select(); status.textContent = 'Selecciona y copia el enlace manualmente.'; }
+    });
+    document.getElementById('share-invite').addEventListener('click', async () => {
+      if (!navigator.share) { link.focus(); link.select(); status.textContent = 'Selecciona y copia el enlace para compartirlo.'; return; }
+      try { await navigator.share({title: `Invitación de ${businessName}`, text: `Te invito a conocer ${businessName}.`, url: link.value}); }
+      catch (error) { if (error.name !== 'AbortError') status.textContent = 'No fue posible abrir el menú de compartir.'; }
+    });
+  })();
+</script>
+{% endif %}
+{% endblock %}

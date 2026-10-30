@@ -5,6 +5,7 @@ from app.models import Customer
 from app.services import GoogleWalletService, AppleWalletService
 from app.services.google_wallet import GoogleWalletAPIError, GoogleWalletConfigurationError
 from app.wallet_access import validate_wallet_token
+from app.services.referral_participant_service import ensure_customer_invitation_persisted
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,7 @@ def get_google_wallet_pass(customer_id: int):
         )
 
     try:
+        ensure_customer_invitation_persisted(customer)
         wallet_service = GoogleWalletService()
         _jwt_token, save_url = wallet_service.create_jwt_pass(customer)
 
@@ -127,6 +129,7 @@ def get_apple_wallet_pass(customer_id: int):
         )
 
     try:
+        ensure_customer_invitation_persisted(customer)
         apple_service = AppleWalletService()
         pkpass_stream = apple_service.generate_pkpass(customer)
         filename = f"{customer.business.slug}-pass.pkpass"

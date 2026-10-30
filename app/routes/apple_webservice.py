@@ -4,6 +4,7 @@ from flask import Blueprint, jsonify, request, send_file
 from app.extensions import db
 from app.models import Customer, AppleDevice
 from app.services import AppleWalletService
+from app.services.referral_participant_service import ensure_customer_invitation_persisted
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +140,7 @@ def deliver_pass(pass_type_id: str, serial_number: str):
     if not customer or customer.qr_code_token != auth_token:
         return jsonify({"error": "Unauthorized"}), 401
 
+    ensure_customer_invitation_persisted(customer)
     apple_service = AppleWalletService()
     pkpass_stream = apple_service.generate_pkpass(customer)
     filename = f"{customer.business.slug}-pass.pkpass"

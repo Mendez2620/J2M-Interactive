@@ -45,7 +45,7 @@ class ReferralParticipant(db.Model):
             name="ck_referral_participant_identity",
         ),
         db.CheckConstraint(
-            "participant_type != 'customer_ambassador' OR "
+            "participant_type != 'customer_ambassador' OR NOT is_enabled OR "
             "(consent_version IS NOT NULL AND consented_at IS NOT NULL AND consent_evidence_hash IS NOT NULL)",
             name="ck_referral_participant_customer_consent",
         ),
