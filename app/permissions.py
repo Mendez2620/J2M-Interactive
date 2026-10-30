@@ -7,6 +7,7 @@ PERMISSION_CATALOG = {
     "review_referrals": {"label": "Revisar referidos", "description": "Revisar manualmente la elegibilidad de referidos.", "channel": "web", "roles": {"manager"}},
     "manage_referral_incentives": {"label": "Configurar incentivos", "description": "Configurar reglas deshabilitadas y consultar vistas previas de incentivos.", "channel": "web", "roles": {"manager"}},
     "manage_referral_participants": {"label": "Gestionar referidores", "description": "Habilitar o revocar la participación de empleados en referidos.", "channel": "web", "roles": {"manager"}},
+    "authorize_customer_identity": {"label": "Vincular identidad de clientes", "description": "Autorizar presencialmente el enrolamiento o recuperación de credenciales de clientes.", "channel": "web", "roles": {"manager", "cashier"}},
     "refer_customers": {"label": "Recomendar clientes", "description": "Generar invitaciones de referido para este negocio.", "channel": "web", "roles": {"manager", "cashier"}},
     "export_reports": {"label": "Exportar reportes", "description": "Descargar reportes PDF y Excel.", "channel": "web", "roles": {"manager"}},
     "view_cashiers": {"label": "Consultar cajeros", "description": "Consultar empleados cajeros.", "channel": "web", "roles": {"manager"}},

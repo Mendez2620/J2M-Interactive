@@ -28,6 +28,8 @@ EXPECTED_TABLES = {
     "referral_incentive_rules", "referral_incentive_rule_audits",
     "referral_incentive_records",
     "referral_participants", "referral_participant_audits", "referral_program_audits",
+    "customer_linking_enrollments", "customer_credentials", "customer_sessions",
+    "customer_auth_challenges", "customer_auth_audits",
 }
 
 
@@ -80,10 +82,11 @@ class MigrationTestCase(unittest.TestCase):
                     "trg_referral_incentive_records_no_update", "trg_referral_incentive_records_no_delete",
                     "trg_referral_participant_audits_no_update", "trg_referral_participant_audits_no_delete",
                     "trg_referral_program_audits_no_update", "trg_referral_program_audits_no_delete",
+                    "trg_customer_auth_audits_no_update", "trg_customer_auth_audits_no_delete",
                 } <= triggers)
                 self.assertEqual(connection.execute(
                     "SELECT version_num FROM alembic_version"
-                ).fetchone()[0], "4e5f6a7b8c9d")
+                ).fetchone()[0], "5f6a7b8c9d0e")
                 default_sql = {
                     row[1]: row[4]
                     for row in connection.execute("PRAGMA table_info(referral_participants)")
@@ -108,6 +111,11 @@ class MigrationTestCase(unittest.TestCase):
             engine = create_engine(f"sqlite:///{path.as_posix()}")
             db.metadata.create_all(engine)
             with engine.begin() as connection:
+                for table in (
+                    "customer_auth_audits", "customer_sessions", "customer_auth_challenges",
+                    "customer_credentials", "customer_linking_enrollments",
+                ):
+                    connection.execute(text(f"DROP TABLE {table}"))
                 connection.execute(text("DROP TABLE platform_admins"))
                 connection.execute(text("DROP TABLE referral_program_audits"))
                 connection.execute(text("ALTER TABLE businesses DROP COLUMN logo_path"))
@@ -138,7 +146,7 @@ class MigrationTestCase(unittest.TestCase):
                 self.assertTrue({"logo_path", "cover_path"} <= columns)
                 self.assertIn("referrals_enabled", columns)
                 self.assertEqual(connection.execute("SELECT referrals_enabled FROM businesses WHERE id = 1").fetchone()[0], 0)
-                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "4e5f6a7b8c9d")
+                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "5f6a7b8c9d0e")
                 self.assertIn("ix_staff_email_lower", {row[1] for row in connection.execute("PRAGMA index_list(staff)")})
                 self.assertEqual(connection.execute("SELECT web_access_enabled, mobile_access_enabled FROM businesses WHERE id = 1").fetchone(), (0, 0))
                 self.assertEqual(connection.execute("SELECT visual_theme, font_style, text_size FROM businesses WHERE id = 1").fetchone(), ("modern", "modern", "standard"))
@@ -166,6 +174,11 @@ class MigrationTestCase(unittest.TestCase):
             self.upgrade(path)
             with sqlite3.connect(path) as connection:
                 connection.execute("INSERT INTO businesses (id, name, slug, primary_color, secondary_color, loyalty_type, points_per_currency, stamps_reward_limit, cooldown_minutes, is_active, created_at) VALUES (1, 'Conservar', 'conservar', '#000000', '#FFFFFF', 'stamps', 1.0, 10, 60, 1, '2026-01-01')")
+            reversible_customer_auth = self.run_db_command(path, "downgrade")
+            self.assertEqual(
+                reversible_customer_auth.returncode, 0,
+                reversible_customer_auth.stdout + reversible_customer_auth.stderr,
+            )
             reversible = self.run_db_command(path, "downgrade")
             self.assertEqual(reversible.returncode, 0, reversible.stdout + reversible.stderr)
             reversible_index = self.run_db_command(path, "downgrade")
@@ -311,7 +324,7 @@ class MigrationTestCase(unittest.TestCase):
                 self.assertEqual(connection.execute("SELECT username, auth_version, permissions FROM staff WHERE id = 1").fetchone(), ("gerente", 3, "view_stats,manage_cashiers"))
                 audit_columns = {row[1]: row[3] for row in connection.execute("PRAGMA table_info(access_audits)")}
                 self.assertEqual(audit_columns["affected_staff_id"], 0)
-                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "4e5f6a7b8c9d")
+                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "5f6a7b8c9d0e")
 
     def test_referral_incentive_migration_is_incremental_and_history_blocks_downgrade(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
@@ -386,7 +399,7 @@ class MigrationTestCase(unittest.TestCase):
                 ).fetchone()[0], participant_id)
                 self.assertEqual(connection.execute(
                     "SELECT version_num FROM alembic_version"
-                ).fetchone()[0], "4e5f6a7b8c9d")
+                ).fetchone()[0], "5f6a7b8c9d0e")
 
     def test_customer_recovery_migration_preserves_customer_wallet_identity_and_transactions(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
@@ -419,6 +432,42 @@ class MigrationTestCase(unittest.TestCase):
                 self.assertEqual(connection.execute("SELECT COUNT(*) FROM loyalty_ledger_entries").fetchone()[0], 0)
                 consent = connection.execute("SELECT email_verified_at, terms_accepted_at, privacy_accepted_at, marketing_consent FROM customers WHERE id = 1").fetchone()
                 self.assertEqual(consent, (None, None, None, 0))
+
+    def test_customer_passkey_migration_is_incremental_and_history_blocks_downgrade(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            path = Path(directory) / "customer-passkeys.sqlite"
+            self.upgrade(path, "4e5f6a7b8c9d")
+            with sqlite3.connect(path) as connection:
+                connection.execute(
+                    "INSERT INTO businesses (id, name, slug, primary_color, secondary_color, loyalty_type, points_per_currency, stamps_reward_limit, cooldown_minutes, is_active, web_access_enabled, mobile_access_enabled, referrals_enabled, created_at) VALUES (1, 'Conservar', 'passkeys', '#000000', '#FFFFFF', 'points', 1, 10, 0, 1, 1, 0, 0, '2026-01-01')"
+                )
+                connection.execute(
+                    "INSERT INTO customers (id, business_id, full_name, current_points, current_stamps, qr_code_token, created_at) VALUES (1, 1, 'Cliente', 31, 0, 'wallet-stable', '2026-01-01')"
+                )
+                connection.execute(
+                    "INSERT INTO staff (id, business_id, username, password_hash, role, is_active, web_access_enabled, mobile_access_enabled, auth_version, permissions, created_at) VALUES (1, 1, 'staff', 'hash', 'manager', 1, 1, 0, 0, 'authorize_customer_identity', '2026-01-01')"
+                )
+            self.upgrade(path)
+            with sqlite3.connect(path) as connection:
+                tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                self.assertTrue({
+                    "customer_linking_enrollments", "customer_credentials",
+                    "customer_sessions", "customer_auth_challenges", "customer_auth_audits",
+                } <= tables)
+                self.assertEqual(connection.execute(
+                    "SELECT current_points, qr_code_token FROM customers WHERE id=1"
+                ).fetchone(), (31.0, "wallet-stable"))
+                self.assertEqual(connection.execute("SELECT version_num FROM alembic_version").fetchone()[0], "5f6a7b8c9d0e")
+            clean = self.run_db_command(path, "downgrade", "4e5f6a7b8c9d")
+            self.assertEqual(clean.returncode, 0, clean.stdout + clean.stderr)
+            self.upgrade(path)
+            with sqlite3.connect(path) as connection:
+                connection.execute(
+                    "INSERT INTO customer_auth_audits (business_id, customer_id, action, actor_type, actor_id, reason, created_at) VALUES (1, 1, 'linking_authorized', 'staff', 1, 'Conservar historial', '2026-01-01')"
+                )
+            blocked = self.run_db_command(path, "downgrade", "4e5f6a7b8c9d")
+            self.assertNotEqual(blocked.returncode, 0)
+            self.assertIn("Downgrade bloqueado", blocked.stdout + blocked.stderr)
 
 
 if __name__ == "__main__":
