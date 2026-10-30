@@ -94,6 +94,10 @@
                   class="tab-btn py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap transition border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300">
             {{ icon('file') }} Clientes y exportación
           </button>
+          <button type="button" onclick="switchTab('referrals')" id="tabBtn-referrals"
+                  class="tab-btn py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap transition border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300">
+            {{ icon('users') }} Referidos
+          </button>
         </nav>
       </div>
 
@@ -329,7 +333,6 @@
       </div>
 
       <!-- Tab 3: Usuarios / Staff -->
-      <div class="mb-4 flex justify-end"><a class="btn btn-secondary" href="{{ url_for('promoter.admin_promoters', business_id=business.id) }}">Gestionar promotores</a></div>
       <div id="tabContent-staff" class="p-6 space-y-6 hidden">
         <div><h3 class="text-sm font-bold text-slate-900 uppercase tracking-wider">Disponibilidad de canales del negocio</h3><p class="text-xs text-slate-500 mt-1">Estos controles permiten al Super Admin habilitar o suspender completamente el acceso de este negocio por canal.</p></div>
         <div class="grid sm:grid-cols-2 gap-3">
@@ -397,6 +400,8 @@
                   {% endfor %}
                 </td>
                 <td class="py-3 px-4 text-right space-x-1">
+                  {% set referral_participant = staff_referral_participants.get(s.id) %}
+                  <button type="button" data-staff-referrals data-staff-id="{{ s.id }}" data-enabled="{{ 'true' if referral_participant and referral_participant.is_enabled else 'false' }}" class="btn btn-secondary text-xs">{{ 'Deshabilitar referidos' if referral_participant and referral_participant.is_enabled else 'Habilitar referidos' }}</button>
                   <button type="button" data-manage-permissions data-business-id="{{ business.id }}" data-staff-id="{{ s.id }}" data-username="{{ s.username }}" data-active="{{ 'true' if s.is_active else 'false' }}" class="btn btn-secondary text-xs" title="Gestionar permisos y usuario">{{ icon('settings','icon-sm') }} Gestionar usuario</button>
                 </td>
               </tr>
@@ -410,6 +415,21 @@
             </tbody>
           </table>
         </div>
+      </div>
+
+      <!-- Tab 5: Referidos -->
+      <div id="tabContent-referrals" class="hidden space-y-6 p-4 sm:p-6">
+        <section class="flex flex-col gap-4 rounded-xl border border-slate-200 bg-slate-50 p-4 sm:flex-row sm:items-center sm:justify-between">
+          <div><h3 class="font-bold text-slate-900">Programa de referidos</h3><p class="mt-1 text-sm text-slate-600">El interruptor controla nuevas invitaciones y atribuciones; nunca concede recompensas.</p></div>
+          <button type="button" data-referral-program data-enabled="{{ 'true' if business.referrals_enabled else 'false' }}" class="rounded-lg px-4 py-2 text-sm font-semibold {{ 'bg-emerald-600 text-white' if business.referrals_enabled else 'border border-slate-300 bg-white text-slate-700' }}" aria-pressed="{{ 'true' if business.referrals_enabled else 'false' }}">{{ 'Activado' if business.referrals_enabled else 'Desactivado' }}</button>
+        </section>
+        <section aria-labelledby="referralSummaryTitle"><h3 id="referralSummaryTitle" class="mb-3 text-sm font-bold uppercase tracking-wide">Resumen</h3><div class="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-8">
+          {% for label, key in [('Empleados','staff'),('Embajadores','customers'),('Históricos','promoters'),('Registrados','attributed'),('Pendientes','pending'),('Verificados','verified'),('Rechazados/revocados','rejected'),('Simulados','simulated')] %}<div class="rounded-xl border bg-white p-3"><strong class="block text-xl">{{ referral_metrics[key] + (referral_metrics.revoked if key == 'rejected' else 0) }}</strong><span class="text-xs text-slate-500">{{ label }}</span></div>{% endfor %}
+        </div><p class="mt-2 text-xs text-slate-500">Los incentivos mostrados son simulaciones DRY-RUN; no representan premios entregados.</p></section>
+        <section><h3 class="mb-3 text-sm font-bold uppercase tracking-wide">Personas que recomiendan</h3><div class="overflow-x-auto rounded-xl border"><table class="min-w-full text-left text-sm"><thead class="bg-slate-50 text-xs uppercase text-slate-600"><tr><th class="p-3">Persona</th><th class="p-3">Tipo</th><th class="p-3">Estado</th><th class="p-3">Registrados</th><th class="p-3">Pendientes</th><th class="p-3">Verificados</th></tr></thead><tbody class="divide-y bg-white">{% for row in referral_participants %}<tr><td class="p-3 font-semibold">{{ row.label }}</td><td class="p-3">{{ {'staff':'Empleado','customer_ambassador':'Cliente embajador','external_promoter':'Promotor histórico'}[row.participant.participant_type] }}</td><td class="p-3">{{ 'Habilitado' if row.participant.is_enabled and not row.participant.revoked_at else 'Deshabilitado' }}</td><td class="p-3">{{ row.registered }}</td><td class="p-3">{{ row.counts.get('pending', 0) }}</td><td class="p-3">{{ row.counts.get('verified', 0) }}</td></tr>{% else %}<tr><td colspan="6" class="p-6 text-center text-slate-500">Aún no hay participantes habilitados.</td></tr>{% endfor %}</tbody></table></div><p class="mt-2 text-xs text-slate-500">Los clientes embajadores permanecen bloqueados hasta disponer de autorización fuerte del titular. No existe alta visual de promotores externos.</p></section>
+        <section><h3 class="mb-3 text-sm font-bold uppercase tracking-wide">Clientes atribuidos</h3><div class="overflow-x-auto rounded-xl border"><table class="min-w-full text-left text-sm"><thead class="bg-slate-50 text-xs uppercase text-slate-600"><tr><th class="p-3">Cliente</th><th class="p-3">Referidor</th><th class="p-3">Registro</th><th class="p-3">Estado</th><th class="p-3">Verificación</th></tr></thead><tbody class="divide-y bg-white">{% for row in referral_attributions %}<tr><td class="p-3 font-semibold">{{ row.attribution.customer.full_name }}</td><td class="p-3">{% if row.attribution.participant.participant_type == 'staff' %}{{ row.attribution.participant.staff.name or row.attribution.participant.staff.username }}{% elif row.attribution.participant.participant_type == 'customer_ambassador' %}Cliente embajador{% else %}{{ row.attribution.participant.promoter.name }}{% endif %}</td><td class="p-3">{{ row.attribution.created_at.strftime('%d/%m/%Y') }}</td><td class="p-3">{{ row.eligibility.status if row.eligibility else 'pending' }}</td><td class="p-3">{{ row.eligibility.reviewed_at.strftime('%d/%m/%Y') if row.eligibility and row.eligibility.reviewed_at else '—' }}</td></tr>{% else %}<tr><td colspan="5" class="p-6 text-center text-slate-500">No hay registros atribuidos.</td></tr>{% endfor %}</tbody></table></div></section>
+        <section class="grid gap-4 lg:grid-cols-2"><div class="rounded-xl border p-4"><h3 class="font-bold">Reglas y recompensas</h3><p class="mt-1 text-sm text-slate-600">Las reglas continúan únicamente en estado draft o disabled y las evaluaciones son DRY-RUN. No hay controles para conceder premios.</p></div><div class="rounded-xl border p-4"><h3 class="font-bold">Auditoría del programa</h3><ul class="mt-2 space-y-2 text-sm">{% for audit in referral_program_audits %}<li><strong>{{ 'Activado' if audit.new_enabled else 'Desactivado' }}</strong> · {{ audit.created_at.strftime('%d/%m/%Y %H:%M') }} · {{ audit.reason }}</li>{% else %}<li class="text-slate-500">Sin cambios registrados.</li>{% endfor %}</ul></div></section>
+        <p data-referrals-message class="hidden rounded-lg p-3 text-sm" role="status" aria-live="polite"></p>
       </div>
 
       <!-- Tab 4: Clientes & Exportación -->
@@ -602,7 +622,7 @@
 {% block scripts %}
 <script nonce="{{ csp_nonce() }}">
   function switchTab(tabId) {
-    const tabs = ['info', 'loyalty', 'staff', 'customers'];
+    const tabs = ['info', 'loyalty', 'staff', 'customers', 'referrals'];
     tabs.forEach(t => {
       const content = document.getElementById(`tabContent-${t}`);
       const btn = document.getElementById(`tabBtn-${t}`);
@@ -766,6 +786,36 @@
         if (!window.confirm(`¿Eliminar al usuario ${form.dataset.username}?`)) event.preventDefault();
       });
     });
+    const csrfHeader = () => document.querySelector('meta[name="csrf-token"]').content;
+    const referralMessage = document.querySelector('[data-referrals-message]');
+    function showReferralMessage(message, ok) {
+      if (!referralMessage) return;
+      referralMessage.textContent = message;
+      referralMessage.className = `rounded-lg p-3 text-sm ${ok ? 'bg-emerald-50 text-emerald-800' : 'bg-rose-50 text-rose-800'}`;
+    }
+    document.querySelector('[data-referral-program]')?.addEventListener('click', async (event) => {
+      const button = event.currentTarget;
+      const enabled = button.dataset.enabled !== 'true';
+      const reason = window.prompt(`Motivo para ${enabled ? 'activar' : 'desactivar'} el programa de referidos:`);
+      if (!reason) return;
+      button.disabled = true;
+      try {
+        const response = await fetch('/admin/business/{{ business.id }}/referrals/program', {method:'POST', headers:{'Content-Type':'application/json','Accept':'application/json','X-CSRFToken':csrfHeader(),'Idempotency-Key':crypto.randomUUID()}, body:JSON.stringify({enabled, reason})});
+        const data = await response.json(); if (!response.ok) throw new Error(data.message || 'No fue posible actualizar el programa.');
+        window.location.assign('/admin/business/{{ business.id }}?tab=referrals');
+      } catch (error) { showReferralMessage(error.message, false); button.disabled = false; }
+    });
+    document.querySelectorAll('[data-staff-referrals]').forEach((button) => button.addEventListener('click', async () => {
+      const enabled = button.dataset.enabled !== 'true';
+      const reason = window.prompt(`Motivo para ${enabled ? 'habilitar' : 'deshabilitar'} los referidos de este empleado:`);
+      if (!reason) return;
+      button.disabled = true;
+      try {
+        const response = await fetch(`/admin/business/{{ business.id }}/staff/${encodeURIComponent(button.dataset.staffId)}/referrals`, {method:'POST', headers:{'Content-Type':'application/json','Accept':'application/json','X-CSRFToken':csrfHeader(),'Idempotency-Key':crypto.randomUUID()}, body:JSON.stringify({enabled, reason})});
+        const data = await response.json(); if (!response.ok) throw new Error(data.message || 'No fue posible actualizar al empleado.');
+        window.location.assign('/admin/business/{{ business.id }}?tab=referrals');
+      } catch (error) { window.alert(error.message); button.disabled = false; }
+    }));
     document.querySelectorAll('[data-file-control]').forEach((control) => { const input=control.querySelector('input[type=file]'); input.addEventListener('change',()=>updateFileControl(input)); control.querySelector('[data-clear-file]').addEventListener('click',()=>{input.value='';updateFileControl(input);}); });
     document.querySelectorAll('[data-color-control]').forEach((control) => { const picker=control.querySelector('[data-color-picker]');const text=control.querySelector('[data-color-text]');picker.addEventListener('input',()=>{text.value=picker.value.toUpperCase();});text.addEventListener('input',()=>{text.value=text.value.toUpperCase();if(/^#[0-9A-F]{6}$/.test(text.value))picker.value=text.value;}); });
     const walletEditor = document.querySelector('[data-wallet-editor]');

@@ -23,6 +23,9 @@ from app.services.referral_incentive_service import (
 from app.services.referral_participant_service import (
     ReferralParticipantError, configure_staff_referrals, staff_can_issue,
 )
+from app.services.referral_program_service import (
+    ReferralProgramError, configure_referral_program,
+)
 
 manager_bp = Blueprint("manager", __name__, url_prefix="/manager")
 # Legacy test hook; authentication throttling is persisted in auth_rate_limit_slots.
@@ -132,6 +135,28 @@ def configure_staff_referral_access(business_id, staff_id):
         "status": "success", "participant_id": participant.id,
         "enabled": response_state["is_enabled"], "idempotent_replay": replayed,
     }), 200
+
+
+@manager_bp.post("/business/<int:business_id>/referrals/program")
+@staff_required("web", "manage_referral_participants", roles={"manager"})
+def configure_referral_program_access(business_id):
+    if not validate_csrf():
+        return jsonify({"status": "error", "message": "Token CSRF inválido o ausente."}), 400
+    denied = _own_business(business_id)
+    if denied:
+        return denied
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or set(data) - {"enabled", "reason"}:
+        return jsonify({"status": "error", "message": "Solicitud inválida."}), 400
+    try:
+        enabled, replayed = configure_referral_program(
+            business=g.staff.business, enabled=data.get("enabled"),
+            actor_type="staff", actor_id=g.staff.id, reason=data.get("reason"),
+            request_id=request.headers.get("Idempotency-Key"),
+        )
+    except ReferralProgramError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), exc.status_code
+    return jsonify({"status": "success", "enabled": enabled, "idempotent_replay": replayed})
 
 
 @manager_bp.get("/portal/referral-invitation")

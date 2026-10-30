@@ -1,11 +1,17 @@
+from urllib.parse import urlparse
+
 from flask import Blueprint, current_app, g, jsonify, redirect, render_template, request, session, url_for
-from sqlalchemy import or_
+from reportlab.graphics import renderSVG
+from reportlab.graphics.barcode.qr import QrCodeWidget
+from reportlab.graphics.shapes import Drawing
+from sqlalchemy import func, or_
 from werkzeug.security import check_password_hash, generate_password_hash
 
+from app.extensions import db
 from app.manager_auth import (
     create_staff_browser_session, revoke_current_staff_session, staff_portal_required,
 )
-from app.models import Business, ReferralParticipant, Staff
+from app.models import Business, ReferralAttribution, ReferralEligibility, ReferralParticipant, Staff
 from app.permissions import has_permission
 from app.services.auth_rate_limit_service import (
     AuthRateLimitUnavailable, clear_auth_attempts, reserve_auth_attempt,
@@ -92,22 +98,94 @@ def staff_logout():
 @staff_portal_bp.route("/portal/scanner", methods=["GET"])
 @staff_portal_required("scanner_operate_web")
 def staff_scanner():
-    return render_template("staff/scanner.html", staff=g.staff_browser, business=g.staff_browser.business)
+    participant = _staff_invitation()
+    return render_template(
+        "staff/scanner.html", staff=g.staff_browser, business=g.staff_browser.business,
+        can_refer=staff_can_issue(participant),
+    )
+
+
+def _staff_invitation():
+    return ReferralParticipant.query.filter_by(
+        business_id=g.staff_browser.business_id, staff_id=g.staff_browser.id,
+        participant_type="staff", is_enabled=True,
+    ).first()
+
+
+def _invitation_url(participant):
+    base = (current_app.config.get("PUBLIC_BASE_URL") or "").strip().rstrip("/")
+    parsed = urlparse(base)
+    if current_app.config.get("ENV") == "production" and (
+        parsed.scheme != "https" or not parsed.hostname
+    ):
+        return None
+    if not base:
+        base = request.url_root.rstrip("/")
+    path = url_for(
+        "business.join_business", slug=g.staff_browser.business.slug,
+        ref=participant.invitation_code,
+    )
+    return f"{base}{path}"
 
 
 @staff_portal_bp.get("/portal/referral-invitation")
 @staff_portal_required("refer_customers")
 def staff_referral_invitation():
-    participant = ReferralParticipant.query.filter_by(
-        business_id=g.staff_browser.business_id, staff_id=g.staff_browser.id,
-        participant_type="staff", is_enabled=True,
-    ).first()
+    participant = _staff_invitation()
     if not staff_can_issue(participant):
         return jsonify({"status": "error", "message": "Los referidos no están habilitados."}), 403
+    invitation_url = _invitation_url(participant)
+    if not invitation_url:
+        return jsonify({"status": "error", "message": "El origen público no está configurado."}), 503
     return jsonify({
         "status": "success", "invitation_code": participant.invitation_code,
         "invitation_path": url_for(
             "business.join_business", slug=g.staff_browser.business.slug,
             ref=participant.invitation_code,
         ),
+        "invitation_url": invitation_url,
     }), 200
+
+
+@staff_portal_bp.get("/portal/referrals")
+@staff_portal_required("refer_customers")
+def staff_referrals():
+    participant = _staff_invitation()
+    if not staff_can_issue(participant):
+        return render_template(
+            "staff/referrals.html", staff=g.staff_browser, business=g.staff_browser.business,
+            enabled=False, invitation_url=None, metrics={"registered": 0, "pending": 0, "verified": 0},
+        ), 403
+    counts = dict(db.session.query(
+        ReferralEligibility.status, func.count(ReferralEligibility.id),
+    ).filter_by(
+        business_id=g.staff_browser.business_id, participant_id=participant.id,
+    ).group_by(ReferralEligibility.status).all())
+    metrics = {
+        "registered": ReferralAttribution.query.filter_by(
+            business_id=g.staff_browser.business_id, participant_id=participant.id,
+        ).count(),
+        "pending": counts.get("pending", 0),
+        "verified": counts.get("verified", 0),
+    }
+    return render_template(
+        "staff/referrals.html", staff=g.staff_browser, business=g.staff_browser.business,
+        enabled=True, invitation_url=_invitation_url(participant), metrics=metrics,
+    )
+
+
+@staff_portal_bp.get("/portal/referrals/qr.svg")
+@staff_portal_required("refer_customers")
+def staff_referral_qr():
+    participant = _staff_invitation()
+    invitation_url = _invitation_url(participant) if staff_can_issue(participant) else None
+    if not invitation_url:
+        return jsonify({"status": "error", "message": "Los referidos no están habilitados."}), 403
+    widget = QrCodeWidget(invitation_url)
+    x1, y1, x2, y2 = widget.getBounds()
+    drawing = Drawing(x2 - x1, y2 - y1, transform=[1, 0, 0, 1, -x1, -y1])
+    drawing.add(widget)
+    output = renderSVG.drawToString(drawing).encode("utf-8")
+    return current_app.response_class(output, mimetype="image/svg+xml", headers={
+        "Cache-Control": "no-store, private", "X-Content-Type-Options": "nosniff",
+    })
