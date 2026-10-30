@@ -101,12 +101,19 @@ def promoter_portal():
     total = verified.count()
     month_start = _utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     month = verified.filter(ReferralEligibility.reviewed_at >= month_start).count()
-    return render_template("promoter/portal.html", promoter=promoter, total=total, month=month, referral_url=_referral_url(promoter))
+    program_enabled = bool(promoter.business.referrals_enabled)
+    return render_template(
+        "promoter/portal.html", promoter=promoter, total=total, month=month,
+        program_enabled=program_enabled,
+        referral_url=_referral_url(promoter) if program_enabled else None,
+    )
 
 
 @promoter_bp.route("/promoter/referral-qr.svg")
 @promoter_required
 def promoter_qr():
+    if not g.promoter.business.referrals_enabled:
+        return {"status": "error", "message": "El programa de referidos está pausado."}, 409
     return _qr_response(g.promoter)
 
 
@@ -125,6 +132,8 @@ def _qr_response(promoter):
 @platform_admin_required
 def admin_promoter_qr(business_id, promoter_id):
     promoter = Promoter.query.filter_by(id=promoter_id, business_id=business_id).first_or_404()
+    if not promoter.business.referrals_enabled:
+        return {"status": "error", "message": "El programa de referidos está pausado."}, 409
     return _qr_response(promoter)
 
 
@@ -134,62 +143,12 @@ def admin_promoters(business_id):
     business = db.session.get(Business, business_id)
     if not business:
         return {"status": "error", "message": "Negocio no encontrado."}, 404
-    error, status = None, 200
     if request.method == "POST":
-        name = (request.form.get("name") or "").strip()
-        username = (request.form.get("username") or "").strip().lower()
-        email = (request.form.get("email") or "").strip().lower() or None
-        phone_raw, password = request.form.get("phone"), request.form.get("password") or ""
-        password_error = validate_password(password)
-        try:
-            phone = normalize_phone(phone_raw, request.form.get("phone_country") or "+52") if phone_raw else None
-        except (TypeError, ValueError) as exc:
-            error = str(exc)
-        if not error and (not 2 <= len(name) <= 120 or not 3 <= len(username) <= 80):
-            error = "Nombre y usuario no tienen un formato válido."
-        if not error and email and not valid_email(email):
-            error = "Ingresa un correo electrónico válido."
-        if not error and password_error:
-            error = password_error
-        if error:
-            status = 400
-        else:
-            promoter = Promoter(business_id=business.id, name=name, username=username, email=email, phone=phone)
-            promoter.set_password(password)
-            db.session.add(promoter)
-            try:
-                db.session.flush()
-                ensure_external_promoter(promoter)
-                db.session.add(access_audit(
-                    "promoter_created", business_id=business.id,
-                    platform_admin_id=current_platform_admin().id,
-                    new={"promoter_id": promoter.id, "name": promoter.name, "is_active": True},
-                ))
-                db.session.commit()
-                return redirect(url_for("promoter.admin_promoters", business_id=business.id, created=1))
-            except IntegrityError:
-                db.session.rollback()
-                error, status = "Ya existe un promotor con ese usuario.", 409
-    promoters = Promoter.query.filter_by(business_id=business.id).order_by(Promoter.created_at.desc()).all()
-    period = request.args.get("period", "30")
-    if period not in {"7", "30", "90", "all"}:
-        period = "30"
-    start = None if period == "all" else _utcnow() - timedelta(days=int(period))
-    scoped = ReferralAttribution.query.filter_by(business_id=business.id)
-    period_scoped = scoped if start is None else scoped.filter(ReferralAttribution.created_at >= start)
-    counts = dict(period_scoped.with_entities(
-        ReferralAttribution.promoter_id, func.count(ReferralAttribution.id)
-    ).group_by(ReferralAttribution.promoter_id).all())
-    trend = period_scoped.with_entities(
-        func.date(ReferralAttribution.created_at), func.count(ReferralAttribution.id)
-    ).group_by(func.date(ReferralAttribution.created_at)).order_by(func.date(ReferralAttribution.created_at)).all()
-    links = {item.id: _referral_url(item) for item in promoters}
-    return render_template(
-        "admin/promoters.html", business=business, promoters=promoters, counts=counts,
-        links=links, error=error, period=period, period_total=sum(counts.values()),
-        all_total=scoped.count(), active_total=sum(1 for item in promoters if item.is_active),
-        suspended_total=sum(1 for item in promoters if not item.is_active), trend=trend,
-    ), status
+        return {
+            "status": "error",
+            "message": "La creación de promotores externos ya no está disponible.",
+        }, 410
+    return redirect(url_for("admin.get_business_details", business_id=business.id, tab="referrals"))
 
 
 @promoter_bp.route("/admin/business/<int:business_id>/promoters/<int:promoter_id>", methods=["POST"])

@@ -27,6 +27,7 @@ from app.models.referral_incentive import (
     ReferralIncentiveRecord, ReferralIncentiveRule, ReferralIncentiveRuleAudit,
 )
 from app.models.referral_participant import ReferralParticipant, ReferralParticipantAudit
+from app.models.referral_program import ReferralProgramAudit
 
 __all__ = [
     "db",
@@ -52,4 +53,5 @@ __all__ = [
     "ReferralEligibilityDecision",
     "ReferralIncentiveRule", "ReferralIncentiveRuleAudit", "ReferralIncentiveRecord",
     "ReferralParticipant", "ReferralParticipantAudit",
+    "ReferralProgramAudit",
 ]

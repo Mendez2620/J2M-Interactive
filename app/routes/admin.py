@@ -9,11 +9,16 @@ import unicodedata
 import warnings
 from urllib.parse import urlparse
 from PIL import Image, UnidentifiedImageError
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import joinedload
 from werkzeug.utils import secure_filename
 from app.extensions import db
-from app.models import Business, BusinessCategory, Customer, PlatformAdmin, Staff, Transaction
+from app.models import (
+    Business, BusinessCategory, Customer, PlatformAdmin, ReferralAttribution,
+    ReferralEligibility, ReferralParticipant,
+    ReferralProgramAudit, Staff, Transaction,
+)
 from app.security import current_platform_admin, platform_admin_required, valid_email, validate_password
 from app.services import ExportService
 from app.services.google_wallet_sync_service import google_wallet_sync_business_summaries
@@ -24,6 +29,9 @@ from app.permissions import (
 )
 from app.services.referral_participant_service import (
     ReferralParticipantError, configure_staff_referrals,
+)
+from app.services.referral_program_service import (
+    ReferralProgramError, configure_referral_program,
 )
 
 admin_bp = Blueprint("admin", __name__, url_prefix="/admin")
@@ -431,6 +439,88 @@ def get_business_details(business_id: int):
     staff_members = business.staff_members.order_by(Staff.created_at.desc()).all()
     total_volume = sum(t.purchase_amount for t in transactions)
     categories = BusinessCategory.query.order_by(BusinessCategory.name).all()
+    participants = ReferralParticipant.query.options(
+        joinedload(ReferralParticipant.staff), joinedload(ReferralParticipant.customer),
+        joinedload(ReferralParticipant.promoter),
+    ).filter_by(business_id=business.id).order_by(
+        ReferralParticipant.participant_type, ReferralParticipant.id,
+    ).all()
+    participant_ids = [item.id for item in participants]
+    registered_counts = dict(db.session.query(
+        ReferralAttribution.participant_id, func.count(ReferralAttribution.id),
+    ).filter(
+        ReferralAttribution.business_id == business.id,
+        ReferralAttribution.participant_id.in_(participant_ids),
+    ).group_by(ReferralAttribution.participant_id).all()) if participant_ids else {}
+    status_rows = db.session.query(
+        ReferralEligibility.participant_id, ReferralEligibility.status,
+        func.count(ReferralEligibility.id),
+    ).filter(
+        ReferralEligibility.business_id == business.id,
+        ReferralEligibility.participant_id.in_(participant_ids),
+    ).group_by(ReferralEligibility.participant_id, ReferralEligibility.status).all() if participant_ids else []
+    participant_status_counts = {}
+    for participant_id, status, count in status_rows:
+        participant_status_counts.setdefault(participant_id, {})[status] = count
+    participant_rows = []
+    for participant in participants:
+        counts = participant_status_counts.get(participant.id, {})
+        registered = registered_counts.get(participant.id, 0)
+        if participant.participant_type == "staff":
+            label = participant.staff.name or participant.staff.username
+        elif participant.participant_type == "customer_ambassador":
+            label = participant.customer.full_name
+        else:
+            label = participant.promoter.name
+        participant_rows.append({
+            "participant": participant, "label": label, "registered": registered,
+            "counts": counts,
+        })
+    referral_status_counts = dict(db.session.query(
+        ReferralEligibility.status, func.count(ReferralEligibility.id),
+    ).filter_by(business_id=business.id).group_by(ReferralEligibility.status).all())
+    referral_page = max(request.args.get("referral_page", 1, type=int), 1)
+    referral_source = (request.args.get("referral_source") or "").strip()
+    referral_status = (request.args.get("referral_status") or "").strip()
+    attribution_query = ReferralAttribution.query.options(
+        joinedload(ReferralAttribution.customer),
+        joinedload(ReferralAttribution.participant).joinedload(ReferralParticipant.staff),
+        joinedload(ReferralAttribution.participant).joinedload(ReferralParticipant.customer),
+        joinedload(ReferralAttribution.participant).joinedload(ReferralParticipant.promoter),
+    ).filter(ReferralAttribution.business_id == business.id)
+    if referral_source in {"staff", "customer_ambassador", "external_promoter"}:
+        attribution_query = attribution_query.join(ReferralParticipant).filter(
+            ReferralParticipant.business_id == business.id,
+            ReferralParticipant.participant_type == referral_source,
+        )
+    if referral_status in {"pending", "in_review", "verified", "rejected", "revoked"}:
+        attribution_query = attribution_query.join(ReferralEligibility).filter(
+            ReferralEligibility.business_id == business.id,
+            ReferralEligibility.status == referral_status,
+        )
+    referral_pagination = attribution_query.order_by(
+        ReferralAttribution.created_at.desc(), ReferralAttribution.id.desc(),
+    ).paginate(page=referral_page, per_page=25, error_out=False)
+    page_ids = [item.id for item in referral_pagination.items]
+    eligibility_by_attribution = {
+        item.attribution_id: item for item in ReferralEligibility.query.filter(
+            ReferralEligibility.business_id == business.id,
+            ReferralEligibility.attribution_id.in_(page_ids),
+        ).all()
+    } if page_ids else {}
+    referral_program_audits = ReferralProgramAudit.query.filter_by(
+        business_id=business.id,
+    ).order_by(ReferralProgramAudit.created_at.desc()).limit(50).all()
+    referral_metrics = {
+        "staff": sum(p.participant_type == "staff" and p.is_enabled for p in participants),
+        "customers": sum(p.participant_type == "customer_ambassador" and p.is_enabled for p in participants),
+        "promoters": sum(p.participant_type == "external_promoter" for p in participants),
+        "attributed": ReferralAttribution.query.filter_by(business_id=business.id).count(),
+        "pending": referral_status_counts.get("pending", 0),
+        "verified": referral_status_counts.get("verified", 0),
+        "rejected": referral_status_counts.get("rejected", 0),
+        "revoked": referral_status_counts.get("revoked", 0),
+    }
 
     if request.is_json or request.headers.get("Accept") == "application/json":
         return jsonify({
@@ -456,7 +546,39 @@ def get_business_details(business_id: int):
         staff_members=staff_members,
         total_volume=total_volume,
         uploads_enabled=current_app.config.get("UPLOAD_STORAGE_BACKEND", "local") == "local",
+        referral_participants=participant_rows,
+        referral_attributions=[{
+            "attribution": item, "eligibility": eligibility_by_attribution.get(item.id),
+        } for item in referral_pagination.items],
+        referral_pagination=referral_pagination,
+        referral_source=referral_source,
+        referral_status=referral_status,
+        staff_referral_participants={
+            item.staff_id: item for item in participants if item.staff_id is not None
+        },
+        referral_metrics=referral_metrics,
+        referral_program_audits=referral_program_audits,
     )
+
+
+@admin_bp.post("/business/<int:business_id>/referrals/program")
+@platform_admin_required
+def configure_business_referral_program(business_id):
+    business = db.session.get(Business, business_id)
+    if not business:
+        return jsonify({"status": "error", "message": "Negocio no encontrado."}), 404
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or set(data) - {"enabled", "reason"}:
+        return jsonify({"status": "error", "message": "Solicitud inválida."}), 400
+    try:
+        enabled, replayed = configure_referral_program(
+            business=business, enabled=data.get("enabled"), actor_type="platform_admin",
+            actor_id=current_platform_admin().id, reason=data.get("reason"),
+            request_id=request.headers.get("Idempotency-Key"),
+        )
+    except ReferralProgramError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), exc.status_code
+    return jsonify({"status": "success", "enabled": enabled, "idempotent_replay": replayed})
 
 
 @admin_bp.route("/business/<int:business_id>/update", methods=["POST"])

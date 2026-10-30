@@ -16,7 +16,7 @@ Si más cuentas comparten un correo que `STAFF_ACCESS_MAX_EMAIL_CANDIDATES`, el 
 
 ## Migración segura en staging
 
-El índice de acceso unificado se introdujo en `0a1b2c3d4e5f`; el head vigente de la aplicación es `3d4e5f6a7b8c`. El índice es incremental y coincide con la consulta de autenticación `lower(staff.email) = <correo normalizado>`.
+El índice de acceso unificado se introdujo en `0a1b2c3d4e5f`; el head vigente de la aplicación es `4e5f6a7b8c9d`. El índice es incremental y coincide con la consulta de autenticación `lower(staff.email) = <correo normalizado>`.
 
 Orden controlado para staging, ejecutado por el propietario:
 
