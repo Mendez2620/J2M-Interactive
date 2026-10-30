@@ -20,6 +20,8 @@ class CustomerLinkingEnrollment(db.Model):
     secret_hash = db.Column(db.String(64), nullable=False, unique=True)
     browser_binding_hash = db.Column(db.String(64), nullable=True, unique=True)
     pairing_code_hash = db.Column(db.String(64), nullable=True)
+    pairing_failed_attempts = db.Column(db.Integer, nullable=False, default=0)
+    pairing_locked_at = db.Column(db.DateTime, nullable=True)
     webauthn_challenge = db.Column(db.LargeBinary, nullable=True)
     status = db.Column(db.String(30), nullable=False, default="pending", index=True)
     recovery_mode = db.Column(db.Boolean, nullable=False, default=False)

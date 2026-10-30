@@ -173,8 +173,11 @@ def enrollment_options():
 
 @customer_auth_bp.post("/enroll/complete")
 def enrollment_complete():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return _error(CustomerAuthError("La respuesta WebAuthn no es válida."))
     try:
-        customer, _credential = complete_registration(request.get_json(silent=True) or {})
+        customer, _credential = complete_registration(payload)
     except CustomerAuthError as exc:
         return _error(exc)
     return jsonify({
@@ -201,8 +204,8 @@ def customer_login_options(business_slug):
 @customer_auth_bp.post("/login/<business_slug>/complete")
 def customer_login_complete(business_slug):
     business = Business.query.filter_by(slug=business_slug, is_active=True).first_or_404()
-    payload = request.get_json(silent=True) or {}
-    identity_hint = payload.get("id", "") if isinstance(payload, dict) else ""
+    payload = request.get_json(silent=True)
+    identity_hint = payload.get("id", "") if isinstance(payload, dict) else "invalid-payload"
     try:
         reservation = reserve_auth_attempt(
             "customer-passkey", f"{business.id}:{str(identity_hint)[:128]}", request.remote_addr,
@@ -237,12 +240,18 @@ def customer_ambassador_consent(business_slug):
     if customer.business.slug != business_slug:
         return jsonify({"status": "error", "message": "Operación no disponible."}), 404
     data = (request.get_json(silent=True) if request.is_json else request.form) or {}
+    if not hasattr(data, "get"):
+        return _error(CustomerAuthError("La solicitud no es válida."))
     enabled = data.get("enabled") is True or str(data.get("enabled", "")).lower() in {"1", "true", "yes"}
+    if enabled:
+        return jsonify({
+            "status": "error",
+            "message": "La participación de clientes embajadores estará disponible cuando se publique el consentimiento versionado.",
+        }), 409
     try:
         participant, replayed, historical = configure_customer_ambassador(
             customer=customer, enabled=enabled,
-            consent_version=data.get("consent_version"),
-            consent_evidence=data.get("consent_evidence"),
+            consent_version=None, consent_evidence=None,
             actor_type="customer", actor_id=customer.id,
             reason=data.get("reason"), request_id=request.headers.get("Idempotency-Key"),
             authorization_verified=True,

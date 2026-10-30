@@ -24,6 +24,8 @@ def upgrade():
         sa.Column("secret_hash", sa.String(64), nullable=False, unique=True),
         sa.Column("browser_binding_hash", sa.String(64), nullable=True, unique=True),
         sa.Column("pairing_code_hash", sa.String(64), nullable=True),
+        sa.Column("pairing_failed_attempts", sa.Integer, nullable=False, server_default="0"),
+        sa.Column("pairing_locked_at", sa.DateTime, nullable=True),
         sa.Column("webauthn_challenge", sa.LargeBinary, nullable=True),
         sa.Column("status", sa.String(30), nullable=False, server_default="pending"),
         sa.Column("recovery_mode", sa.Boolean, nullable=False, server_default=sa.false()),

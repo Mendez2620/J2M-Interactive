@@ -71,6 +71,25 @@ def _audit(customer, action, actor_type, actor_id, reason, enrollment=None, cred
     ))
 
 
+def _enrollment_authority(enrollment):
+    if not enrollment or enrollment.status in {"cancelled", "expired", "completed"}:
+        raise CustomerAuthError("La autorización ya no está disponible.", 409)
+    if enrollment.expires_at <= _now():
+        raise CustomerAuthError("La autorización expiró.", 410)
+    customer = Customer.query.filter_by(
+        id=enrollment.customer_id, business_id=enrollment.business_id,
+    ).first()
+    staff = Staff.query.filter_by(
+        id=enrollment.authorized_by_staff_id, business_id=enrollment.business_id,
+    ).first()
+    business = db.session.get(Business, enrollment.business_id)
+    if (not customer or not business or not business.is_active or not business.web_access_enabled
+            or not staff or not staff.is_active or not staff.web_access_enabled
+            or not has_permission(staff, "authorize_customer_identity")):
+        raise CustomerAuthError("La autorización ya no está disponible.", 409)
+    return customer, staff
+
+
 def create_linking_enrollment(*, staff, customer_id, human_check_note, recovery_mode=False):
     note = human_check_note.strip() if isinstance(human_check_note, str) else ""
     if (not staff.is_active or not staff.web_access_enabled or not staff.business
@@ -103,10 +122,7 @@ def claim_linking_enrollment(secret):
     enrollment = CustomerLinkingEnrollment.query.filter_by(secret_hash=secret_hash).first()
     if not enrollment or enrollment.status != "pending" or enrollment.expires_at <= _now():
         raise CustomerAuthError("La autorización no es válida o expiró.", 404)
-    customer = Customer.query.filter_by(id=enrollment.customer_id, business_id=enrollment.business_id).first()
-    staff = Staff.query.filter_by(id=enrollment.authorized_by_staff_id, business_id=enrollment.business_id).first()
-    if not customer or not staff or not staff.business.is_active or not staff.is_active or not has_permission(staff, "authorize_customer_identity"):
-        raise CustomerAuthError("La autorización ya no está disponible.", 409)
+    customer, _authorizer = _enrollment_authority(enrollment)
     browser_verifier = secrets.token_urlsafe(32)
     pairing_code = f"{secrets.randbelow(1000000):06d}"
     claimed_at = _now()
@@ -138,15 +154,52 @@ def approve_linking_enrollment(*, staff, enrollment_id, pairing_code):
     ).with_for_update().first()
     if not enrollment or enrollment.status != "claimed" or enrollment.expires_at <= _now():
         raise CustomerAuthError("La solicitud no está disponible.", 404)
-    if not staff.is_active or not has_permission(staff, "authorize_customer_identity"):
+    _customer, _authorizer = _enrollment_authority(enrollment)
+    if (not staff.is_active or not staff.web_access_enabled or not staff.business
+            or not staff.business.is_active or not staff.business.web_access_enabled
+            or not has_permission(staff, "authorize_customer_identity")):
         raise CustomerAuthError("No tienes autorización para confirmar vinculaciones.", 403)
     supplied = _pairing_hash(enrollment.id, str(pairing_code or ""))
+    maximum = current_app.config["CUSTOMER_LINKING_PAIRING_MAX_ATTEMPTS"]
     if not hmac.compare_digest(supplied, enrollment.pairing_code_hash or ""):
-        raise CustomerAuthError("El código de emparejamiento no coincide.", 409)
+        attempted_at = _now()
+        changed = CustomerLinkingEnrollment.query.filter(
+            CustomerLinkingEnrollment.id == enrollment.id,
+            CustomerLinkingEnrollment.business_id == staff.business_id,
+            CustomerLinkingEnrollment.status == "claimed",
+            CustomerLinkingEnrollment.expires_at > attempted_at,
+            CustomerLinkingEnrollment.pairing_failed_attempts < maximum,
+        ).update({
+            CustomerLinkingEnrollment.pairing_failed_attempts:
+                CustomerLinkingEnrollment.pairing_failed_attempts + 1,
+        }, synchronize_session=False)
+        if changed != 1:
+            db.session.rollback()
+            raise CustomerAuthError("La solicitud ya no está disponible.", 429)
+        db.session.expire_all()
+        enrollment = db.session.get(CustomerLinkingEnrollment, enrollment.id)
+        customer = db.session.get(Customer, enrollment.customer_id)
+        if enrollment.pairing_failed_attempts >= maximum:
+            enrollment.status = "cancelled"
+            enrollment.pairing_locked_at = attempted_at
+            enrollment.pairing_code_hash = None
+            action = "linking_pair_locked"
+        else:
+            action = "linking_pair_failed"
+        _audit(
+            customer, action, "staff", staff.id,
+            "Intento de emparejamiento rechazado.", enrollment=enrollment,
+        )
+        db.session.commit()
+        status = 429 if action == "linking_pair_locked" else 409
+        raise CustomerAuthError("No fue posible confirmar el emparejamiento.", status)
     approved_at = _now()
     changed = CustomerLinkingEnrollment.query.filter_by(
         id=enrollment.id, business_id=staff.business_id, status="claimed",
-    ).filter(CustomerLinkingEnrollment.expires_at > approved_at).update({
+    ).filter(
+        CustomerLinkingEnrollment.expires_at > approved_at,
+        CustomerLinkingEnrollment.pairing_failed_attempts < maximum,
+    ).update({
         CustomerLinkingEnrollment.status: "approved",
         CustomerLinkingEnrollment.approved_at: approved_at,
     }, synchronize_session=False)
@@ -174,6 +227,7 @@ def _bound_enrollment(lock=False):
 
 def registration_options():
     enrollment = _bound_enrollment(lock=True)
+    _enrollment_authority(enrollment)
     if enrollment.status not in {"approved", "registration_pending"}:
         raise CustomerAuthError("La vinculación aún no fue confirmada por el personal.", 409)
     customer = Customer.query.filter_by(id=enrollment.customer_id, business_id=enrollment.business_id).first()
@@ -189,7 +243,7 @@ def registration_options():
         user_display_name="Cliente J2M",
         challenge=challenge,
         authenticator_selection=AuthenticatorSelectionCriteria(
-            resident_key=ResidentKeyRequirement.PREFERRED,
+            resident_key=ResidentKeyRequirement.REQUIRED,
             user_verification=UserVerificationRequirement.REQUIRED,
         ),
         exclude_credentials=[PublicKeyCredentialDescriptor(id=item.credential_id) for item in existing],
@@ -202,6 +256,12 @@ def registration_options():
 
 def _create_customer_session(customer, credential):
     now = _now()
+    prior_customer = (
+        db.session.get(CustomerSession, session.get("customer_session_id"))
+        if session.get("customer_session_id") else None
+    )
+    if prior_customer and not prior_customer.revoked_at:
+        prior_customer.revoked_at = now
     for key in ("manager_session_id", "staff_session_id"):
         prior = db.session.get(StaffSession, session.get(key)) if session.get(key) else None
         if prior and not prior.revoked_at:
@@ -229,6 +289,8 @@ def _create_customer_session(customer, credential):
 
 
 def complete_registration(credential_payload):
+    if not isinstance(credential_payload, dict):
+        raise CustomerAuthError("La respuesta WebAuthn no es válida.")
     enrollment = _bound_enrollment(lock=False)
     if enrollment.status != "registration_pending" or not enrollment.webauthn_challenge:
         raise CustomerAuthError("La ceremonia de registro no está disponible.", 409)
@@ -258,7 +320,15 @@ def complete_registration(credential_payload):
     if not enrollment or enrollment.expires_at <= _now():
         db.session.rollback()
         raise CustomerAuthError("La ceremonia expiró antes de completarse.", 409)
-    customer = Customer.query.filter_by(id=enrollment.customer_id, business_id=enrollment.business_id).first()
+    try:
+        customer, _authorizer = _enrollment_authority(enrollment)
+    except CustomerAuthError:
+        if enrollment:
+            enrollment.status = "cancelled"
+            enrollment.webauthn_challenge = None
+            enrollment.pairing_code_hash = None
+            db.session.commit()
+        raise
     if enrollment.recovery_mode:
         now = _now()
         CustomerCredential.query.filter_by(business_id=customer.business_id, customer_id=customer.id, is_active=True).update({
@@ -332,6 +402,8 @@ def complete_authentication(business, credential_payload):
         raise CustomerAuthError("La autenticación ya está siendo procesada.", 409)
     db.session.commit()
     challenge = db.session.get(CustomerAuthChallenge, challenge.id)
+    if not isinstance(credential_payload, dict):
+        raise CustomerAuthError("La respuesta WebAuthn no es válida.")
     try:
         raw_id = base64url_to_bytes(credential_payload.get("id", ""))
     except Exception as exc:
@@ -351,10 +423,6 @@ def complete_authentication(business, credential_payload):
             require_user_verification=True,
         )
     except Exception as exc:
-        CustomerAuthChallenge.query.filter_by(
-            id=challenge.id, consumed_at=claimed_at,
-        ).update({CustomerAuthChallenge.consumed_at: None}, synchronize_session=False)
-        db.session.commit()
         raise CustomerAuthError("No fue posible autenticar la credencial.", 401) from exc
     credential.sign_count = verified.new_sign_count
     credential.last_used_at = _now()
@@ -400,12 +468,26 @@ def revoke_current_customer_session():
 
 def revoke_customer_access(*, staff, customer_id, reason):
     reason = reason.strip() if isinstance(reason, str) else ""
-    if not reason or len(reason) > 500 or not has_permission(staff, "authorize_customer_identity"):
+    if (not reason or len(reason) > 500 or not staff.is_active or not staff.web_access_enabled
+            or not staff.business or not staff.business.is_active
+            or not staff.business.web_access_enabled
+            or not has_permission(staff, "authorize_customer_identity")):
         raise CustomerAuthError("Se requiere autorización y un motivo válido.", 403)
     customer = Customer.query.filter_by(id=customer_id, business_id=staff.business_id).first()
     if not customer:
         raise CustomerAuthError("Cliente no encontrado.", 404)
     now = _now()
+    CustomerLinkingEnrollment.query.filter(
+        CustomerLinkingEnrollment.business_id == staff.business_id,
+        CustomerLinkingEnrollment.customer_id == customer.id,
+        CustomerLinkingEnrollment.status.in_((
+            "pending", "claimed", "approved", "registration_pending", "verifying",
+        )),
+    ).update({
+        CustomerLinkingEnrollment.status: "cancelled",
+        CustomerLinkingEnrollment.pairing_code_hash: None,
+        CustomerLinkingEnrollment.webauthn_challenge: None,
+    }, synchronize_session=False)
     CustomerCredential.query.filter_by(business_id=staff.business_id, customer_id=customer.id, is_active=True).update({
         CustomerCredential.is_active: False, CustomerCredential.revoked_at: now,
         CustomerCredential.revoked_reason: reason,

@@ -454,6 +454,14 @@ class MigrationTestCase(unittest.TestCase):
                     "customer_linking_enrollments", "customer_credentials",
                     "customer_sessions", "customer_auth_challenges", "customer_auth_audits",
                 } <= tables)
+                linking_columns = {
+                    row[1] for row in connection.execute(
+                        "PRAGMA table_info(customer_linking_enrollments)"
+                    )
+                }
+                self.assertTrue({
+                    "pairing_failed_attempts", "pairing_locked_at",
+                } <= linking_columns)
                 self.assertEqual(connection.execute(
                     "SELECT current_points, qr_code_token FROM customers WHERE id=1"
                 ).fetchone(), (31.0, "wallet-stable"))

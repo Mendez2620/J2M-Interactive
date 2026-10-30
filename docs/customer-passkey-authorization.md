@@ -13,15 +13,17 @@ Conocer teléfono, nombre, Customer ID, QR de lealtad, URL Wallet o una sesión 
 1. Staff activo del mismo negocio con `authorize_customer_identity` selecciona al Customer y documenta la comprobación humana.
 2. El servidor crea una autorización de cinco minutos y entrega una sola vez un secreto aleatorio. Solo se conserva su SHA-256.
 3. El dispositivo del cliente reclama el secreto por POST con CSRF. El servidor lo liga a ese navegador y muestra un código de emparejamiento de seis dígitos.
-4. Staff confirma en su sesión revocable que observa el mismo código. El código se protege con HMAC en la base.
-5. Solo ese navegador puede solicitar las opciones WebAuthn. El servidor exige verificación de usuario y valida challenge, origen, RP ID y respuesta criptográfica con `webauthn`.
+4. Staff confirma en su sesión revocable que observa el mismo código. El código se protege con HMAC en la base y dispone de un presupuesto persistente de intentos; al agotarlo la autorización se cancela.
+5. Solo ese navegador puede solicitar las opciones WebAuthn. El servidor exige verificación de usuario y una credencial descubrible (`residentKey=required`), y valida challenge, origen, RP ID y respuesta criptográfica con `webauthn`.
 6. El desafío se consume una vez y se crea una sesión de cliente independiente, revocable y tenant-scoped.
 
 El secreto no aparece en rutas ni logs. Interceptar solo el secreto no basta sin la confirmación presencial del emparejamiento; interceptar secreto y código durante la ventana sigue siendo un riesgo operativo, por lo que el personal debe confirmar el dispositivo frente al cliente.
 
 ## Sesiones, revocación y recuperación
 
-Las sesiones se validan en servidor contra Customer, Business, credencial activa, expiración absoluta e inactividad. La cookie Flask contiene identificadores y verificadores firmados, nunca claves privadas. Cerrar sesión, revocar una credencial o suspender el negocio bloquea el acceso.
+Las sesiones se validan en servidor contra Customer, Business, credencial activa, expiración absoluta e inactividad. La cookie Flask contiene identificadores y verificadores firmados, nunca claves privadas. Cerrar sesión, revocar una credencial o suspender el negocio bloquea el acceso. Cambiar de identidad en el mismo navegador revoca únicamente la sesión de Customer que ese navegador estaba utilizando; no revoca otros dispositivos legítimos.
+
+Cada desafío de autenticación es de un solo uso, incluso cuando la firma o el payload sean inválidos. Un reintento solicita un desafío nuevo y vuelve a consumir las cuotas persistentes. Los autenticadores que no admiten credenciales descubribles no pueden completar esta vinculación; la tarjeta ordinaria continúa disponible sin passkey.
 
 La recuperación no utiliza correo ni OTP: personal autorizado crea una nueva vinculación en modo recuperación. Al finalizar correctamente la nueva passkey se revocan las credenciales y sesiones anteriores en la misma transacción. Esto reduce el impacto de un dispositivo perdido, pero mantiene el riesgo humano de una autorización indebida; los negocios deben limitar el permiso, revisar auditorías y aplicar separación de funciones cuando sea posible.
 
@@ -32,14 +34,14 @@ Varias credenciales legítimas se admiten mediante vinculaciones adicionales nor
 - `WEBAUTHN_ORIGIN`: origen exacto HTTPS. En producción puede omitirse para usar `PUBLIC_BASE_URL`.
 - `WEBAUTHN_RP_ID`: dominio del RP, igual al host o sufijo registrable válido del origen.
 - `WEBAUTHN_RP_NAME`: nombre mostrado por el autenticador.
-- `CUSTOMER_LINKING_MAX_AGE`, `CUSTOMER_AUTH_CHALLENGE_MAX_AGE`.
+- `CUSTOMER_LINKING_MAX_AGE`, `CUSTOMER_LINKING_PAIRING_MAX_ATTEMPTS`, `CUSTOMER_AUTH_CHALLENGE_MAX_AGE`.
 - `CUSTOMER_SESSION_ABSOLUTE_SECONDS`, `CUSTOMER_SESSION_IDLE_SECONDS`.
 
 La validación de producción falla cerrada si origen y RP ID no son compatibles.
 
 ## 8C.3B2 pendiente
 
-La emisión pública de códigos/QR de cliente embajador permanece inexistente. La siguiente fase deberá exigir simultáneamente: sesión de cliente válida, credencial activa, consentimiento específico vigente, `ReferralParticipant` habilitado, negocio activo y programa de referidos activo. No se publicarán tokens de sesión en Wallet ni se modificarán pases existentes desde esta fase.
+La emisión pública de códigos/QR de cliente embajador permanece inexistente. También permanece bloqueada la habilitación: 8C.3B1 solo permite revocar una participación previamente existente, porque todavía no presenta ni firma un documento canónico de consentimiento versionado. La siguiente fase deberá exigir simultáneamente: sesión de cliente válida, credencial activa, aceptación positiva del texto vigente respaldado por el servidor, `ReferralParticipant` habilitado, negocio activo y programa de referidos activo. No se publicarán tokens de sesión en Wallet ni se modificarán pases existentes desde esta fase.
 
 ## Migración operativa futura
 

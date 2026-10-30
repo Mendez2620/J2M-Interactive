@@ -1,3 +1,5 @@
+import base64
+import hashlib
 import re
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -9,7 +11,7 @@ from sqlalchemy import text
 from app import create_app
 from app.extensions import db
 from app.models import (
-    Business, Customer, CustomerAuthAudit, CustomerCredential,
+    Business, Customer, CustomerAuthAudit, CustomerAuthChallenge, CustomerCredential,
     CustomerLinkingEnrollment, CustomerSession, ReferralParticipant, Staff,
     Transaction,
 )
@@ -80,6 +82,9 @@ class CustomerAuthPhase8C3B1TestCase(unittest.TestCase):
         approve_linking_enrollment(staff=self.staff, enrollment_id=enrollment.id, pairing_code=pairing)
         options = self.client.post("/customer-auth/enroll/options")
         self.assertEqual(options.status_code, 200)
+        self.assertEqual(
+            options.get_json()["authenticatorSelection"]["residentKey"], "required",
+        )
         with patch(
             "app.services.customer_auth_service.verify_registration_response",
             return_value=self._verified_registration(credential_id),
@@ -205,6 +210,109 @@ class CustomerAuthPhase8C3B1TestCase(unittest.TestCase):
         self.assertEqual(observed, [409])
         self.assertEqual(CustomerCredential.query.count(), 1)
 
+    def test_late_staff_business_and_customer_revocation_fail_closed(self):
+        enrollment, secret = create_linking_enrollment(
+            staff=self.staff, customer_id=self.customer.id,
+            human_check_note="Comprobación presencial documentada.",
+        )
+        claim = self.client.post("/customer-auth/enroll/claim", data={"linking_secret": secret})
+        pairing = re.search(r"tracking-widest\">(\d{6})<", claim.get_data(as_text=True)).group(1)
+        self.staff.web_access_enabled = False; db.session.commit()
+        with self.assertRaises(CustomerAuthError):
+            approve_linking_enrollment(staff=self.staff, enrollment_id=enrollment.id, pairing_code=pairing)
+
+        self.staff.web_access_enabled = True; db.session.commit()
+        enrollment, secret = create_linking_enrollment(
+            staff=self.staff, customer_id=self.customer.id,
+            human_check_note="Comprobación presencial documentada.",
+        )
+        claim = self.client.post("/customer-auth/enroll/claim", data={"linking_secret": secret})
+        pairing = re.search(r"tracking-widest\">(\d{6})<", claim.get_data(as_text=True)).group(1)
+        approve_linking_enrollment(staff=self.staff, enrollment_id=enrollment.id, pairing_code=pairing)
+        self.staff.permissions = "scanner_operate_web"; db.session.commit()
+        self.assertEqual(self.client.post("/customer-auth/enroll/options").status_code, 409)
+
+        self.staff.permissions = "authorize_customer_identity,scanner_operate_web"; db.session.commit()
+        enrollment, secret = create_linking_enrollment(
+            staff=self.staff, customer_id=self.customer.id,
+            human_check_note="Comprobación presencial documentada.",
+        )
+        claim = self.client.post("/customer-auth/enroll/claim", data={"linking_secret": secret})
+        pairing = re.search(r"tracking-widest\">(\d{6})<", claim.get_data(as_text=True)).group(1)
+        approve_linking_enrollment(staff=self.staff, enrollment_id=enrollment.id, pairing_code=pairing)
+        self.client.post("/customer-auth/enroll/options")
+
+        def revoke_during_verification(**_kwargs):
+            revoke_customer_access(
+                staff=self.staff, customer_id=self.customer.id,
+                reason="Revocación concurrente documentada.",
+            )
+            return self._verified_registration(b"must-not-exist")
+
+        with patch(
+            "app.services.customer_auth_service.verify_registration_response",
+            side_effect=revoke_during_verification,
+        ):
+            response = self.client.post("/customer-auth/enroll/complete", json={"id": "race"})
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(CustomerCredential.query.count(), 0)
+        db.session.refresh(enrollment)
+        self.assertEqual(enrollment.status, "cancelled")
+
+        enrollment2, secret2 = create_linking_enrollment(
+            staff=self.staff, customer_id=self.customer.id,
+            human_check_note="Comprobación presencial documentada.",
+        )
+        claim2 = self.client.post("/customer-auth/enroll/claim", data={"linking_secret": secret2})
+        pairing2 = re.search(r"tracking-widest\">(\d{6})<", claim2.get_data(as_text=True)).group(1)
+        approve_linking_enrollment(staff=self.staff, enrollment_id=enrollment2.id, pairing_code=pairing2)
+        self.business.is_active = False; db.session.commit()
+        self.assertEqual(self.client.post("/customer-auth/enroll/options").status_code, 409)
+
+    def test_pairing_attempt_budget_is_persistent_atomic_and_secret_free(self):
+        self.app.config["CUSTOMER_LINKING_PAIRING_MAX_ATTEMPTS"] = 2
+        enrollment, secret = create_linking_enrollment(
+            staff=self.staff, customer_id=self.customer.id,
+            human_check_note="Comprobación presencial documentada.",
+        )
+        claim = self.client.post("/customer-auth/enroll/claim", data={"linking_secret": secret})
+        pairing = re.search(r"tracking-widest\">(\d{6})<", claim.get_data(as_text=True)).group(1)
+        observed = []
+        comparisons = 0
+
+        def interleave(_supplied, _stored):
+            nonlocal comparisons
+            comparisons += 1
+            if comparisons == 1:
+                try:
+                    approve_linking_enrollment(
+                        staff=self.staff, enrollment_id=enrollment.id, pairing_code="111111",
+                    )
+                except CustomerAuthError as exc:
+                    observed.append(exc.status_code)
+            return False
+
+        with patch("app.services.customer_auth_service.hmac.compare_digest", side_effect=interleave):
+            with self.assertRaises(CustomerAuthError) as outer:
+                approve_linking_enrollment(
+                    staff=self.staff, enrollment_id=enrollment.id, pairing_code="222222",
+                )
+        observed.append(outer.exception.status_code)
+        db.session.refresh(enrollment)
+        self.assertEqual(sorted(observed), [409, 429])
+        self.assertEqual(enrollment.pairing_failed_attempts, 2)
+        self.assertEqual(enrollment.status, "cancelled")
+        self.assertIsNotNone(enrollment.pairing_locked_at)
+        with self.assertRaises(CustomerAuthError):
+            approve_linking_enrollment(
+                staff=self.staff, enrollment_id=enrollment.id, pairing_code=pairing,
+            )
+        audits = CustomerAuthAudit.query.filter(
+            CustomerAuthAudit.action.in_(("linking_pair_failed", "linking_pair_locked")),
+        ).all()
+        self.assertEqual(len(audits), 2)
+        self.assertTrue(all(pairing not in item.reason for item in audits))
+
     def test_authentication_session_expiry_revocation_and_shared_browser_rotation(self):
         self._enroll()
         first_session = CustomerSession.query.one()
@@ -219,6 +327,90 @@ class CustomerAuthPhase8C3B1TestCase(unittest.TestCase):
         active.expires_at = self._now() - timedelta(seconds=1); db.session.commit()
         self.assertEqual(self.client.get(f"/customer-auth/portal/{self.business.slug}/security").status_code, 302)
         self.assertIsNotNone(first_session.revoked_at)
+
+    def test_switching_customer_in_same_browser_revokes_only_that_prior_session(self):
+        self._enroll(b"credential-a")
+        session_a = CustomerSession.query.filter_by(revoked_at=None).one()
+        old_cookie = self.client.get_cookie("session").value
+        other_device_session = CustomerSession(
+            id="other-device-session", business_id=self.business.id,
+            customer_id=self.customer.id,
+            credential_id=session_a.credential_id,
+            verifier_hash=hashlib.sha256(b"other-device-verifier").hexdigest(),
+            expires_at=self._now() + timedelta(hours=1), last_active_at=self._now(),
+        )
+        customer_b = Customer(
+            business_id=self.business.id, full_name="Cliente B", phone="+525500000099",
+            qr_code_token="wallet-stable-b",
+        )
+        db.session.add(customer_b); db.session.flush()
+        credential_b = CustomerCredential(
+            business_id=self.business.id, customer_id=customer_b.id,
+            credential_id=b"credential-b", public_key=b"public-b", sign_count=0,
+        )
+        db.session.add_all([credential_b, other_device_session]); db.session.commit()
+        self.client.post(f"/customer-auth/login/{self.business.slug}/options")
+        encoded_b = base64.urlsafe_b64encode(b"credential-b").decode().rstrip("=")
+        with patch(
+            "app.services.customer_auth_service.verify_authentication_response",
+            return_value=SimpleNamespace(new_sign_count=1),
+        ):
+            response = self.client.post(
+                f"/customer-auth/login/{self.business.slug}/complete", json={"id": encoded_b},
+            )
+        self.assertEqual(response.status_code, 200)
+        db.session.refresh(session_a); db.session.refresh(other_device_session)
+        self.assertIsNotNone(session_a.revoked_at)
+        self.assertIsNone(other_device_session.revoked_at)
+        with self.client.session_transaction() as browser:
+            current_id = browser.get("customer_session_id")
+        self.assertEqual(db.session.get(CustomerSession, current_id).customer_id, customer_b.id)
+        replay = self.app.test_client()
+        replay.set_cookie("session", old_cookie, domain="localhost")
+        self.assertEqual(
+            replay.get(f"/customer-auth/portal/{self.business.slug}/security").status_code, 302,
+        )
+
+    def test_authentication_challenges_are_single_use_and_payloads_are_controlled(self):
+        self._enroll(b"challenge-credential")
+        self.client.post("/customer-auth/logout")
+        encoded = base64.urlsafe_b64encode(b"challenge-credential").decode().rstrip("=")
+        self.client.post(f"/customer-auth/login/{self.business.slug}/options")
+        challenge = CustomerAuthChallenge.query.order_by(CustomerAuthChallenge.created_at.desc()).first()
+        with patch(
+            "app.services.customer_auth_service.verify_authentication_response",
+            side_effect=ValueError("invalid signature"),
+        ) as verifier:
+            invalid = self.client.post(
+                f"/customer-auth/login/{self.business.slug}/complete", json={"id": encoded},
+            )
+        self.assertEqual(invalid.status_code, 401)
+        db.session.refresh(challenge)
+        self.assertIsNotNone(challenge.consumed_at)
+        replay = self.client.post(
+            f"/customer-auth/login/{self.business.slug}/complete", json={"id": encoded},
+        )
+        self.assertEqual(replay.status_code, 409)
+        self.assertEqual(verifier.call_count, 1)
+
+        self.client.post(f"/customer-auth/login/{self.business.slug}/options")
+        malformed = self.client.post(
+            f"/customer-auth/login/{self.business.slug}/complete", json=["unexpected"],
+        )
+        self.assertEqual(malformed.status_code, 400)
+        latest = CustomerAuthChallenge.query.order_by(CustomerAuthChallenge.created_at.desc()).first()
+        self.assertIsNotNone(latest.consumed_at)
+
+        self.client.post(f"/customer-auth/login/{self.business.slug}/options")
+        latest = CustomerAuthChallenge.query.order_by(CustomerAuthChallenge.created_at.desc()).first()
+        latest.expires_at = self._now() - timedelta(seconds=1); db.session.commit()
+        expired = self.client.post(
+            f"/customer-auth/login/{self.business.slug}/complete", json={"id": encoded},
+        )
+        self.assertEqual(expired.status_code, 409)
+        self.assertEqual(
+            self.client.post("/customer-auth/enroll/complete", json=["bad"]).status_code, 400,
+        )
 
     def test_assisted_recovery_revokes_old_credentials_and_sessions(self):
         self._enroll(b"old-credential")
@@ -264,17 +456,22 @@ class CustomerAuthPhase8C3B1TestCase(unittest.TestCase):
                 "reason": "Participación voluntaria del cliente.",
             }, headers={"Idempotency-Key": "customer-consent-1"},
         )
-        self.assertEqual(consent.status_code, 200)
-        self.assertNotIn("invitation_code", consent.get_json())
-        participant = ReferralParticipant.query.one()
-        self.assertTrue(participant.is_enabled)
+        self.assertEqual(consent.status_code, 409)
+        self.assertEqual(ReferralParticipant.query.count(), 0)
+        participant = ReferralParticipant(
+            business_id=self.business.id, participant_type="customer_ambassador",
+            customer_id=self.customer.id, invitation_code="historical-customer-code",
+            is_enabled=True, consent_version="historical-v1",
+            consented_at=self._now(), consent_evidence_hash="a" * 64,
+        )
+        db.session.add(participant); db.session.commit()
         revoked = self.client.post(
             f"/customer-auth/portal/{self.business.slug}/ambassador-consent",
             json={"enabled": False, "reason": "Retiro voluntario."},
             headers={"Idempotency-Key": "customer-consent-2"},
         )
         self.assertEqual(revoked.status_code, 200)
-        self.assertFalse(ReferralParticipant.query.one().is_enabled)
+        self.assertFalse(participant.is_enabled)
         self.business.referrals_enabled = False; self.business.is_active = False; db.session.commit()
         self.assertEqual(self.client.get(f"/customer-auth/portal/{self.business.slug}/security").status_code, 302)
 
