@@ -100,6 +100,19 @@ def create_app(config_name=None):
                 or parsed_public_url.password or parsed_public_url.query
                 or parsed_public_url.fragment or parsed_public_url.path not in {"", "/"}):
             raise RuntimeError("PUBLIC_BASE_URL debe utilizar HTTPS en producción.")
+        webauthn_origin = (app.config.get("WEBAUTHN_ORIGIN") or public_base_url).rstrip("/")
+        parsed_webauthn = urlparse(webauthn_origin)
+        webauthn_rp_id = (app.config.get("WEBAUTHN_RP_ID") or parsed_webauthn.hostname or "").strip()
+        if (parsed_webauthn.scheme != "https" or not parsed_webauthn.hostname
+                or parsed_webauthn.username or parsed_webauthn.password
+                or parsed_webauthn.query or parsed_webauthn.fragment
+                or parsed_webauthn.path not in {"", "/"}
+                or not webauthn_rp_id
+                or (webauthn_rp_id != parsed_webauthn.hostname
+                    and not parsed_webauthn.hostname.endswith(f".{webauthn_rp_id}"))):
+            raise RuntimeError("WEBAUTHN_ORIGIN y WEBAUTHN_RP_ID deben definir un origen HTTPS compatible.")
+        app.config["WEBAUTHN_ORIGIN"] = webauthn_origin
+        app.config["WEBAUTHN_RP_ID"] = webauthn_rp_id
         proxy_count = app.config.get("TRUSTED_PROXY_COUNT", 0)
         if proxy_count < 0 or proxy_count > 10:
             raise RuntimeError("TRUSTED_PROXY_COUNT debe estar entre 0 y 10.")
@@ -154,7 +167,8 @@ def create_app(config_name=None):
         protected_recovery_path = request.path.startswith("/recover/")
         protected_join_path = request.path.startswith("/join/")
         protected_promoter_path = request.path.startswith("/promoter/")
-        if app.config.get("CSRF_ENABLED", True) and request.method in {"POST", "PUT", "PATCH", "DELETE"} and (request.path.startswith("/admin") or protected_manager_path or protected_staff_path or protected_recovery_path or protected_join_path or protected_promoter_path):
+        protected_customer_auth_path = request.path.startswith("/customer-auth/")
+        if app.config.get("CSRF_ENABLED", True) and request.method in {"POST", "PUT", "PATCH", "DELETE"} and (request.path.startswith("/admin") or protected_manager_path or protected_staff_path or protected_recovery_path or protected_join_path or protected_promoter_path or protected_customer_auth_path):
             if not validate_csrf():
                 if not wants_json() and request.path in {"/staff/logout", "/manager/logout", "/promoter/logout"}:
                     if request.path == "/promoter/logout":
@@ -222,7 +236,7 @@ def create_app(config_name=None):
         if request.path == "/staff-access":
             response.headers["Cache-Control"] = "no-store, private"
             response.headers["Pragma"] = "no-cache"
-        elif request.path.startswith(("/admin", "/manager", "/staff", "/recover", "/api/scanner", "/api/web-scanner")):
+        elif request.path.startswith(("/admin", "/manager", "/staff", "/recover", "/customer-auth", "/api/scanner", "/api/web-scanner")):
             response.headers.setdefault("Cache-Control", "no-store")
         duration_ms = round((time.perf_counter() - getattr(g, "request_started_at", time.perf_counter())) * 1000, 2)
         if app.config.get("LOG_REQUESTS"):

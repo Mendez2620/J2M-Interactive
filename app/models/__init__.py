@@ -28,6 +28,10 @@ from app.models.referral_incentive import (
 )
 from app.models.referral_participant import ReferralParticipant, ReferralParticipantAudit
 from app.models.referral_program import ReferralProgramAudit
+from app.models.customer_auth import (
+    CustomerAuthAudit, CustomerAuthChallenge, CustomerCredential,
+    CustomerLinkingEnrollment, CustomerSession,
+)
 
 __all__ = [
     "db",
@@ -54,4 +58,6 @@ __all__ = [
     "ReferralIncentiveRule", "ReferralIncentiveRuleAudit", "ReferralIncentiveRecord",
     "ReferralParticipant", "ReferralParticipantAudit",
     "ReferralProgramAudit",
+    "CustomerAuthAudit", "CustomerAuthChallenge", "CustomerCredential",
+    "CustomerLinkingEnrollment", "CustomerSession",
 ]

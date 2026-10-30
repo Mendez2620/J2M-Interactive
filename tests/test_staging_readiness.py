@@ -15,7 +15,7 @@ from app.staging_preflight import _https_endpoint_url
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_HEAD = "4e5f6a7b8c9d"
+EXPECTED_HEAD = "5f6a7b8c9d0e"
 
 
 class StagingReadinessTestCase(unittest.TestCase):
@@ -226,6 +226,21 @@ class StagingReadinessTestCase(unittest.TestCase):
             )).scalar()
             self.assertIsNotNone(index_definition)
             self.assertIn("lower((email)::text)", index_definition.lower())
+            protected = connection.execute(text(
+                "SELECT relname, relrowsecurity FROM pg_class "
+                "WHERE relname = ANY(:tables) ORDER BY relname"
+            ), {"tables": [
+                "customer_auth_audits", "customer_auth_challenges",
+                "customer_credentials", "customer_linking_enrollments",
+                "customer_sessions",
+            ]}).all()
+            self.assertEqual(len(protected), 5)
+            self.assertTrue(all(row.relrowsecurity for row in protected))
+            self.assertEqual(connection.execute(text(
+                "SELECT COUNT(*) FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid "
+                "WHERE c.relname='customer_auth_audits' "
+                "AND t.tgname='trg_customer_auth_audits_append_only' AND NOT t.tgisinternal"
+            )).scalar(), 1)
         with engine.begin() as connection:
             connection.execute(text(
                 "INSERT INTO referral_participants (business_id, participant_type, staff_id, invitation_code, created_at, updated_at) VALUES (1, 'staff', 1, 'postgres-direct-default', now(), now())"
