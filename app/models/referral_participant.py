@@ -45,7 +45,7 @@ class ReferralParticipant(db.Model):
             name="ck_referral_participant_identity",
         ),
         db.CheckConstraint(
-            "participant_type != 'customer_ambassador' OR "
+            "participant_type != 'customer_ambassador' OR NOT is_enabled OR "
             "(consent_version IS NOT NULL AND consented_at IS NOT NULL AND consent_evidence_hash IS NOT NULL)",
             name="ck_referral_participant_customer_consent",
         ),
@@ -122,3 +122,30 @@ class ReferralParticipantAudit(db.Model):
 @event.listens_for(ReferralParticipantAudit, "before_delete")
 def _participant_audit_append_only(_mapper, _connection, _target):
     raise ValueError("El historial de participantes de referidos es append-only.")
+
+
+class CustomerReferralActivation(db.Model):
+    """One-use, low-assurance capability delivered inside a Wallet pass."""
+
+    __tablename__ = "customer_referral_activations"
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    business_id = db.Column(db.Integer, nullable=False, index=True)
+    participant_id = db.Column(db.Integer, nullable=False, index=True)
+    token_hash = db.Column(db.String(64), nullable=False, unique=True, index=True)
+    expires_at = db.Column(db.DateTime, nullable=False, index=True)
+    consumed_at = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=_utcnow)
+
+    __table_args__ = (
+        db.ForeignKeyConstraint(
+            ["business_id", "participant_id"],
+            ["referral_participants.business_id", "referral_participants.id"],
+            ondelete="RESTRICT", name="fk_customer_referral_activation_participant_tenant",
+        ),
+        db.UniqueConstraint(
+            "business_id", "id", name="uq_customer_referral_activation_business_id_id",
+        ),
+    )
+
+    participant = db.relationship("ReferralParticipant")

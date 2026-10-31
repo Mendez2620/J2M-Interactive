@@ -3,14 +3,15 @@
 import hashlib
 import json
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.exc import IntegrityError
 
 from app.extensions import db
 from app.models import (
-    Business, Customer, Promoter, ReferralAttribution, ReferralEligibility,
-    ReferralParticipant, ReferralParticipantAudit, Staff,
+    Business, Customer, CustomerReferralActivation, Promoter,
+    ReferralAttribution, ReferralEligibility, ReferralParticipant,
+    ReferralParticipantAudit, Staff,
 )
 from app.permissions import has_permission
 
@@ -228,6 +229,208 @@ def configure_customer_ambassador(*, customer, enabled, consent_version,
                 _historical_state(winner),
             )
         raise ReferralParticipantError("El cambio entró en conflicto con otra solicitud.", 409) from exc
+    return participant, False, json.loads(_snapshot(participant))
+
+
+def ensure_customer_invitation(customer):
+    """Return the customer's referral identity, creating an inactive shell.
+
+    The shell only carries a random public attribution identifier. It grants no
+    account access and cannot resolve as a referral until explicit consent has
+    enabled it. The caller owns the surrounding transaction.
+    """
+    participant = ReferralParticipant.query.filter_by(
+        business_id=customer.business_id, customer_id=customer.id,
+    ).first()
+    if participant:
+        return participant
+    participant = ReferralParticipant(
+        business_id=customer.business_id,
+        participant_type="customer_ambassador",
+        customer_id=customer.id,
+        invitation_code=secrets.token_urlsafe(24),
+        is_enabled=False,
+    )
+    db.session.add(participant)
+    db.session.flush()
+    return participant
+
+
+def ensure_customer_invitation_persisted(customer):
+    """Idempotently provision the non-privileged Wallet invitation identity."""
+    try:
+        participant = ensure_customer_invitation(customer)
+        db.session.commit()
+        return participant
+    except IntegrityError:
+        db.session.rollback()
+        participant = ReferralParticipant.query.filter_by(
+            business_id=customer.business_id, customer_id=customer.id,
+        ).first()
+        if participant:
+            return participant
+        raise
+
+
+def prepare_customer_wallet_invitation(customer):
+    """Persist a Wallet URL without turning the public invite into authority.
+
+    Consented customers receive the public sharing URL. A dormant customer gets
+    a separate, one-use activation capability whose raw value is returned only
+    to the pass builder; the database retains only its SHA-256 digest.
+    """
+    from flask import current_app
+
+    participant = ensure_customer_invitation_persisted(customer)
+    if participant.revoked_at is not None:
+        db.session.commit()
+        return participant, None
+    base = str(current_app.config.get("PUBLIC_BASE_URL") or "").rstrip("/")
+    if participant.currently_eligible():
+        db.session.commit()
+        url = f"{base}/invite/{participant.invitation_code}" if base else None
+        customer._referral_wallet_invitation_url = url
+        return participant, url
+    raw_token = secrets.token_urlsafe(32)
+    activation = CustomerReferralActivation(
+        business_id=participant.business_id,
+        participant_id=participant.id,
+        token_hash=hashlib.sha256(raw_token.encode()).hexdigest(),
+        expires_at=datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(
+            seconds=current_app.config["REFERRAL_ACTIVATION_MAX_AGE"]
+        ),
+    )
+    db.session.add(activation)
+    db.session.commit()
+    url = f"{base}/invite/activate/{raw_token}" if base else None
+    customer._referral_wallet_invitation_url = url
+    return participant, url
+
+
+def resolve_customer_activation(token, *, lock=False):
+    if not isinstance(token, str) or not 32 <= len(token) <= 64:
+        return None
+    digest = hashlib.sha256(token.encode()).hexdigest()
+    query = CustomerReferralActivation.query.filter_by(token_hash=digest)
+    activation = query.with_for_update().one_or_none() if lock else query.one_or_none()
+    if not activation or not activation.participant:
+        return None
+    return activation
+
+
+def prepare_customer_invitation_consent(*, customer, consent_version, consent_text,
+                                        evidence_context, request_id):
+    """Create and explicitly enable a new customer's invitation in caller transaction."""
+    participant = ensure_customer_invitation(customer)
+    if participant.consented_at or participant.revoked_at:
+        raise ReferralParticipantError("La participación ya tiene historial.", 409)
+    version = consent_version.strip() if isinstance(consent_version, str) else ""
+    text = consent_text.strip() if isinstance(consent_text, str) else ""
+    if not version or len(version) > 32 or not text:
+        raise ReferralParticipantError("El consentimiento configurado no es válido.", 500)
+    evidence_hash = hashlib.sha256(json.dumps({
+        "version": version,
+        "text_hash": hashlib.sha256(text.encode()).hexdigest(),
+        "context": str(evidence_context),
+    }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    previous = _snapshot(participant)
+    participant.consent_version = version
+    participant.consented_at = _utcnow()
+    participant.consent_evidence_hash = evidence_hash
+    participant.is_enabled = True
+    fingerprint = _mutation_fingerprint(
+        business_id=customer.business_id, subject_type="customer",
+        subject_id=customer.id, actor_type="registration_context",
+        actor_id=customer.id, action="customer_ambassador_consented",
+        reason="Aceptación opcional durante el registro.",
+        consent_version=version, consent_evidence_hash=evidence_hash,
+    )
+    _audit(
+        participant, "registration_context", customer.id,
+        "customer_ambassador_consented", "Aceptación opcional durante el registro.",
+        _request(request_id), previous, fingerprint,
+    )
+    return participant
+
+
+def consent_customer_invitation(*, activation, consent_version, consent_text,
+                                evidence_context, request_id):
+    """Consume a Wallet-only capability and enable a dormant invitation.
+
+    Possession of the capability is deliberately only a low-assurance consent
+    context. This operation cannot revoke participation or authorize any private
+    customer/economic operation.
+    """
+    participant = ReferralParticipant.query.filter_by(
+        business_id=activation.business_id, id=activation.participant_id,
+    ).with_for_update().one()
+    request_id = _request(request_id)
+    if participant.participant_type != "customer_ambassador" or not participant.customer:
+        raise ReferralParticipantError("La invitación no es válida.", 404)
+    version = consent_version.strip() if isinstance(consent_version, str) else ""
+    text = consent_text.strip() if isinstance(consent_text, str) else ""
+    if not version or len(version) > 32 or not text:
+        raise ReferralParticipantError("El consentimiento configurado no es válido.", 500)
+    evidence_hash = hashlib.sha256(json.dumps({
+        "version": version,
+        "text_hash": hashlib.sha256(text.encode()).hexdigest(),
+        "context": str(evidence_context),
+    }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    fingerprint = _mutation_fingerprint(
+        business_id=participant.business_id,
+        subject_type="customer",
+        subject_id=participant.customer_id,
+        actor_type="wallet_activation_context",
+        actor_id=participant.customer_id,
+        action="customer_ambassador_consented",
+        reason="Aceptación de baja confianza desde una capacidad de Wallet de un solo uso.",
+        consent_version=version,
+        consent_evidence_hash=evidence_hash,
+    )
+    existing = ReferralParticipantAudit.query.filter_by(
+        business_id=participant.business_id, request_id=request_id,
+    ).first()
+    if existing:
+        if existing.request_fingerprint != fingerprint:
+            raise ReferralParticipantError("El identificador ya se utilizó para otro cambio.", 409)
+        return participant, True, _historical_state(existing)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    if (activation.consumed_at is not None or activation.expires_at <= now
+            or activation.business_id != participant.business_id):
+        raise ReferralParticipantError("La capacidad de activación venció o ya fue utilizada.", 410)
+    if participant.revoked_at is not None or participant.consented_at is not None:
+        raise ReferralParticipantError("La invitación no puede activarse.", 409)
+    business = participant.customer.business
+    if not business.is_active or not business.referrals_enabled:
+        raise ReferralParticipantError("El programa de referidos no está disponible.", 409)
+    previous = _snapshot(participant)
+    participant.consent_version = version
+    participant.consented_at = _utcnow()
+    participant.consent_evidence_hash = evidence_hash
+    participant.is_enabled = True
+    participant.revoked_at = None
+    activation.consumed_at = now
+    _audit(
+        participant, "wallet_activation_context", participant.customer_id,
+        "customer_ambassador_consented",
+        "Aceptación de baja confianza desde una capacidad de Wallet de un solo uso.",
+        request_id, previous, fingerprint,
+    )
+    try:
+        db.session.commit()
+    except IntegrityError as exc:
+        db.session.rollback()
+        winner = ReferralParticipantAudit.query.filter_by(
+            business_id=participant.business_id, request_id=request_id,
+        ).first()
+        if winner and winner.request_fingerprint == fingerprint:
+            return (
+                db.session.get(ReferralParticipant, winner.participant_id), True,
+                _historical_state(winner),
+            )
+        raise ReferralParticipantError(
+            "La activación entró en conflicto con otra solicitud.", 409,
+        ) from exc
     return participant, False, json.loads(_snapshot(participant))
 
 

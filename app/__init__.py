@@ -168,7 +168,8 @@ def create_app(config_name=None):
         protected_join_path = request.path.startswith("/join/")
         protected_promoter_path = request.path.startswith("/promoter/")
         protected_customer_auth_path = request.path.startswith("/customer-auth/")
-        if app.config.get("CSRF_ENABLED", True) and request.method in {"POST", "PUT", "PATCH", "DELETE"} and (request.path.startswith("/admin") or protected_manager_path or protected_staff_path or protected_recovery_path or protected_join_path or protected_promoter_path or protected_customer_auth_path):
+        protected_invitation_path = request.path.startswith("/invite/")
+        if app.config.get("CSRF_ENABLED", True) and request.method in {"POST", "PUT", "PATCH", "DELETE"} and (request.path.startswith("/admin") or protected_manager_path or protected_staff_path or protected_recovery_path or protected_join_path or protected_promoter_path or protected_customer_auth_path or protected_invitation_path):
             if not validate_csrf():
                 if not wants_json() and request.path in {"/staff/logout", "/manager/logout", "/promoter/logout"}:
                     if request.path == "/promoter/logout":

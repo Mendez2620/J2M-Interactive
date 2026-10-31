@@ -149,6 +149,23 @@ class GoogleWalletService:
                     f"{customer.current_stamps} / {customer.business.stamps_reward_limit}"}}
         return {"label": customer.business.wallet_balance_label or "Puntos", "balance": {"string": f"{customer.current_points:.0f} pts"}}
 
+    def _invitation_url(self, customer):
+        from app.models import ReferralParticipant
+        base = str(self._config("PUBLIC_BASE_URL", "") or "").rstrip("/")
+        parsed = urlparse(base)
+        if parsed.scheme != "https" or not parsed.netloc:
+            return None
+        participant = ReferralParticipant.query.filter_by(
+            business_id=customer.business_id,
+            customer_id=customer.id,
+            participant_type="customer_ambassador",
+        ).first()
+        if not participant or participant.revoked_at is not None:
+            return None
+        if participant.currently_eligible():
+            return f"{base}/invite/{participant.invitation_code}"
+        return getattr(customer, "_referral_wallet_invitation_url", None)
+
     def create_loyalty_object(self, customer):
         self._require_enabled()
         business = customer.business
@@ -168,6 +185,17 @@ class GoogleWalletService:
             result["textModulesData"].append({"id": "terms", "header": "Términos", "body": business.wallet_terms})
         if business.wallet_contact:
             result["textModulesData"].append({"id": "contact", "header": "Contacto", "body": business.wallet_contact})
+        invitation_url = self._invitation_url(customer)
+        if invitation_url:
+            result["appLinkData"] = {
+                "webAppLinkInfo": {"appTarget": {"targetUri": {
+                    "uri": invitation_url,
+                    "description": "Invitación personal del programa de referidos",
+                }}},
+                "displayText": {"defaultValue": {
+                    "language": "es-419", "value": "Invitar amigos",
+                }},
+            }
         return result
 
     def _request(self, method, resource, *, body=None):
