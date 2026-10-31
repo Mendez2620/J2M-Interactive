@@ -1,9 +1,13 @@
 import hashlib
 import hmac
+import io
 import secrets
 from datetime import date, datetime, timezone
+from urllib.parse import quote
 
-from flask import Blueprint, current_app, jsonify, render_template, request, session, url_for
+import qrcode
+from flask import (Blueprint, current_app, g, jsonify, redirect, render_template,
+                   request, send_file, session, url_for)
 from sqlalchemy.exc import IntegrityError
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
@@ -14,11 +18,23 @@ from app.phone_numbers import normalize_phone
 from app.routes.customer_recovery import _reserve_rate_limit
 from app.wallet_access import issue_wallet_token
 from app.services.referral_participant_service import (
-    create_pending_attribution, resolve_invitation,
+    ReferralParticipantError, consent_customer_invitation,
+    create_pending_attribution, ensure_customer_invitation,
+    prepare_customer_invitation_consent, resolve_customer_activation,
+    resolve_invitation,
 )
 
 business_bp = Blueprint("business", __name__)
 _WALLET_DELIVERY_SESSION_KEY = "customer_wallet_delivery"
+
+
+@business_bp.after_request
+def protect_public_invitation_responses(response):
+    if request.path.startswith("/invite/"):
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["X-Robots-Tag"] = "noindex, nofollow"
+    return response
 
 
 def _utcnow():
@@ -85,6 +101,11 @@ def _wallet_delivery_payload(business, customer, credential):
 def _legal_document_hash(template_name, version):
     source, _, _ = current_app.jinja_loader.get_source(current_app.jinja_env, template_name)
     return hashlib.sha256(f"{version}\0{source}".encode()).hexdigest()
+
+
+def _public_url(path):
+    base = (current_app.config.get("PUBLIC_BASE_URL") or request.url_root.rstrip("/")).rstrip("/")
+    return f"{base}{path}"
 
 
 def _referral_serializer():
@@ -198,7 +219,11 @@ def join_business(slug):
     if not business.is_active:
         if request.method == "POST":
             return jsonify({"status": "error", "message": "El servicio para este negocio se encuentra temporalmente suspendido."}), 403
-        return render_template("join.html", business=business)
+        return render_template(
+            "join.html", business=business,
+            referral_consent_text=current_app.config["REFERRAL_CONSENT_TEXT"],
+            referral_consent_version=current_app.config["REFERRAL_CONSENT_VERSION"],
+        )
     if request.method == "GET":
         referral_code = (request.args.get("ref") or "").strip()
         participant = resolve_invitation(business_id=business.id, code=referral_code)
@@ -218,6 +243,8 @@ def join_business(slug):
             referral_context=_referral_context(participant) if participant else "",
             terms_version=current_app.config["TERMS_VERSION"],
             privacy_version=current_app.config["PRIVACY_NOTICE_VERSION"],
+            referral_consent_text=current_app.config["REFERRAL_CONSENT_TEXT"],
+            referral_consent_version=current_app.config["REFERRAL_CONSENT_VERSION"],
             wallet_delivery_url=wallet_delivery_url,
             wallet_delivery_end_url=url_for("business.end_wallet_delivery", slug=business.slug),
         )
@@ -273,6 +300,15 @@ def join_business(slug):
             return jsonify({"status": "error", "message": "No fue posible completar el registro. Solicita asistencia al negocio."}), 409
         db.session.add(customer)
         db.session.flush()
+        ensure_customer_invitation(customer)
+        if _truthy(data.get("referral_consent")):
+            prepare_customer_invitation_consent(
+                customer=customer,
+                consent_version=current_app.config["REFERRAL_CONSENT_VERSION"],
+                consent_text=current_app.config["REFERRAL_CONSENT_TEXT"],
+                evidence_context=f"registration:{ip_hash}:{ua_hash}",
+                request_id=g.request_id,
+            )
         db.session.add(CustomerRegistrationIdentityClaim(
             business_id=business.id, identity_type="phone",
             identity_hash=phone_hash, customer_id=customer.id,
@@ -308,6 +344,133 @@ def join_business(slug):
     payload = _wallet_delivery_payload(business, customer, credential)
     payload["message"] = "Tarjeta creada."
     return jsonify(payload), 201
+
+
+def _public_invitation(code, *, lock=False):
+    if not isinstance(code, str) or not 20 <= len(code) <= 48:
+        return None
+    query = ReferralParticipant.query.filter_by(
+        invitation_code=code, participant_type="customer_ambassador",
+    )
+    participant = query.with_for_update().one_or_none() if lock else query.one_or_none()
+    if not participant or not participant.customer or not participant.customer.business:
+        return None
+    return participant
+
+
+@business_bp.get("/invite/<code>")
+def customer_invitation(code):
+    participant = _public_invitation(code)
+    if not participant:
+        return render_template("customer_invitation.html", invalid=True), 404
+    business = participant.customer.business
+    active = bool(
+        business.is_active and business.referrals_enabled
+        and participant.revoked_at is None
+    )
+    share_enabled = bool(active and participant.currently_eligible())
+    join_url = _public_url(url_for("business.join_business", slug=business.slug, ref=code))
+    response = render_template(
+        "customer_invitation.html", invalid=False, business=business,
+        invitation_code=code,
+        share_enabled=share_enabled, can_consent=False,
+        join_url=join_url,
+        whatsapp_url=f"https://wa.me/?text={quote(join_url, safe='')}",
+    )
+    return response, 200
+
+
+@business_bp.get("/invite/activate/<token>")
+def customer_referral_activation(token):
+    activation = resolve_customer_activation(token)
+    if not activation:
+        return render_template("customer_referral_activation.html", invalid=True), 404
+    participant = activation.participant
+    business = participant.customer.business
+    if activation.consumed_at is not None and participant.currently_eligible():
+        return redirect(url_for("business.customer_invitation", code=participant.invitation_code))
+    available = bool(
+        activation.consumed_at is None
+        and activation.expires_at > _utcnow()
+        and business.is_active and business.referrals_enabled
+        and participant.revoked_at is None and participant.consented_at is None
+        and not participant.is_enabled
+    )
+    return render_template(
+        "customer_referral_activation.html", invalid=False, business=business,
+        token=token, available=available,
+        consent_version=current_app.config["REFERRAL_CONSENT_VERSION"],
+        consent_text=current_app.config["REFERRAL_CONSENT_TEXT"],
+        request_id=secrets.token_hex(16),
+    )
+
+
+@business_bp.post("/invite/activate/<token>")
+def consent_customer_invitation_route(token):
+    if not _truthy(request.form.get("referral_consent")):
+        return jsonify({"status": "error", "message": "Debes aceptar las condiciones de referidos."}), 400
+    activation = resolve_customer_activation(token)
+    if not activation:
+        return render_template("customer_referral_activation.html", invalid=True), 404
+    participant = activation.participant
+    business = participant.customer.business
+    ip_hash = _hmac(request.remote_addr or "unknown", "referral-public-consent-ip")
+    allowed = _reserve_rate_limit(
+        "ref_public", business.id, ip_hash,
+        current_app.config["REFERRAL_PUBLIC_MUTATION_LIMIT"], _utcnow(),
+        current_app.config["REGISTRATION_RATE_WINDOW"],
+    )
+    db.session.commit()
+    if not allowed:
+        return render_template(
+            "customer_referral_activation.html", invalid=False, business=business,
+            token=token, available=False,
+            error="Demasiados intentos. Intenta nuevamente más tarde.",
+        ), 429
+    activation = resolve_customer_activation(token, lock=True)
+    if not activation:
+        db.session.rollback()
+        return render_template("customer_referral_activation.html", invalid=True), 404
+    participant = activation.participant
+    if activation.consumed_at is not None and participant.currently_eligible():
+        db.session.rollback()
+        return redirect(url_for("business.customer_invitation", code=participant.invitation_code))
+    try:
+        consent_customer_invitation(
+            activation=activation,
+            consent_version=current_app.config["REFERRAL_CONSENT_VERSION"],
+            consent_text=current_app.config["REFERRAL_CONSENT_TEXT"],
+            evidence_context=f"wallet-activation:{request.form.get('request_id', '')}",
+            request_id=request.form.get("request_id", ""),
+        )
+    except ReferralParticipantError as exc:
+        db.session.rollback()
+        return render_template(
+            "customer_referral_activation.html", invalid=False, business=business,
+            token=token, available=False, error=str(exc),
+        ), exc.status_code
+    return redirect(url_for("business.customer_invitation", code=participant.invitation_code))
+
+
+@business_bp.get("/invite/<code>/qr.png")
+def customer_invitation_qr(code):
+    participant = _public_invitation(code)
+    if not participant or not participant.currently_eligible():
+        return "", 404
+    business = participant.customer.business
+    if not business.is_active or not business.referrals_enabled:
+        return "", 404
+    join_url = _public_url(url_for(
+        "business.join_business", slug=business.slug, ref=code,
+    ))
+    image = qrcode.make(join_url)
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    output.seek(0)
+    response = send_file(output, mimetype="image/png", max_age=300)
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
 
 
 @business_bp.get("/join/<slug>/wallet-delivery")

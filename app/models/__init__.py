@@ -26,7 +26,9 @@ from app.models.promoter import (
 from app.models.referral_incentive import (
     ReferralIncentiveRecord, ReferralIncentiveRule, ReferralIncentiveRuleAudit,
 )
-from app.models.referral_participant import ReferralParticipant, ReferralParticipantAudit
+from app.models.referral_participant import (
+    CustomerReferralActivation, ReferralParticipant, ReferralParticipantAudit,
+)
 from app.models.referral_program import ReferralProgramAudit
 from app.models.customer_auth import (
     CustomerAuthAudit, CustomerAuthChallenge, CustomerCredential,
@@ -56,7 +58,7 @@ __all__ = [
     "Promoter", "PromoterSession", "ReferralAttribution", "ReferralEligibility",
     "ReferralEligibilityDecision",
     "ReferralIncentiveRule", "ReferralIncentiveRuleAudit", "ReferralIncentiveRecord",
-    "ReferralParticipant", "ReferralParticipantAudit",
+    "ReferralParticipant", "ReferralParticipantAudit", "CustomerReferralActivation",
     "ReferralProgramAudit",
     "CustomerAuthAudit", "CustomerAuthChallenge", "CustomerCredential",
     "CustomerLinkingEnrollment", "CustomerSession",

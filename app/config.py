@@ -98,6 +98,14 @@ class Config:
         "REFERRAL_EVIDENCE_HMAC_KEYS",
         "development-referral-evidence-key-at-least-32-bytes",
     )
+    REFERRAL_CONSENT_VERSION = os.getenv("REFERRAL_CONSENT_VERSION", "2026-10-30")
+    REFERRAL_CONSENT_TEXT = os.getenv(
+        "REFERRAL_CONSENT_TEXT",
+        "Acepto participar voluntariamente como cliente embajador y compartir una invitación pública. "
+        "La invitación no da acceso a mi cuenta ni garantiza recompensas.",
+    )
+    REFERRAL_PUBLIC_MUTATION_LIMIT = int(os.getenv("REFERRAL_PUBLIC_MUTATION_LIMIT", 8))
+    REFERRAL_ACTIVATION_MAX_AGE = int(os.getenv("REFERRAL_ACTIVATION_MAX_AGE", 30 * 86400))
     REGISTRATION_EMAIL_ENCRYPTION_KEY = os.getenv(
         "REGISTRATION_EMAIL_ENCRYPTION_KEY", "development-registration-email-encryption-key-32-bytes"
     )

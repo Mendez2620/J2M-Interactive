@@ -45,7 +45,7 @@ flask --app run.py db upgrade
 flask --app run.py db current
 ```
 
-El head vigente esperado para Fase 8C.3B1 es `5f6a7b8c9d0e`. La revisión `f3a4b5c6d7e8` agregó la cola persistente de sincronización; ninguna migración debe ejecutarse desde el comando de arranque, health check o petición web.
+El head vigente esperado para Fase 8C.3B2 es `7b8c9d0e1f2a`. La revisión `f3a4b5c6d7e8` agregó la cola persistente de sincronización; ninguna migración debe ejecutarse desde el comando de arranque, health check o petición web.
 
 Después de migrar, cambie `GOOGLE_WALLET_MODE` a `real`, reinicie el servicio y confirme `/api/health` y `/api/ready`. Un `200` en `/api/ready` solo valida una consulta mínima; no confirma el estado de las migraciones.
 
@@ -70,7 +70,7 @@ Procedimiento posterior al merge:
 1. actualice `main` y después integre ese commit aprobado en `staging`;
 2. despliegue manualmente con `GOOGLE_WALLET_MODE=disabled`;
 3. ejecute `flask --app run.py db upgrade` como operación única;
-4. confirme que `flask --app run.py db current` muestra `5f6a7b8c9d0e`;
+4. confirme que `flask --app run.py db current` muestra `7b8c9d0e1f2a`;
 5. cargue `GOOGLE_ISSUER_ID` y `GOOGLE_SERVICE_ACCOUNT_JSON` como variables privadas;
 6. cambie el modo a `real`, reinicie y confirme que el proceso arranca;
 7. revise únicamente logs sanitizados y los endpoints de salud;

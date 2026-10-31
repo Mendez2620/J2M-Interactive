@@ -4,6 +4,7 @@ import os
 import hashlib
 import zipfile
 import logging
+from urllib.parse import urlparse
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from flask import current_app, has_app_context
@@ -82,6 +83,26 @@ class AppleWalletService:
     def get_serial_number(self, customer) -> str:
         """Generates a stable unique serial number for the customer's pass."""
         return f"customer_{customer.id}_{customer.qr_code_token[:8]}"
+
+    @staticmethod
+    def _invitation_url(customer):
+        if not has_app_context():
+            return None
+        from app.models import ReferralParticipant
+        base = str(current_app.config.get("PUBLIC_BASE_URL") or "").rstrip("/")
+        parsed = urlparse(base)
+        if parsed.scheme != "https" or not parsed.netloc:
+            return None
+        participant = ReferralParticipant.query.filter_by(
+            business_id=customer.business_id,
+            customer_id=customer.id,
+            participant_type="customer_ambassador",
+        ).first()
+        if not participant or participant.revoked_at is not None:
+            return None
+        if participant.currently_eligible():
+            return f"{base}/invite/{participant.invitation_code}"
+        return getattr(customer, "_referral_wallet_invitation_url", None)
 
     def build_pass_json(self, customer) -> Dict[str, Any]:
         """Generates the dictionary structure for Apple Wallet pass.json."""
@@ -167,6 +188,13 @@ class AppleWalletService:
                 "value": business.wallet_contact or "J2M Interactive",
             },
         ]
+        invitation_url = self._invitation_url(customer)
+        if invitation_url:
+            back_fields.append({
+                "key": "invite_friends",
+                "label": "Invitar amigos",
+                "value": invitation_url,
+            })
 
         barcode_data = {
             "format": "PKBarcodeFormatQR",
