@@ -16,6 +16,7 @@ from app.models import (
 )
 from app.security import wants_json
 from app.services import AppleWalletService, GoogleWalletService
+from app.services.referral_participant_service import prepare_customer_wallet_invitation
 from app.services.google_wallet import GoogleWalletAPIError, GoogleWalletConfigurationError
 
 
@@ -152,6 +153,7 @@ def recovery_apple_wallet(business_slug):
         return redirect(url_for("recovery.recover", business_slug=business_slug))
     customer = verified[1]
     try:
+        prepare_customer_wallet_invitation(customer)
         return send_file(
             AppleWalletService().generate_pkpass(customer),
             mimetype="application/vnd.apple.pkpass", as_attachment=True,
@@ -169,6 +171,7 @@ def recovery_google_wallet(business_slug):
     if not verified:
         return redirect(url_for("recovery.recover", business_slug=business_slug))
     try:
+        prepare_customer_wallet_invitation(verified[1])
         _jwt_token, save_url = GoogleWalletService().create_jwt_pass(verified[1])
         return redirect(save_url)
     except GoogleWalletConfigurationError:

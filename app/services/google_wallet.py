@@ -162,7 +162,9 @@ class GoogleWalletService:
         ).first()
         if not participant or participant.revoked_at is not None:
             return None
-        return f"{base}/invite/{participant.invitation_code}"
+        if participant.currently_eligible():
+            return f"{base}/invite/{participant.invitation_code}"
+        return getattr(customer, "_referral_wallet_invitation_url", None)
 
     def create_loyalty_object(self, customer):
         self._require_enabled()

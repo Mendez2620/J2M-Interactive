@@ -3,14 +3,15 @@
 import hashlib
 import json
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.exc import IntegrityError
 
 from app.extensions import db
 from app.models import (
-    Business, Customer, Promoter, ReferralAttribution, ReferralEligibility,
-    ReferralParticipant, ReferralParticipantAudit, Staff,
+    Business, Customer, CustomerReferralActivation, Promoter,
+    ReferralAttribution, ReferralEligibility, ReferralParticipant,
+    ReferralParticipantAudit, Staff,
 )
 from app.permissions import has_permission
 
@@ -271,6 +272,52 @@ def ensure_customer_invitation_persisted(customer):
         raise
 
 
+def prepare_customer_wallet_invitation(customer):
+    """Persist a Wallet URL without turning the public invite into authority.
+
+    Consented customers receive the public sharing URL. A dormant customer gets
+    a separate, one-use activation capability whose raw value is returned only
+    to the pass builder; the database retains only its SHA-256 digest.
+    """
+    from flask import current_app
+
+    participant = ensure_customer_invitation_persisted(customer)
+    if participant.revoked_at is not None:
+        db.session.commit()
+        return participant, None
+    base = str(current_app.config.get("PUBLIC_BASE_URL") or "").rstrip("/")
+    if participant.currently_eligible():
+        db.session.commit()
+        url = f"{base}/invite/{participant.invitation_code}" if base else None
+        customer._referral_wallet_invitation_url = url
+        return participant, url
+    raw_token = secrets.token_urlsafe(32)
+    activation = CustomerReferralActivation(
+        business_id=participant.business_id,
+        participant_id=participant.id,
+        token_hash=hashlib.sha256(raw_token.encode()).hexdigest(),
+        expires_at=datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(
+            seconds=current_app.config["REFERRAL_ACTIVATION_MAX_AGE"]
+        ),
+    )
+    db.session.add(activation)
+    db.session.commit()
+    url = f"{base}/invite/activate/{raw_token}" if base else None
+    customer._referral_wallet_invitation_url = url
+    return participant, url
+
+
+def resolve_customer_activation(token, *, lock=False):
+    if not isinstance(token, str) or not 32 <= len(token) <= 64:
+        return None
+    digest = hashlib.sha256(token.encode()).hexdigest()
+    query = CustomerReferralActivation.query.filter_by(token_hash=digest)
+    activation = query.with_for_update().one_or_none() if lock else query.one_or_none()
+    if not activation or not activation.participant:
+        return None
+    return activation
+
+
 def prepare_customer_invitation_consent(*, customer, consent_version, consent_text,
                                         evidence_context, request_id):
     """Create and explicitly enable a new customer's invitation in caller transaction."""
@@ -306,14 +353,17 @@ def prepare_customer_invitation_consent(*, customer, consent_version, consent_te
     return participant
 
 
-def consent_customer_invitation(*, participant, consent_version, consent_text,
+def consent_customer_invitation(*, activation, consent_version, consent_text,
                                 evidence_context, request_id):
-    """Enable a never-consented public invitation without authenticating an account.
+    """Consume a Wallet-only capability and enable a dormant invitation.
 
-    Possession of the Wallet link is deliberately only a low-assurance consent
+    Possession of the capability is deliberately only a low-assurance consent
     context. This operation cannot revoke participation or authorize any private
     customer/economic operation.
     """
+    participant = ReferralParticipant.query.filter_by(
+        business_id=activation.business_id, id=activation.participant_id,
+    ).with_for_update().one()
     request_id = _request(request_id)
     if participant.participant_type != "customer_ambassador" or not participant.customer:
         raise ReferralParticipantError("La invitación no es válida.", 404)
@@ -330,10 +380,10 @@ def consent_customer_invitation(*, participant, consent_version, consent_text,
         business_id=participant.business_id,
         subject_type="customer",
         subject_id=participant.customer_id,
-        actor_type="public_wallet_context",
+        actor_type="wallet_activation_context",
         actor_id=participant.customer_id,
         action="customer_ambassador_consented",
-        reason="Aceptación expresa desde la invitación incluida en Wallet.",
+        reason="Aceptación de baja confianza desde una capacidad de Wallet de un solo uso.",
         consent_version=version,
         consent_evidence_hash=evidence_hash,
     )
@@ -344,6 +394,10 @@ def consent_customer_invitation(*, participant, consent_version, consent_text,
         if existing.request_fingerprint != fingerprint:
             raise ReferralParticipantError("El identificador ya se utilizó para otro cambio.", 409)
         return participant, True, _historical_state(existing)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    if (activation.consumed_at is not None or activation.expires_at <= now
+            or activation.business_id != participant.business_id):
+        raise ReferralParticipantError("La capacidad de activación venció o ya fue utilizada.", 410)
     if participant.revoked_at is not None or participant.consented_at is not None:
         raise ReferralParticipantError("La invitación no puede activarse.", 409)
     business = participant.customer.business
@@ -355,10 +409,11 @@ def consent_customer_invitation(*, participant, consent_version, consent_text,
     participant.consent_evidence_hash = evidence_hash
     participant.is_enabled = True
     participant.revoked_at = None
+    activation.consumed_at = now
     _audit(
-        participant, "public_wallet_context", participant.customer_id,
+        participant, "wallet_activation_context", participant.customer_id,
         "customer_ambassador_consented",
-        "Aceptación expresa desde la invitación incluida en Wallet.",
+        "Aceptación de baja confianza desde una capacidad de Wallet de un solo uso.",
         request_id, previous, fingerprint,
     )
     try:

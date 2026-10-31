@@ -1,4 +1,6 @@
 import re
+import hashlib
+import json
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -6,17 +8,19 @@ from pathlib import Path
 
 import jwt
 from sqlalchemy import text
+from urllib.parse import urlparse
 
 from app import create_app
 from app.extensions import db
 from app.models import (
-    Business, Customer, GoogleWalletSyncJob, LoyaltyLedgerEntry,
+    Business, Customer, CustomerReferralActivation, GoogleWalletSyncJob, LoyaltyLedgerEntry,
     ReferralAttribution, ReferralEligibility, ReferralParticipant,
     ReferralParticipantAudit, Transaction,
 )
 from app.services import AppleWalletService, GoogleWalletService
 from app.services.referral_participant_service import (
-    ensure_customer_invitation, resolve_invitation,
+    ensure_customer_invitation, prepare_customer_wallet_invitation,
+    resolve_invitation,
 )
 
 
@@ -51,14 +55,18 @@ class WalletReferralsPhase8C3B2TestCase(unittest.TestCase):
         db.session.commit()
         with self.client.session_transaction() as browser:
             browser["csrf_token"] = "wallet-referral-csrf"
+        self.activation_token = None
 
     def tearDown(self):
         db.session.remove(); db.session.execute(text("PRAGMA foreign_keys=OFF"))
         db.drop_all(); self.ctx.pop()
 
     def _activate(self, request_id="activate-wallet-referral"):
+        if not self.activation_token:
+            _, activation_url = prepare_customer_wallet_invitation(self.customer)
+            self.activation_token = urlparse(activation_url).path.rsplit("/", 1)[-1]
         return self.client.post(
-            f"/invite/{self.participant.invitation_code}/consent",
+            f"/invite/activate/{self.activation_token}",
             data={"request_id": request_id, "referral_consent": "on"},
             headers={"X-CSRFToken": "wallet-referral-csrf"},
         )
@@ -69,18 +77,26 @@ class WalletReferralsPhase8C3B2TestCase(unittest.TestCase):
             "terms_accepted": True, "privacy_accepted": True, **extra,
         }
 
-    def test_dormant_invitation_is_public_but_reveals_no_pii_and_requires_csrf(self):
+    def test_public_invitation_never_authorizes_consent_and_activation_requires_csrf(self):
         response = self.client.get(f"/invite/{self.participant.invitation_code}")
         html = response.get_data(as_text=True)
         self.assertEqual(response.status_code, 200)
-        self.assertIn("Aceptar y preparar mi invitación", html)
+        self.assertNotIn("Aceptar y preparar mi invitación", html)
+        self.assertNotIn("referral_consent", html)
         self.assertNotIn(self.customer.full_name, html)
         self.assertNotIn(self.customer.phone, html)
         self.assertIsNone(resolve_invitation(
             business_id=self.business.id, code=self.participant.invitation_code,
         ))
-        denied = self.client.post(
+        self.assertEqual(self.client.post(
             f"/invite/{self.participant.invitation_code}/consent",
+            data={"referral_consent": "on"},
+            headers={"X-CSRFToken": "wallet-referral-csrf"},
+        ).status_code, 404)
+        _, activation_url = prepare_customer_wallet_invitation(self.customer)
+        token = urlparse(activation_url).path.rsplit("/", 1)[-1]
+        denied = self.client.post(
+            f"/invite/activate/{token}",
             data={"request_id": "missing-csrf", "referral_consent": "on"},
         )
         self.assertEqual(denied.status_code, 400)
@@ -89,19 +105,22 @@ class WalletReferralsPhase8C3B2TestCase(unittest.TestCase):
 
     def test_one_tap_consent_is_audited_and_replay_safe(self):
         first = self._activate()
-        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.status_code, 302)
         db.session.refresh(self.participant)
         self.assertTrue(self.participant.currently_eligible())
         self.assertEqual(self.participant.consent_version, self.app.config["REFERRAL_CONSENT_VERSION"])
         audit = ReferralParticipantAudit.query.one()
-        self.assertEqual(audit.actor_type, "public_wallet_context")
+        self.assertEqual(audit.actor_type, "wallet_activation_context")
         self.assertNotIn(self.customer.phone, audit.new_state + audit.reason)
         replay = self._activate()
-        self.assertEqual(replay.status_code, 200)
+        self.assertEqual(replay.status_code, 302)
         self.assertEqual(ReferralParticipantAudit.query.count(), 1)
+        activation = CustomerReferralActivation.query.one()
+        self.assertIsNotNone(activation.consumed_at)
+        self.assertNotEqual(activation.token_hash, self.activation_token)
 
     def test_share_page_qr_and_join_create_only_pending_attribution(self):
-        self.assertEqual(self._activate().status_code, 200)
+        self.assertEqual(self._activate().status_code, 302)
         page = self.client.get(f"/invite/{self.participant.invitation_code}")
         html = page.get_data(as_text=True)
         self.assertIn("Copiar enlace", html)
@@ -153,15 +172,44 @@ class WalletReferralsPhase8C3B2TestCase(unittest.TestCase):
         self.assertIsNone(dormant.consented_at)
         self.assertTrue(second.marketing_consent)
 
+    def test_join_displays_exact_configured_consent_and_audits_same_version(self):
+        self.app.config.update(
+            REFERRAL_CONSENT_VERSION="terms-42",
+            REFERRAL_CONSENT_TEXT="Acepto el texto canónico especial de referidos.",
+        )
+        html = self.client.get(f"/join/{self.business.slug}").get_data(as_text=True)
+        self.assertIn("Acepto el texto canónico especial de referidos.", html)
+        self.assertIn("Versión terms-42", html)
+        self.assertNotRegex(html, r'id="referral_consent"[^>]+checked')
+        response = self.client.post(
+            f"/join/{self.business.slug}",
+            json=self._registration_payload("55 7878 7878", referral_consent=True),
+            headers={"X-CSRFToken": "wallet-referral-csrf"},
+        )
+        self.assertEqual(response.status_code, 201)
+        customer = Customer.query.filter_by(phone="+525578787878").one()
+        participant = ReferralParticipant.query.filter_by(customer_id=customer.id).one()
+        self.assertEqual(participant.consent_version, "terms-42")
+        expected_evidence = hashlib.sha256(json.dumps({
+            "version": "terms-42",
+            "text_hash": hashlib.sha256(
+                "Acepto el texto canónico especial de referidos.".encode()
+            ).hexdigest(),
+            "context": f"registration:{customer.consent_ip_hash}:{customer.consent_user_agent_hash}",
+        }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        self.assertEqual(participant.consent_evidence_hash, expected_evidence)
+        audit = ReferralParticipantAudit.query.filter_by(participant_id=participant.id).one()
+        self.assertIn('"consent_version":"terms-42"', audit.new_state)
+
     def test_revoked_suspended_cross_tenant_and_loyalty_qr_fail_closed(self):
-        self.assertEqual(self._activate().status_code, 200)
+        self.assertEqual(self._activate().status_code, 302)
         self.participant.is_enabled = False
         from datetime import datetime, timezone
         self.participant.revoked_at = datetime.now(timezone.utc)
         db.session.commit()
         page = self.client.get(f"/invite/{self.participant.invitation_code}")
         self.assertIn("fue revocada", page.get_data(as_text=True))
-        self.assertEqual(self._activate("cannot-reactivate").status_code, 409)
+        self.assertEqual(self._activate("cannot-reactivate").status_code, 410)
         self.assertIsNone(resolve_invitation(
             business_id=self.other.id, code=self.participant.invitation_code,
         ))
@@ -175,8 +223,42 @@ class WalletReferralsPhase8C3B2TestCase(unittest.TestCase):
             404,
         )
 
+    def test_qr_follows_program_business_and_participant_state(self):
+        self.assertEqual(self._activate().status_code, 302)
+        qr_url = f"/invite/{self.participant.invitation_code}/qr.png"
+        self.assertEqual(self.client.get(qr_url).status_code, 200)
+        self.business.referrals_enabled = False; db.session.commit()
+        self.assertEqual(self.client.get(qr_url).status_code, 404)
+        self.business.referrals_enabled = True; db.session.commit()
+        self.assertEqual(self.client.get(qr_url).status_code, 200)
+        self.business.is_active = False; db.session.commit()
+        self.assertEqual(self.client.get(qr_url).status_code, 404)
+        self.business.is_active = True
+        from datetime import datetime, timezone
+        self.participant.revoked_at = datetime.now(timezone.utc)
+        self.participant.is_enabled = False
+        db.session.commit()
+        self.assertEqual(self.client.get(qr_url).status_code, 404)
+
+    def test_activation_capability_expires_and_cannot_cross_participants(self):
+        from datetime import datetime, timedelta, timezone
+        _, activation_url = prepare_customer_wallet_invitation(self.customer)
+        token = urlparse(activation_url).path.rsplit("/", 1)[-1]
+        activation = CustomerReferralActivation.query.one()
+        activation.expires_at = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=1)
+        db.session.commit()
+        expired = self.client.post(
+            f"/invite/activate/{token}",
+            data={"request_id": "expired-capability", "referral_consent": "on"},
+            headers={"X-CSRFToken": "wallet-referral-csrf"},
+        )
+        self.assertEqual(expired.status_code, 410)
+        db.session.refresh(self.participant)
+        self.assertFalse(self.participant.is_enabled)
+        self.assertEqual(ReferralParticipantAudit.query.count(), 0)
+
     def test_wallet_objects_use_personal_link_without_changing_loyalty_barcode(self):
-        self.assertEqual(self._activate().status_code, 200)
+        self.assertEqual(self._activate().status_code, 302)
         google = GoogleWalletService().create_loyalty_object(self.customer)
         target = google["appLinkData"]["webAppLinkInfo"]["appTarget"]["targetUri"]["uri"]
         self.assertEqual(target, f"https://j2m.example/invite/{self.participant.invitation_code}")

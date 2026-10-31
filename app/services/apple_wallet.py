@@ -100,7 +100,9 @@ class AppleWalletService:
         ).first()
         if not participant or participant.revoked_at is not None:
             return None
-        return f"{base}/invite/{participant.invitation_code}"
+        if participant.currently_eligible():
+            return f"{base}/invite/{participant.invitation_code}"
+        return getattr(customer, "_referral_wallet_invitation_url", None)
 
     def build_pass_json(self, customer) -> Dict[str, Any]:
         """Generates the dictionary structure for Apple Wallet pass.json."""

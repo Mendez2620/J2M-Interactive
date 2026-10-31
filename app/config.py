@@ -105,6 +105,7 @@ class Config:
         "La invitación no da acceso a mi cuenta ni garantiza recompensas.",
     )
     REFERRAL_PUBLIC_MUTATION_LIMIT = int(os.getenv("REFERRAL_PUBLIC_MUTATION_LIMIT", 8))
+    REFERRAL_ACTIVATION_MAX_AGE = int(os.getenv("REFERRAL_ACTIVATION_MAX_AGE", 30 * 86400))
     REGISTRATION_EMAIL_ENCRYPTION_KEY = os.getenv(
         "REGISTRATION_EMAIL_ENCRYPTION_KEY", "development-registration-email-encryption-key-32-bytes"
     )
