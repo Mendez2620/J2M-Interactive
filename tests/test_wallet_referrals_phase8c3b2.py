@@ -5,12 +5,14 @@ import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 
 import jwt
 from sqlalchemy import text
 from urllib.parse import urlparse
 
 from app import create_app
+from app.config import TestingConfig
 from app.extensions import db
 from app.models import (
     Business, Customer, CustomerReferralActivation, GoogleWalletSyncJob, LoyaltyLedgerEntry,
@@ -287,8 +289,9 @@ class WalletReferralsPhase8C3B2TestCase(unittest.TestCase):
     def test_concurrent_wallet_issuance_creates_one_invitation_identity(self):
         with tempfile.TemporaryDirectory() as directory:
             uri = f"sqlite:///{Path(directory, 'wallet-referral.sqlite').as_posix()}"
-            app = create_app("testing")
-            app.config.update(SQLALCHEMY_DATABASE_URI=uri, PUBLIC_BASE_URL="https://j2m.example")
+            with patch.object(TestingConfig, "SQLALCHEMY_DATABASE_URI", uri):
+                app = create_app("testing")
+            app.config.update(PUBLIC_BASE_URL="https://j2m.example")
             with app.app_context():
                 db.create_all()
                 business = Business(
@@ -319,7 +322,7 @@ class WalletReferralsPhase8C3B2TestCase(unittest.TestCase):
                 participant = ReferralParticipant.query.one()
                 self.assertFalse(participant.is_enabled)
                 self.assertIsNone(participant.consented_at)
-                db.session.remove(); db.drop_all()
+                db.session.remove(); db.drop_all(); db.engine.dispose()
 
 
 if __name__ == "__main__":
