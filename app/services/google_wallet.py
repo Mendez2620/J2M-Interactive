@@ -196,6 +196,15 @@ class GoogleWalletService:
                     "language": "es-419", "value": "Invitar amigos",
                 }},
             }
+            # Google documents both object-level surfaces. appLinkData is the
+            # preferred action, while linksModuleData keeps the same personal
+            # URL discoverable in pass details (including clients that do not
+            # render the app link consistently). Never put this URL on Class.
+            result["linksModuleData"] = {"uris": [{
+                "id": "invite_friends",
+                "uri": invitation_url,
+                "description": "Invitar amigos",
+            }]}
         return result
 
     def _request(self, method, resource, *, body=None):

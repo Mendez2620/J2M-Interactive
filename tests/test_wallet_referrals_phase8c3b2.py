@@ -1,6 +1,4 @@
 import re
-import hashlib
-import json
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -152,16 +150,18 @@ class WalletReferralsPhase8C3B2TestCase(unittest.TestCase):
         db.session.refresh(self.customer)
         self.assertEqual(self.customer.current_points, 17)
 
-    def test_new_registration_consent_is_optional_separate_and_atomic(self):
-        consented = self.client.post(
+    def test_registration_never_accepts_referral_consent_from_browser(self):
+        attempted = self.client.post(
             f"/join/{self.business.slug}",
             json=self._registration_payload("55 3333 3333", referral_consent=True),
             headers={"X-CSRFToken": "wallet-referral-csrf"},
         )
-        self.assertEqual(consented.status_code, 201)
+        self.assertEqual(attempted.status_code, 201)
         first = Customer.query.filter_by(phone="+525533333333").one()
-        enabled = ReferralParticipant.query.filter_by(customer_id=first.id).one()
-        self.assertTrue(enabled.currently_eligible())
+        dormant = ReferralParticipant.query.filter_by(customer_id=first.id).one()
+        self.assertFalse(dormant.is_enabled)
+        self.assertIsNone(dormant.consented_at)
+        self.assertEqual(ReferralParticipantAudit.query.count(), 0)
         plain = self.client.post(
             f"/join/{self.business.slug}",
             json=self._registration_payload("55 4444 4444", marketing_consent=True),
@@ -169,38 +169,35 @@ class WalletReferralsPhase8C3B2TestCase(unittest.TestCase):
         )
         self.assertEqual(plain.status_code, 201)
         second = Customer.query.filter_by(phone="+525544444444").one()
-        dormant = ReferralParticipant.query.filter_by(customer_id=second.id).one()
-        self.assertFalse(dormant.is_enabled)
-        self.assertIsNone(dormant.consented_at)
+        second_participant = ReferralParticipant.query.filter_by(customer_id=second.id).one()
+        self.assertFalse(second_participant.is_enabled)
+        self.assertIsNone(second_participant.consented_at)
         self.assertTrue(second.marketing_consent)
 
-    def test_join_displays_exact_configured_consent_and_audits_same_version(self):
+    def test_activation_displays_exact_configured_consent_and_audits_same_version(self):
         self.app.config.update(
             REFERRAL_CONSENT_VERSION="terms-42",
             REFERRAL_CONSENT_TEXT="Acepto el texto canónico especial de referidos.",
         )
-        html = self.client.get(f"/join/{self.business.slug}").get_data(as_text=True)
+        join_html = self.client.get(f"/join/{self.business.slug}").get_data(as_text=True)
+        self.assertNotIn("Acepto el texto canónico especial de referidos.", join_html)
+        self.assertNotIn('id="referral_consent"', join_html)
+        _, activation_url = prepare_customer_wallet_invitation(self.customer)
+        token = urlparse(activation_url).path.rsplit("/", 1)[-1]
+        html = self.client.get(f"/invite/activate/{token}").get_data(as_text=True)
         self.assertIn("Acepto el texto canónico especial de referidos.", html)
         self.assertIn("Versión terms-42", html)
         self.assertNotRegex(html, r'id="referral_consent"[^>]+checked')
         response = self.client.post(
-            f"/join/{self.business.slug}",
-            json=self._registration_payload("55 7878 7878", referral_consent=True),
+            f"/invite/activate/{token}",
+            data={"request_id": "canonical-wallet-consent", "referral_consent": "on"},
             headers={"X-CSRFToken": "wallet-referral-csrf"},
         )
-        self.assertEqual(response.status_code, 201)
-        customer = Customer.query.filter_by(phone="+525578787878").one()
-        participant = ReferralParticipant.query.filter_by(customer_id=customer.id).one()
-        self.assertEqual(participant.consent_version, "terms-42")
-        expected_evidence = hashlib.sha256(json.dumps({
-            "version": "terms-42",
-            "text_hash": hashlib.sha256(
-                "Acepto el texto canónico especial de referidos.".encode()
-            ).hexdigest(),
-            "context": f"registration:{customer.consent_ip_hash}:{customer.consent_user_agent_hash}",
-        }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-        self.assertEqual(participant.consent_evidence_hash, expected_evidence)
-        audit = ReferralParticipantAudit.query.filter_by(participant_id=participant.id).one()
+        self.assertEqual(response.status_code, 302)
+        db.session.refresh(self.participant)
+        self.assertEqual(self.participant.consent_version, "terms-42")
+        self.assertTrue(self.participant.consent_evidence_hash)
+        audit = ReferralParticipantAudit.query.filter_by(participant_id=self.participant.id).one()
         self.assertIn('"consent_version":"terms-42"', audit.new_state)
 
     def test_revoked_suspended_cross_tenant_and_loyalty_qr_fail_closed(self):
@@ -259,11 +256,26 @@ class WalletReferralsPhase8C3B2TestCase(unittest.TestCase):
         self.assertFalse(self.participant.is_enabled)
         self.assertEqual(ReferralParticipantAudit.query.count(), 0)
 
+        # Only a fresh, already-authorized pass delivery may mint a replacement.
+        _, renewed_url = prepare_customer_wallet_invitation(self.customer)
+        renewed = urlparse(renewed_url).path.rsplit("/", 1)[-1]
+        self.assertNotEqual(renewed, token)
+        self.assertEqual(CustomerReferralActivation.query.count(), 2)
+        self.assertEqual(self.client.post(
+            f"/invite/activate/{renewed}",
+            data={"request_id": "renewed-capability", "referral_consent": "on"},
+            headers={"X-CSRFToken": "wallet-referral-csrf"},
+        ).status_code, 302)
+        self.assertEqual(ReferralParticipant.query.count(), 1)
+
     def test_wallet_objects_use_personal_link_without_changing_loyalty_barcode(self):
         self.assertEqual(self._activate().status_code, 302)
         google = GoogleWalletService().create_loyalty_object(self.customer)
         target = google["appLinkData"]["webAppLinkInfo"]["appTarget"]["targetUri"]["uri"]
         self.assertEqual(target, f"https://j2m.example/invite/{self.participant.invitation_code}")
+        self.assertEqual(google["linksModuleData"]["uris"], [{
+            "id": "invite_friends", "uri": target, "description": "Invitar amigos",
+        }])
         self.assertEqual(google["barcode"]["value"], self.customer.qr_code_token)
         token, _ = GoogleWalletService().create_jwt_pass(self.customer)
         decoded = jwt.decode(token, options={"verify_signature": False})

@@ -20,8 +20,7 @@ from app.wallet_access import issue_wallet_token
 from app.services.referral_participant_service import (
     ReferralParticipantError, consent_customer_invitation,
     create_pending_attribution, ensure_customer_invitation,
-    prepare_customer_invitation_consent, resolve_customer_activation,
-    resolve_invitation,
+    resolve_customer_activation, resolve_invitation,
 )
 
 business_bp = Blueprint("business", __name__)
@@ -221,8 +220,6 @@ def join_business(slug):
             return jsonify({"status": "error", "message": "El servicio para este negocio se encuentra temporalmente suspendido."}), 403
         return render_template(
             "join.html", business=business,
-            referral_consent_text=current_app.config["REFERRAL_CONSENT_TEXT"],
-            referral_consent_version=current_app.config["REFERRAL_CONSENT_VERSION"],
         )
     if request.method == "GET":
         referral_code = (request.args.get("ref") or "").strip()
@@ -243,8 +240,6 @@ def join_business(slug):
             referral_context=_referral_context(participant) if participant else "",
             terms_version=current_app.config["TERMS_VERSION"],
             privacy_version=current_app.config["PRIVACY_NOTICE_VERSION"],
-            referral_consent_text=current_app.config["REFERRAL_CONSENT_TEXT"],
-            referral_consent_version=current_app.config["REFERRAL_CONSENT_VERSION"],
             wallet_delivery_url=wallet_delivery_url,
             wallet_delivery_end_url=url_for("business.end_wallet_delivery", slug=business.slug),
         )
@@ -301,14 +296,6 @@ def join_business(slug):
         db.session.add(customer)
         db.session.flush()
         ensure_customer_invitation(customer)
-        if _truthy(data.get("referral_consent")):
-            prepare_customer_invitation_consent(
-                customer=customer,
-                consent_version=current_app.config["REFERRAL_CONSENT_VERSION"],
-                consent_text=current_app.config["REFERRAL_CONSENT_TEXT"],
-                evidence_context=f"registration:{ip_hash}:{ua_hash}",
-                request_id=g.request_id,
-            )
         db.session.add(CustomerRegistrationIdentityClaim(
             business_id=business.id, identity_type="phone",
             identity_hash=phone_hash, customer_id=customer.id,

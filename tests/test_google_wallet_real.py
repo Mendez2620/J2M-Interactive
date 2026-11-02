@@ -18,6 +18,7 @@ from app.services.google_wallet_sync_service import (
     _customer_lock, _now, google_wallet_sync_counts,
     process_pending_google_wallet_jobs,
 )
+from app.services.referral_participant_service import prepare_customer_wallet_invitation
 from app.services.loyalty_transaction_service import process_loyalty_transaction
 
 
@@ -124,6 +125,7 @@ class GoogleWalletRealTestCase(unittest.TestCase):
         self.customer.qr_code_token = original
 
     def test_existing_object_issuance_updates_metadata_without_balance(self):
+        _, invitation_url = prepare_customer_wallet_invitation(self.customer)
         session = FakeSession([
             FakeResponse(200, {"id": "class"}), FakeResponse(200, {"id": "class"}),
             FakeResponse(200, {"id": "object"}), FakeResponse(200, {"id": "object"}),
@@ -136,6 +138,11 @@ class GoogleWalletRealTestCase(unittest.TestCase):
         self.assertEqual(session.calls[-1][0], "PATCH")
         self.assertNotIn("loyaltyPoints", object_patch)
         self.assertEqual(object_patch["barcode"]["value"], self.customer.qr_code_token)
+        self.assertEqual(
+            object_patch["appLinkData"]["webAppLinkInfo"]["appTarget"]["targetUri"]["uri"],
+            invitation_url,
+        )
+        self.assertEqual(object_patch["linksModuleData"]["uris"][0]["uri"], invitation_url)
         self.assertNotIn("id", object_patch)
         self.assertNotIn("classId", object_patch)
 
