@@ -146,14 +146,57 @@ class GoogleWalletRealTestCase(unittest.TestCase):
         self.assertNotIn("id", object_patch)
         self.assertNotIn("classId", object_patch)
 
+    def test_existing_links_are_preserved_deduplicated_and_retry_idempotent(self):
+        _, invitation_url = prepare_customer_wallet_invitation(self.customer)
+        existing = {"linksModuleData": {
+            "customAttribute": "preserve-me",
+            "uris": [
+                {"id": "support", "uri": "https://example.test/support"},
+                {"id": "invite_friends", "uri": "https://old.example.test", "custom": "keep"},
+                {"id": "menu", "uri": "https://example.test/menu"},
+                {"id": "invite_friends", "uri": "https://duplicate.example.test"},
+            ],
+        }}
+        session = FakeSession([
+            FakeResponse(200, existing), FakeResponse(200, {"id": "object"}),
+            FakeResponse(200, existing), FakeResponse(200, {"id": "object"}),
+        ])
+        service = GoogleWalletService(
+            mode="real", credentials_info=self.credentials, http_session=session,
+        )
+
+        service._ensure_loyalty_object(self.customer)
+        service._ensure_loyalty_object(self.customer)
+
+        patches = [body for method, _url, body in session.calls if method == "PATCH"]
+        self.assertEqual(patches[0]["linksModuleData"], patches[1]["linksModuleData"])
+        module = patches[0]["linksModuleData"]
+        self.assertEqual(module["customAttribute"], "preserve-me")
+        self.assertEqual([item["id"] for item in module["uris"]], [
+            "support", "invite_friends", "menu",
+        ])
+        invite = module["uris"][1]
+        self.assertEqual(invite["uri"], invitation_url)
+        self.assertEqual(invite["custom"], "keep")
+        self.assertTrue(all("loyaltyPoints" not in patch for patch in patches))
+
     def test_object_create_conflict_never_patches_balance_from_issuance(self):
+        prepare_customer_wallet_invitation(self.customer)
         service = self.service([
-            FakeResponse(404), FakeResponse(409), FakeResponse(200, {"id": "object"}),
+            FakeResponse(404), FakeResponse(409),
+            FakeResponse(200, {"linksModuleData": {"uris": [{
+                "id": "support", "uri": "https://example.test/support",
+            }]}}),
+            FakeResponse(200, {"id": "object"}),
         ])
         service._ensure_loyalty_object(self.customer)
-        self.assertEqual([call[0] for call in service.http.calls], ["GET", "POST", "PATCH"])
+        self.assertEqual([call[0] for call in service.http.calls], ["GET", "POST", "GET", "PATCH"])
         self.assertIn("loyaltyPoints", service.http.calls[1][2])
-        self.assertNotIn("loyaltyPoints", service.http.calls[2][2])
+        patch_body = service.http.calls[3][2]
+        self.assertNotIn("loyaltyPoints", patch_body)
+        self.assertEqual([item["id"] for item in patch_body["linksModuleData"]["uris"]], [
+            "support", "invite_friends",
+        ])
 
     def test_issuance_and_worker_interleaving_leaves_balance_to_worker_only(self):
         service = self.service([
