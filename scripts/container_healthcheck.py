@@ -7,6 +7,7 @@ from urllib.request import urlopen
 
 WORKER_COMMANDS = {
     "google-wallet-worker": "run-google-wallet-sync-worker",
+    "apple-wallet-worker": "run-apple-wallet-worker",
 }
 
 

@@ -53,6 +53,9 @@ class Phase4TestCase(unittest.TestCase):
         self.apple_service = AppleWalletService()
         self.serial_number = self.apple_service.get_serial_number(self.customer)
         self.pass_type_id = self.apple_service.pass_type_id
+        self.credential = self.apple_service.ensure_pass_credential(self.customer)
+        self.pass_auth_token = self.apple_service.authentication_token(self.customer, self.credential)
+        db.session.commit()
 
     def tearDown(self):
         db.session.remove()
@@ -85,7 +88,7 @@ class Phase4TestCase(unittest.TestCase):
         res = self.client.post(
             reg_url,
             json={"pushToken": push_token},
-            headers={"Authorization": f"ApplePass {self.customer.qr_code_token}"},
+            headers={"Authorization": f"ApplePass {self.pass_auth_token}"},
         )
         self.assertEqual(res.status_code, 201)
 
@@ -99,7 +102,7 @@ class Phase4TestCase(unittest.TestCase):
         res_re = self.client.post(
             reg_url,
             json={"pushToken": push_token},
-            headers={"Authorization": f"ApplePass {self.customer.qr_code_token}"},
+            headers={"Authorization": f"ApplePass {self.pass_auth_token}"},
         )
         self.assertEqual(res_re.status_code, 200)
 
@@ -126,7 +129,7 @@ class Phase4TestCase(unittest.TestCase):
         deliver_url = f"/api/apple/v1/passes/{self.pass_type_id}/{self.serial_number}"
         res_deliv = self.client.get(
             deliver_url,
-            headers={"Authorization": f"ApplePass {self.customer.qr_code_token}"},
+            headers={"Authorization": f"ApplePass {self.pass_auth_token}"},
         )
         self.assertEqual(res_deliv.status_code, 200)
         self.assertEqual(res_deliv.mimetype, "application/vnd.apple.pkpass")
@@ -135,10 +138,10 @@ class Phase4TestCase(unittest.TestCase):
         # 6. Unregister device (DELETE)
         res_del = self.client.delete(
             reg_url,
-            headers={"Authorization": f"ApplePass {self.customer.qr_code_token}"},
+            headers={"Authorization": f"ApplePass {self.pass_auth_token}"},
         )
         self.assertEqual(res_del.status_code, 200)
-        self.assertIsNone(AppleDevice.query.filter_by(device_library_identifier=device_id).first())
+        self.assertFalse(AppleDevice.query.filter_by(device_library_identifier=device_id).one().is_active)
 
     def test_google_wallet_patch_structure(self):
         """Test GoogleWalletService update_loyalty_object returns valid patch payload."""
