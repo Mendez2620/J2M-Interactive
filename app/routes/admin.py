@@ -17,11 +17,16 @@ from app.extensions import db
 from app.models import (
     Business, BusinessCategory, Customer, PlatformAdmin, ReferralAttribution,
     ReferralEligibility, ReferralParticipant,
-    ReferralProgramAudit, Staff, Transaction,
+    ReferralProgramAudit, Staff, Transaction, GoogleWalletPublication,
 )
 from app.security import current_platform_admin, platform_admin_required, valid_email, validate_password
 from app.services import ExportService
 from app.services.google_wallet_sync_service import google_wallet_sync_business_summaries
+from app.services.google_wallet_publication_service import (
+    WalletPublicationError, cancel_wallet_publication, enqueue_wallet_publication,
+    retry_wallet_publication,
+    wallet_publication_summary,
+)
 from app.staff_auth import revoke_staff_sessions
 from app.access_audit import access_audit, staff_access_state
 from app.permissions import (
@@ -43,6 +48,15 @@ FONT_STYLES = {"modern", "classic", "geometric"}
 TEXT_SIZES = {"compact", "standard", "large"}
 HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 CATEGORY_SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+
+def _wallet_design_state(business):
+    return tuple(getattr(business, key) for key in (
+        "name", "logo_url", "logo_path", "cover_path", "primary_color",
+        "loyalty_type", "stamps_reward_limit", "reward_description", "wallet_terms",
+        "wallet_program_name", "wallet_card_text", "wallet_balance_label",
+        "wallet_instructions", "wallet_contact",
+    ))
 
 
 def validate_image(upload):
@@ -558,6 +572,8 @@ def get_business_details(business_id: int):
         },
         referral_metrics=referral_metrics,
         referral_program_audits=referral_program_audits,
+        wallet_publication=wallet_publication_summary(business.id),
+        google_wallet_mode=current_app.config.get("GOOGLE_WALLET_MODE", "disabled"),
     )
 
 
@@ -588,6 +604,8 @@ def update_business(business_id: int):
     business = db.session.get(Business, business_id)
     if not business:
         return jsonify({"status": "error", "message": "Negocio no encontrado"}), 404
+
+    wallet_state_before = _wallet_design_state(business)
 
     data = request.get_json(silent=True) or request.form.to_dict()
 
@@ -667,6 +685,9 @@ def update_business(business_id: int):
         if cover_path:
             business.cover_path = cover_path
 
+    if _wallet_design_state(business) != wallet_state_before:
+        business.wallet_design_version = (business.wallet_design_version or 1) + 1
+
     try:
         db.session.commit()
     except IntegrityError:
@@ -687,6 +708,76 @@ def update_business(business_id: int):
         }), 200
 
     return redirect(f"/admin/business/{business.id}")
+
+
+@admin_bp.post("/business/<int:business_id>/wallet/publications")
+@platform_admin_required
+def publish_business_wallet(business_id):
+    business = db.session.get(Business, business_id)
+    if not business:
+        return jsonify({"status": "error", "message": "Negocio no encontrado."}), 404
+    data = request.get_json(silent=True) if request.is_json else request.form.to_dict()
+    if not isinstance(data, dict):
+        return jsonify({"status": "error", "message": "La solicitud no es válida."}), 400
+    confirm = data.get("confirm")
+    confirmed = confirm is True or (isinstance(confirm, str) and confirm.lower() in {"true", "1", "on"})
+    if not confirmed:
+        return jsonify({"status": "error", "message": "Confirma explícitamente la publicación."}), 400
+    republish_value = data.get("republish", False)
+    if isinstance(republish_value, str):
+        normalized_republish = republish_value.lower()
+        if normalized_republish in {"true", "1", "on"}:
+            republish_value = True
+        elif normalized_republish in {"false", "0", "off", ""}:
+            republish_value = False
+        else:
+            return jsonify({"status": "error", "message": "La republicación no es válida."}), 400
+    if not isinstance(republish_value, bool):
+        return jsonify({"status": "error", "message": "La republicación no es válida."}), 400
+    try:
+        publication, replayed = enqueue_wallet_publication(
+            business=business, admin=current_platform_admin(),
+            provider_mode=current_app.config.get("GOOGLE_WALLET_MODE", "disabled"),
+            reason=data.get("reason"), republish=republish_value,
+        )
+    except WalletPublicationError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), exc.status_code
+    return jsonify({
+        "status": "success", "publication_id": publication.id,
+        "design_version": publication.design_version, "provider_mode": publication.provider_mode,
+        "execution_number": publication.execution_number,
+        "queued_customers": publication.total_jobs, "idempotent_replay": replayed,
+    }), 202
+
+
+@admin_bp.post("/business/<int:business_id>/wallet/publications/<int:publication_id>/retry")
+@platform_admin_required
+def retry_business_wallet_publication(business_id, publication_id):
+    publication = GoogleWalletPublication.query.filter_by(
+        id=publication_id, business_id=business_id,
+    ).one_or_none()
+    if not publication:
+        return jsonify({"status": "error", "message": "Publicación no encontrada."}), 404
+    try:
+        retry_wallet_publication(publication=publication, admin=current_platform_admin())
+    except WalletPublicationError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), exc.status_code
+    return jsonify({"status": "success", "publication_id": publication.id}), 202
+
+
+@admin_bp.post("/business/<int:business_id>/wallet/publications/<int:publication_id>/cancel")
+@platform_admin_required
+def cancel_business_wallet_publication(business_id, publication_id):
+    publication = GoogleWalletPublication.query.filter_by(
+        id=publication_id, business_id=business_id,
+    ).one_or_none()
+    if not publication:
+        return jsonify({"status": "error", "message": "Publicación no encontrada."}), 404
+    try:
+        cancel_wallet_publication(publication=publication, admin=current_platform_admin())
+    except WalletPublicationError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), exc.status_code
+    return jsonify({"status": "success", "publication_id": publication.id}), 200
 
 
 @admin_bp.route("/business/<int:business_id>/toggle-status", methods=["POST"])

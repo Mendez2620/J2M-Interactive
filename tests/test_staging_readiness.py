@@ -3,7 +3,9 @@ import os
 import subprocess
 import sys
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier, Event
 from unittest.mock import patch
 
 from sqlalchemy import create_engine, text
@@ -12,10 +14,13 @@ from app import create_app
 from app.config import normalize_database_url
 from app.extensions import db
 from app.staging_preflight import _https_endpoint_url
+from app.services.google_wallet_sync_service import (
+    _ADVISORY_NAMESPACE, _CLASS_ADVISORY_NAMESPACE, _postgres_session_lock,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_HEAD = "7b8c9d0e1f2a"
+EXPECTED_HEAD = "8c9d0e1f2a3b"
 
 
 class StagingReadinessTestCase(unittest.TestCase):
@@ -236,11 +241,115 @@ class StagingReadinessTestCase(unittest.TestCase):
             ]}).all()
             self.assertEqual(len(protected), 5)
             self.assertTrue(all(row.relrowsecurity for row in protected))
+            wallet_tables = connection.execute(text(
+                "SELECT relname, relrowsecurity FROM pg_class "
+                "WHERE relname = ANY(:tables) ORDER BY relname"
+            ), {"tables": [
+                "google_wallet_publication_jobs", "google_wallet_publications",
+            ]}).all()
+            self.assertEqual(len(wallet_tables), 2)
+            self.assertTrue(all(row.relrowsecurity for row in wallet_tables))
+            public_grants = connection.execute(text(
+                "SELECT COUNT(*) FROM information_schema.table_privileges "
+                "WHERE table_schema=current_schema() "
+                "AND table_name = ANY(:tables) AND grantee='PUBLIC'"
+            ), {"tables": [
+                "google_wallet_publication_jobs", "google_wallet_publications",
+            ]}).scalar()
+            self.assertEqual(public_grants, 0)
             self.assertEqual(connection.execute(text(
                 "SELECT COUNT(*) FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid "
                 "WHERE c.relname='customer_auth_audits' "
                 "AND t.tgname='trg_customer_auth_audits_append_only' AND NOT t.tgisinternal"
             )).scalar(), 1)
+        with engine.begin() as connection:
+            connection.execute(text(
+                "INSERT INTO google_wallet_publications "
+                "(business_id, design_version, execution_number, active_key, provider_mode, status, "
+                "created_by_admin_id, reason) VALUES "
+                "(1, 1, 1, 'active', 'mock', 'pending', 1, 'claim concurrente')"
+            ))
+            publication_id = connection.execute(text(
+                "SELECT id FROM google_wallet_publications WHERE reason='claim concurrente'"
+            )).scalar_one()
+        barrier = Barrier(2)
+
+        def claim(token):
+            with engine.begin() as connection:
+                barrier.wait()
+                return connection.execute(text(
+                    "UPDATE google_wallet_publications "
+                    "SET status='processing', lease_token=:token, locked_at=now() "
+                    "WHERE id=:publication_id AND status='pending' AND active_key='active'"
+                ), {"token": token, "publication_id": publication_id}).rowcount
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            claims = list(executor.map(claim, ("worker-a", "worker-b")))
+        self.assertEqual(sorted(claims), [0, 1])
+
+        remote_started = Event()
+        release_remote = Event()
+
+        def slow_customer_http():
+            with _postgres_session_lock(
+                engine, _ADVISORY_NAMESPACE, 991,
+            ) as acquired:
+                self.assertTrue(acquired)
+                remote_started.set()
+                self.assertTrue(release_remote.wait(5))
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(slow_customer_http)
+            self.assertTrue(remote_started.wait(5))
+            with _postgres_session_lock(
+                engine, _ADVISORY_NAMESPACE, 991,
+            ) as balance_worker_acquired:
+                self.assertFalse(balance_worker_acquired)
+            release_remote.set()
+            future.result(timeout=5)
+        with _postgres_session_lock(engine, _ADVISORY_NAMESPACE, 991) as acquired_after_http:
+            self.assertTrue(acquired_after_http)
+        with self.assertRaisesRegex(RuntimeError, "simulated HTTP failure"):
+            with _postgres_session_lock(engine, _ADVISORY_NAMESPACE, 992) as acquired:
+                self.assertTrue(acquired)
+                raise RuntimeError("simulated HTTP failure")
+        with _postgres_session_lock(engine, _ADVISORY_NAMESPACE, 992) as acquired_after_error:
+            self.assertTrue(acquired_after_error)
+
+        class_started = Event()
+        release_class = Event()
+        remote_order = []
+
+        def slow_v1_class_http():
+            with _postgres_session_lock(
+                engine, _CLASS_ADVISORY_NAMESPACE, 1,
+            ) as acquired:
+                self.assertTrue(acquired)
+                remote_order.append("v1-start")
+                class_started.set()
+                self.assertTrue(release_class.wait(5))
+                remote_order.append("v1-finish")
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(slow_v1_class_http)
+            self.assertTrue(class_started.wait(5))
+            with _postgres_session_lock(
+                engine, _CLASS_ADVISORY_NAMESPACE, 1,
+            ) as v2_while_v1_acquired:
+                self.assertFalse(v2_while_v1_acquired)
+            release_class.set()
+            future.result(timeout=5)
+        with _postgres_session_lock(
+            engine, _CLASS_ADVISORY_NAMESPACE, 1,
+        ) as v2_after_v1_acquired:
+            self.assertTrue(v2_after_v1_acquired)
+            remote_order.append("v2")
+        self.assertEqual(remote_order, ["v1-start", "v1-finish", "v2"])
+
+        with engine.begin() as connection:
+            connection.execute(text(
+                "DELETE FROM google_wallet_publications WHERE id=:publication_id"
+            ), {"publication_id": publication_id})
         with engine.begin() as connection:
             connection.execute(text(
                 "INSERT INTO referral_participants (business_id, participant_type, staff_id, invitation_code, created_at, updated_at) VALUES (1, 'staff', 1, 'postgres-direct-default', now(), now())"

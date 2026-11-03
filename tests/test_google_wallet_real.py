@@ -18,7 +18,9 @@ from app.services.google_wallet_sync_service import (
     _customer_lock, _now, google_wallet_sync_counts,
     process_pending_google_wallet_jobs,
 )
-from app.services.referral_participant_service import prepare_customer_wallet_invitation
+from app.services.referral_participant_service import (
+    ensure_customer_invitation, prepare_customer_wallet_invitation,
+)
 from app.services.loyalty_transaction_service import process_loyalty_transaction
 
 
@@ -179,6 +181,51 @@ class GoogleWalletRealTestCase(unittest.TestCase):
         self.assertEqual(invite["uri"], invitation_url)
         self.assertEqual(invite["custom"], "keep")
         self.assertTrue(all("loyaltyPoints" not in patch for patch in patches))
+
+    def test_controlled_publication_merges_foreign_texts_and_links_without_balance_or_barcode(self):
+        from datetime import datetime, timezone
+        participant = ensure_customer_invitation(self.customer)
+        participant.is_enabled = True
+        participant.consented_at = datetime.now(timezone.utc)
+        participant.consent_version = "test-v1"
+        participant.consent_evidence_hash = "a" * 64
+        db.session.commit()
+        existing = {
+            "barcode": {"value": "remote-stable-qr"},
+            "loyaltyPoints": {"balance": {"string": "999"}},
+            "textModulesData": [
+                {"id": "foreign", "header": "Externo", "body": "Conservar"},
+                {"id": "program", "header": "Viejo", "body": "Viejo", "custom": "keep"},
+            ],
+            "linksModuleData": {"custom": "keep", "uris": [
+                {"id": "menu", "uri": "https://example.test/menu"},
+            ]},
+        }
+        session = FakeSession([FakeResponse(200, existing), FakeResponse(200, {"id": "object"})])
+        service = GoogleWalletService(
+            mode="real", credentials_info=self.credentials, http_session=session,
+        )
+        result = service.publish_loyalty_object_metadata(self.customer)
+        self.assertEqual(result["status"], "success")
+        patch_body = session.calls[-1][2]
+        self.assertNotIn("barcode", patch_body)
+        self.assertNotIn("loyaltyPoints", patch_body)
+        self.assertEqual(patch_body["textModulesData"][0]["id"], "foreign")
+        self.assertEqual(patch_body["textModulesData"][1]["custom"], "keep")
+        self.assertEqual([item["id"] for item in patch_body["linksModuleData"]["uris"]], [
+            "menu", "invite_friends",
+        ])
+        self.assertEqual(patch_body["linksModuleData"]["custom"], "keep")
+
+    def test_controlled_publication_skips_object_not_issued_without_post(self):
+        before = (self.customer.qr_code_token, self.customer.current_points, self.customer.current_stamps)
+        service = self.service([FakeResponse(404)])
+        result = service.publish_loyalty_object_metadata(self.customer)
+        self.assertEqual(result, {"status": "skipped", "status_code": 404, "reason": "not_issued"})
+        self.assertEqual([call[0] for call in service.http.calls], ["GET"])
+        self.assertEqual(
+            (self.customer.qr_code_token, self.customer.current_points, self.customer.current_stamps), before,
+        )
 
     def test_object_create_conflict_never_patches_balance_from_issuance(self):
         prepare_customer_wallet_invitation(self.customer)

@@ -19,7 +19,7 @@ from app.config import POSTGRES_TLS_MODES
 from app.extensions import db
 
 
-EXPECTED_ALEMBIC_HEAD = "7b8c9d0e1f2a"
+EXPECTED_ALEMBIC_HEAD = "8c9d0e1f2a3b"
 _PLACEHOLDERS = ("change", "replace", "redacted", "placeholder", "example", "tu_clave", "your_")
 
 

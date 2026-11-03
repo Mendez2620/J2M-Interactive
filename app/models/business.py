@@ -36,6 +36,7 @@ class Business(db.Model):
     wallet_instructions = db.Column(db.String(500), nullable=True)
     wallet_contact = db.Column(db.String(160), nullable=True)
     wallet_preset = db.Column(db.String(20), default="classic", server_default="classic", nullable=False)
+    wallet_design_version = db.Column(db.Integer, default=1, server_default="1", nullable=False)
     is_active = db.Column(db.Boolean, default=True, nullable=False)
     web_access_enabled = db.Column(db.Boolean, default=False, nullable=False)
     mobile_access_enabled = db.Column(db.Boolean, default=False, nullable=False)
@@ -93,6 +94,7 @@ class Business(db.Model):
             "wallet_instructions": self.wallet_instructions or "Presenta tu tarjeta al realizar tu compra.",
             "wallet_contact": self.wallet_contact,
             "wallet_preset": self.wallet_preset or "classic",
+            "wallet_design_version": self.wallet_design_version,
             "is_active": self.is_active,
             "web_access_enabled": self.web_access_enabled,
             "mobile_access_enabled": self.mobile_access_enabled,
