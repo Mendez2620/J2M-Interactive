@@ -34,7 +34,7 @@ La clase conserva su ID. En cada objeto se leen primero los metadatos remotos y 
 
 En modo `mock`, los trabajos se registran y terminan como simulación, pero la interfaz identifica el modo y no afirma que Google haya aplicado cambios. `disabled` rechaza el encolado. Una validación real en staging requiere migración controlada, credenciales autorizadas, una publicación de alcance conocido y comprobación del objeto con Google y del dispositivo; este PR no la ejecuta.
 
-Apple Wallet/PassKit y APNs permanecen como subfase posterior del issue #29. No se presentan como sincronización real en esta implementación.
+Apple Wallet/PassKit y APNs se implementan en la revisión `9d0e1f2a3b4c` mediante una cola separada y publicación explícita. La activación real sigue condicionada a certificados Apple, HTTPS público, worker dedicado y validación física; los modos de prueba no se presentan como sincronización real.
 
 ## Vista previa de las instrucciones
 

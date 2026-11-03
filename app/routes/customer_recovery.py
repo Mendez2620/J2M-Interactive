@@ -154,8 +154,11 @@ def recovery_apple_wallet(business_slug):
     customer = verified[1]
     try:
         prepare_customer_wallet_invitation(customer)
+        apple_service = AppleWalletService()
+        apple_service.ensure_pass_credential(customer)
+        db.session.commit()
         return send_file(
-            AppleWalletService().generate_pkpass(customer),
+            apple_service.generate_pkpass(customer),
             mimetype="application/vnd.apple.pkpass", as_attachment=True,
             download_name=f"{business.slug}-pass.pkpass",
         )

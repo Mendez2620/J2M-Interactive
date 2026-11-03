@@ -20,7 +20,7 @@ from app.services.google_wallet_sync_service import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_HEAD = "8c9d0e1f2a3b"
+EXPECTED_HEAD = "9d0e1f2a3b4c"
 
 
 class StagingReadinessTestCase(unittest.TestCase):
@@ -44,6 +44,7 @@ class StagingReadinessTestCase(unittest.TestCase):
             SMTP_FROM="no-reply@invalid.test",
             SMTP_USE_TLS=True,
             GOOGLE_WALLET_MODE="disabled",
+            APPLE_WALLET_MODE="disabled",
             UPLOAD_STORAGE_BACKEND="disabled",
             APPLE_PASS_TYPE_ID="",
             APPLE_TEAM_ID="",
@@ -184,6 +185,8 @@ class StagingReadinessTestCase(unittest.TestCase):
             APPLE_KEY_PATH="missing-key.pem",
             APPLE_WWDR_PATH="missing-wwdr.pem",
             APPLE_WEB_SERVICE_URL="https://api.ejemplo.com/api/apple/v1",
+            APPLE_WALLET_MODE="real",
+            APPLE_PASS_AUTH_KEYS="staging-test-apple-pass-auth-key-at-least-32-bytes",
         )
         result = self.runner.invoke(args=["staging-preflight", "--json-output"])
         payload = json.loads(result.output.splitlines()[0])
@@ -246,8 +249,9 @@ class StagingReadinessTestCase(unittest.TestCase):
                 "WHERE relname = ANY(:tables) ORDER BY relname"
             ), {"tables": [
                 "google_wallet_publication_jobs", "google_wallet_publications",
+                "apple_pass_credentials", "apple_wallet_publications", "apple_wallet_push_jobs",
             ]}).all()
-            self.assertEqual(len(wallet_tables), 2)
+            self.assertEqual(len(wallet_tables), 5)
             self.assertTrue(all(row.relrowsecurity for row in wallet_tables))
             public_grants = connection.execute(text(
                 "SELECT COUNT(*) FROM information_schema.table_privileges "
@@ -255,6 +259,7 @@ class StagingReadinessTestCase(unittest.TestCase):
                 "AND table_name = ANY(:tables) AND grantee='PUBLIC'"
             ), {"tables": [
                 "google_wallet_publication_jobs", "google_wallet_publications",
+                "apple_pass_credentials", "apple_wallet_publications", "apple_wallet_push_jobs",
             ]}).scalar()
             self.assertEqual(public_grants, 0)
             self.assertEqual(connection.execute(text(
@@ -350,6 +355,46 @@ class StagingReadinessTestCase(unittest.TestCase):
             connection.execute(text(
                 "DELETE FROM google_wallet_publications WHERE id=:publication_id"
             ), {"publication_id": publication_id})
+            connection.execute(text(
+                "INSERT INTO customers (id, business_id, full_name, current_points, current_stamps, qr_code_token, created_at) "
+                "VALUES (1, 1, 'Apple PG', 0, 0, 'apple-pg-qr', now())"
+            ))
+            connection.execute(text(
+                "INSERT INTO apple_pass_credentials (business_id, customer_id, pass_type_identifier, serial_number, auth_token_digest) "
+                "VALUES (1, 1, 'pass.com.j2m.test', 'customer_1_pg', repeat('a', 64))"
+            ))
+            connection.execute(text(
+                "INSERT INTO apple_devices (id, customer_id, device_library_identifier, push_token, pass_type_identifier, serial_number, created_at, updated_at) "
+                "VALUES (1, 1, 'device-postgres-1', 'push-postgres-1', 'pass.com.j2m.test', 'customer_1_pg', now(), now())"
+            ))
+            connection.execute(text(
+                "INSERT INTO apple_wallet_publications (id, business_id, design_version, active_key, status, created_by_admin_id, reason) "
+                "VALUES (1, 1, 1, 'active', 'pending', 1, 'claim PostgreSQL')"
+            ))
+            connection.execute(text(
+                "INSERT INTO apple_wallet_push_jobs (publication_id, business_id, customer_id, device_id, design_version, target_update_version, reason) "
+                "VALUES (1, 1, 1, 1, 1, 2, 'design')"
+            ))
+            apple_job_id = connection.execute(text("SELECT id FROM apple_wallet_push_jobs")).scalar_one()
+        apple_barrier = Barrier(2)
+
+        def claim_apple(token):
+            with engine.begin() as connection:
+                apple_barrier.wait()
+                return connection.execute(text(
+                    "UPDATE apple_wallet_push_jobs SET status='processing', lease_token=:token, locked_at=now() "
+                    "WHERE id=:job_id AND status='pending'"
+                ), {"token": token, "job_id": apple_job_id}).rowcount
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            apple_claims = list(executor.map(claim_apple, ("apple-a", "apple-b")))
+        self.assertEqual(sorted(apple_claims), [0, 1])
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM apple_wallet_push_jobs"))
+            connection.execute(text("DELETE FROM apple_wallet_publications"))
+            connection.execute(text("DELETE FROM apple_devices WHERE id=1"))
+            connection.execute(text("DELETE FROM apple_pass_credentials"))
+            connection.execute(text("DELETE FROM customers WHERE id=1"))
         with engine.begin() as connection:
             connection.execute(text(
                 "INSERT INTO referral_participants (business_id, participant_type, staff_id, invitation_code, created_at, updated_at) VALUES (1, 'staff', 1, 'postgres-direct-default', now(), now())"

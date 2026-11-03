@@ -131,6 +131,8 @@ def get_apple_wallet_pass(customer_id: int):
     try:
         prepare_customer_wallet_invitation(customer)
         apple_service = AppleWalletService()
+        apple_service.ensure_pass_credential(customer)
+        db.session.commit()
         pkpass_stream = apple_service.generate_pkpass(customer)
         filename = f"{customer.business.slug}-pass.pkpass"
 

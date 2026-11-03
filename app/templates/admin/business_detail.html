@@ -288,6 +288,23 @@
             </div>
           </div>
         </section>
+        <section class="mt-4 rounded-2xl border border-slate-200 bg-white p-4 sm:p-5" aria-labelledby="appleWalletPublishTitle" data-apple-wallet-publication>
+          <div class="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <h4 id="appleWalletPublishTitle" class="text-sm font-bold text-slate-900">Publicar cambios en Apple Wallet</h4>
+              <p class="mt-1 text-xs leading-5 text-slate-600">Encola notificaciones APNs para dispositivos registrados. Apple Wallet descargará el pase vigente con el mismo serial; guardar el diseño no publica automáticamente.</p>
+              <p class="mt-1 text-xs font-semibold text-slate-700">Modo: {{ apple_wallet_mode }}{% if apple_wallet_mode == 'mock' %} · las notificaciones son simuladas y no llegan a Apple{% endif %}.</p>
+              {% if apple_publication %}{% set apple_batch = apple_publication.publication %}
+              <p class="mt-2 text-xs text-slate-700">Última publicación #{{ apple_batch.id }} · versión {{ apple_batch.design_version }} · estado <strong>{{ apple_batch.status }}</strong> · pendientes {{ apple_publication.counts.get('pending', 0) }} · completados {{ apple_publication.counts.get('completed', 0) }} · fallidos {{ apple_publication.counts.get('failed', 0) }}.</p>
+              {% endif %}
+              <div class="hidden mt-3 rounded-lg p-3 text-sm" role="status" aria-live="polite" data-apple-wallet-publication-message></div>
+            </div>
+            <div class="flex shrink-0 flex-wrap gap-2">
+              <button type="button" data-publish-apple-wallet data-business-id="{{ business.id }}" data-version="{{ business.wallet_design_version }}" data-mode="{{ apple_wallet_mode }}" data-republish="{{ 'true' if apple_publication and apple_publication.publication.design_version == business.wallet_design_version and apple_publication.publication.status in ['completed','failed','superseded','cancelled'] else 'false' }}" {% if apple_wallet_mode == 'disabled' %}disabled{% endif %} class="btn btn-primary">Publicar en Apple Wallet</button>
+              {% if apple_publication and apple_publication.publication.status in ['pending','processing'] %}<button type="button" data-cancel-apple-wallet-publication data-business-id="{{ business.id }}" data-publication-id="{{ apple_publication.publication.id }}" class="btn btn-secondary">Cancelar</button>{% endif %}
+            </div>
+          </div>
+        </section>
       </div>
 
       <!-- Tab 2: Reglas de Lealtad -->
@@ -845,6 +862,33 @@
         const data = await response.json(); if (!response.ok) throw new Error(data.message || 'No fue posible cancelar la publicación.');
         showWalletPublicationMessage('Publicación cancelada. Los trabajos pendientes no se enviarán.', true);
       } catch (error) { showWalletPublicationMessage(error.message, false); button.disabled = false; }
+    });
+    const applePublicationMessage = document.querySelector('[data-apple-wallet-publication-message]');
+    const showApplePublicationMessage = (message, ok) => {
+      if (!applePublicationMessage) return;
+      applePublicationMessage.textContent = message;
+      applePublicationMessage.className = `mt-3 rounded-lg p-3 text-sm ${ok ? 'bg-emerald-50 text-emerald-800' : 'bg-rose-50 text-rose-800'}`;
+    };
+    document.querySelector('[data-publish-apple-wallet]')?.addEventListener('click', async (event) => {
+      const button = event.currentTarget;
+      const reason = window.prompt('Motivo de la publicación en Apple Wallet:');
+      if (!reason || !window.confirm(`¿Notificar los pases Apple registrados para la versión ${button.dataset.version}?`)) return;
+      button.disabled = true;
+      try {
+        const response = await fetch(`/admin/business/${encodeURIComponent(button.dataset.businessId)}/wallet/apple/publications`, {method:'POST', headers:{'Content-Type':'application/json','Accept':'application/json','X-CSRFToken':csrfHeader()}, body:JSON.stringify({confirm:true, republish:button.dataset.republish === 'true', reason})});
+        const data = await response.json(); if (!response.ok) throw new Error(data.message || 'No fue posible encolar la publicación Apple.');
+        showApplePublicationMessage(`Publicación #${data.publication_id} encolada para ${data.queued_devices} dispositivo(s).`, true);
+      } catch (error) { showApplePublicationMessage(error.message, false); button.disabled = false; }
+    });
+    document.querySelector('[data-cancel-apple-wallet-publication]')?.addEventListener('click', async (event) => {
+      const button = event.currentTarget;
+      if (!window.confirm('¿Cancelar las notificaciones Apple pendientes?')) return;
+      button.disabled = true;
+      try {
+        const response = await fetch(`/admin/business/${encodeURIComponent(button.dataset.businessId)}/wallet/apple/publications/${encodeURIComponent(button.dataset.publicationId)}/cancel`, {method:'POST', headers:{'Accept':'application/json','X-CSRFToken':csrfHeader()}});
+        const data = await response.json(); if (!response.ok) throw new Error(data.message || 'No fue posible cancelar la publicación Apple.');
+        showApplePublicationMessage('Publicación Apple cancelada.', true);
+      } catch (error) { showApplePublicationMessage(error.message, false); button.disabled = false; }
     });
     const referralMessage = document.querySelector('[data-referrals-message]');
     function showReferralMessage(message, ok) {
