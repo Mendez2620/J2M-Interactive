@@ -1,3 +1,4 @@
+import copy
 import json
 import logging
 import os
@@ -196,6 +197,15 @@ class GoogleWalletService:
                     "language": "es-419", "value": "Invitar amigos",
                 }},
             }
+            # Google documents both object-level surfaces. appLinkData is the
+            # preferred action, while linksModuleData keeps the same personal
+            # URL discoverable in pass details (including clients that do not
+            # render the app link consistently). Never put this URL on Class.
+            result["linksModuleData"] = {"uris": [{
+                "id": "invite_friends",
+                "uri": invitation_url,
+                "description": "Invitar amigos",
+            }]}
         return result
 
     def _request(self, method, resource, *, body=None):
@@ -236,7 +246,7 @@ class GoogleWalletService:
             if key not in {"id", "classId", "loyaltyPoints"}
         }
         try:
-            self._request("GET", resource)
+            existing = self._request("GET", resource)
         except GoogleWalletAPIError as exc:
             if exc.status_code != 404:
                 raise
@@ -245,6 +255,35 @@ class GoogleWalletService:
             except GoogleWalletAPIError as create_error:
                 if create_error.status_code != 409:
                     raise
+                # A concurrent creator won. Read its complete object before
+                # replacing any array-valued metadata in the PATCH.
+                existing = self._request("GET", resource)
+        desired_links = metadata.get("linksModuleData")
+        if desired_links:
+            existing_module = existing.get("linksModuleData") if isinstance(existing, dict) else None
+            merged_module = copy.deepcopy(existing_module) if isinstance(existing_module, dict) else {}
+            existing_uris = merged_module.get("uris")
+            existing_uris = existing_uris if isinstance(existing_uris, list) else []
+            desired_uris = desired_links.get("uris") if isinstance(desired_links, dict) else []
+            invite = next((item for item in desired_uris
+                           if isinstance(item, dict) and item.get("id") == "invite_friends"), None)
+            if invite:
+                merged_uris = []
+                invite_added = False
+                for item in existing_uris:
+                    if isinstance(item, dict) and item.get("id") == "invite_friends":
+                        if invite_added:
+                            continue
+                        updated = copy.deepcopy(item)
+                        updated.update(copy.deepcopy(invite))
+                        merged_uris.append(updated)
+                        invite_added = True
+                    else:
+                        merged_uris.append(copy.deepcopy(item))
+                if not invite_added:
+                    merged_uris.append(copy.deepcopy(invite))
+                merged_module["uris"] = merged_uris
+                metadata["linksModuleData"] = merged_module
         return self._request("PATCH", resource, body=metadata)
 
     def ensure_resources(self, customer):
