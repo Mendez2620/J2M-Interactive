@@ -132,6 +132,23 @@ def create_app(config_name=None):
         if wallet_mode == "real":
             from app.services.google_wallet import GoogleWalletService
             GoogleWalletService(mode="real")
+        apple_mode = os.getenv("APPLE_WALLET_MODE", app.config.get("APPLE_WALLET_MODE", "disabled")).lower()
+        if apple_mode not in {"disabled", "real"}:
+            raise RuntimeError("Producción solo permite APPLE_WALLET_MODE=disabled o real.")
+        app.config["APPLE_WALLET_MODE"] = apple_mode
+        if apple_mode == "real":
+            required = ("APPLE_PASS_TYPE_ID", "APPLE_TEAM_ID", "APPLE_CERT_PATH",
+                        "APPLE_KEY_PATH", "APPLE_WWDR_PATH", "APPLE_WEB_SERVICE_URL")
+            if any(not str(app.config.get(name) or "").strip() for name in required):
+                raise RuntimeError("Apple Wallet real requiere identificadores, certificados y URL PassKit completos.")
+            parsed_apple_url = urlparse(app.config["APPLE_WEB_SERVICE_URL"])
+            if (parsed_apple_url.scheme != "https" or not parsed_apple_url.hostname
+                    or parsed_apple_url.username or parsed_apple_url.password
+                    or parsed_apple_url.query or parsed_apple_url.fragment):
+                raise RuntimeError("APPLE_WEB_SERVICE_URL debe ser una URL HTTPS pública sin credenciales.")
+            apple_keys = [item.strip() for item in str(app.config.get("APPLE_PASS_AUTH_KEYS") or "").split(",") if item.strip()]
+            if not apple_keys or any(len(item) < 32 or item in {secret, jwt_secret} for item in apple_keys):
+                raise RuntimeError("APPLE_PASS_AUTH_KEYS requiere claves independientes de al menos 32 caracteres.")
 
     # Initialize extensions
     db.init_app(app)
@@ -316,5 +333,28 @@ def create_app(config_name=None):
             logger=app.logger,
         )
         app.logger.info("google_wallet_worker_stopped")
+
+    @app.cli.command("process-apple-wallet-updates")
+    def process_apple_wallet_updates_command():
+        """Process one bounded batch of persistent APNs update jobs."""
+        from app.services.apple_wallet_update_service import process_pending_apple_wallet_jobs
+        processed = process_pending_apple_wallet_jobs(limit=app.config["APPLE_WALLET_BATCH_SIZE"])
+        print(json.dumps({"processed": processed}, sort_keys=True))
+
+    @app.cli.command("run-apple-wallet-worker")
+    def run_apple_wallet_worker_command():
+        """Continuously process APNs update jobs in a dedicated service."""
+        import signal
+        import threading
+        stop_event = threading.Event()
+        for signal_name in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(signal_name, lambda _signum, _frame: stop_event.set())
+        from app.services.apple_wallet_update_service import process_pending_apple_wallet_jobs
+        while not stop_event.is_set():
+            try:
+                process_pending_apple_wallet_jobs(limit=app.config["APPLE_WALLET_BATCH_SIZE"])
+            except Exception as exc:
+                app.logger.error("apple_wallet_worker_cycle_failed error_type=%s", type(exc).__name__)
+            stop_event.wait(app.config["APPLE_WALLET_POLL_SECONDS"])
 
     return app

@@ -18,6 +18,7 @@ from app.models import (
     Business, BusinessCategory, Customer, PlatformAdmin, ReferralAttribution,
     ReferralEligibility, ReferralParticipant,
     ReferralProgramAudit, Staff, Transaction, GoogleWalletPublication,
+    AppleWalletPublication,
 )
 from app.security import current_platform_admin, platform_admin_required, valid_email, validate_password
 from app.services import ExportService
@@ -26,6 +27,10 @@ from app.services.google_wallet_publication_service import (
     WalletPublicationError, cancel_wallet_publication, enqueue_wallet_publication,
     retry_wallet_publication,
     wallet_publication_summary,
+)
+from app.services.apple_wallet_update_service import (
+    ApplePublicationError, apple_publication_summary, cancel_apple_publication,
+    enqueue_apple_publication,
 )
 from app.staff_auth import revoke_staff_sessions
 from app.access_audit import access_audit, staff_access_state
@@ -573,7 +578,9 @@ def get_business_details(business_id: int):
         referral_metrics=referral_metrics,
         referral_program_audits=referral_program_audits,
         wallet_publication=wallet_publication_summary(business.id),
+        apple_publication=apple_publication_summary(business.id),
         google_wallet_mode=current_app.config.get("GOOGLE_WALLET_MODE", "disabled"),
+        apple_wallet_mode=current_app.config.get("APPLE_WALLET_MODE", "disabled"),
     )
 
 
@@ -776,6 +783,45 @@ def cancel_business_wallet_publication(business_id, publication_id):
     try:
         cancel_wallet_publication(publication=publication, admin=current_platform_admin())
     except WalletPublicationError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), exc.status_code
+    return jsonify({"status": "success", "publication_id": publication.id}), 200
+
+
+@admin_bp.post("/business/<int:business_id>/wallet/apple/publications")
+@platform_admin_required
+def publish_business_apple_wallet(business_id):
+    business = db.session.get(Business, business_id)
+    if not business:
+        return jsonify({"status": "error", "message": "Negocio no encontrado."}), 404
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or data.get("confirm") is not True:
+        return jsonify({"status": "error", "message": "Confirma explícitamente la publicación."}), 400
+    if current_app.config.get("APPLE_WALLET_MODE") == "disabled":
+        return jsonify({"status": "error", "message": "Apple Wallet está deshabilitado."}), 409
+    republish = data.get("republish", False)
+    if not isinstance(republish, bool):
+        return jsonify({"status": "error", "message": "La republicación no es válida."}), 400
+    try:
+        publication = enqueue_apple_publication(
+            business=business, admin=current_platform_admin(), reason=data.get("reason"),
+            republish=republish,
+        )
+    except ApplePublicationError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), exc.status_code
+    return jsonify({"status": "success", "publication_id": publication.id,
+                    "design_version": publication.design_version,
+                    "queued_devices": publication.total_jobs}), 202
+
+
+@admin_bp.post("/business/<int:business_id>/wallet/apple/publications/<int:publication_id>/cancel")
+@platform_admin_required
+def cancel_business_apple_wallet_publication(business_id, publication_id):
+    publication = AppleWalletPublication.query.filter_by(id=publication_id, business_id=business_id).one_or_none()
+    if not publication:
+        return jsonify({"status": "error", "message": "Publicación no encontrada."}), 404
+    try:
+        cancel_apple_publication(publication, current_platform_admin())
+    except ApplePublicationError as exc:
         return jsonify({"status": "error", "message": str(exc)}), exc.status_code
     return jsonify({"status": "success", "publication_id": publication.id}), 200
 

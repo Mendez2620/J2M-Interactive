@@ -19,7 +19,7 @@ from app.config import POSTGRES_TLS_MODES
 from app.extensions import db
 
 
-EXPECTED_ALEMBIC_HEAD = "8c9d0e1f2a3b"
+EXPECTED_ALEMBIC_HEAD = "9d0e1f2a3b4c"
 _PLACEHOLDERS = ("change", "replace", "redacted", "placeholder", "example", "tu_clave", "your_")
 
 
@@ -153,23 +153,25 @@ def collect_preflight(config, *, check_database=False):
     else:
         _result(results, "error", "google_wallet", "GOOGLE_WALLET_MODE debe ser disabled o real en staging.")
 
+    apple_mode = str(config.get("APPLE_WALLET_MODE") or "disabled").lower()
     apple_values = [config.get(name) for name in (
         "APPLE_PASS_TYPE_ID", "APPLE_TEAM_ID", "APPLE_CERT_PATH", "APPLE_KEY_PATH", "APPLE_WWDR_PATH",
     )]
-    if not any(apple_values):
+    auth_keys_ok = all(len(item.strip()) >= 32 for item in str(config.get("APPLE_PASS_AUTH_KEYS") or "").split(",") if item.strip()) and bool(config.get("APPLE_PASS_AUTH_KEYS"))
+    if apple_mode == "disabled" and not any(apple_values):
         _result(results, "warning", "apple_wallet", "Apple Wallet no está configurado; permanece como integración opcional pendiente.")
-    elif all(apple_values):
+    elif apple_mode == "real" and all(apple_values):
         identity_ok = not _placeholder(apple_values[0]) and not _placeholder(apple_values[1])
         web_url_ok = _https_endpoint_url(config.get("APPLE_WEB_SERVICE_URL"))
         missing_files = [path for path in apple_values[2:] if not Path(str(path)).is_file()]
-        status = "error" if not identity_ok or not web_url_ok else ("warning" if missing_files else "ok")
+        status = "error" if not identity_ok or not web_url_ok or not auth_keys_ok else ("warning" if missing_files else "ok")
         _result(results, status, "apple_wallet",
                 "Apple Wallet contiene placeholders o una URL de servicio HTTPS inválida."
                 if status == "error" else
                 "Apple Wallet está configurado, pero faltan archivos montados en este proceso."
-                if missing_files else "Apple Wallet tiene identificadores y archivos disponibles; no se contactó Apple.")
+                if missing_files else "Apple Wallet tiene identificadores, autenticación y archivos disponibles; no se contactó Apple.")
     else:
-        _result(results, "error", "apple_wallet", "La configuración parcial de Apple Wallet debe completarse o retirarse.")
+        _result(results, "error", "apple_wallet", "APPLE_WALLET_MODE y la configuración Apple deben estar completos o deshabilitados.")
 
     _result(results, "ok" if config.get("UPLOAD_STORAGE_BACKEND") == "disabled" else "error", "uploads",
             "Uploads locales están deshabilitados." if config.get("UPLOAD_STORAGE_BACKEND") == "disabled"

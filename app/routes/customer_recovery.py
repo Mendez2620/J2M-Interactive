@@ -153,9 +153,18 @@ def recovery_apple_wallet(business_slug):
         return redirect(url_for("recovery.recover", business_slug=business_slug))
     customer = verified[1]
     try:
+        apple_service = AppleWalletService()
+        if not apple_service.pass_generation_allowed():
+            return render_template(
+                "recover.html", business=business, customer=customer,
+                challenge_pending=False, google_mock=False,
+                error="Apple Wallet no está disponible.",
+            ), 503
         prepare_customer_wallet_invitation(customer)
+        apple_service.ensure_pass_credential(customer)
+        db.session.commit()
         return send_file(
-            AppleWalletService().generate_pkpass(customer),
+            apple_service.generate_pkpass(customer),
             mimetype="application/vnd.apple.pkpass", as_attachment=True,
             download_name=f"{business.slug}-pass.pkpass",
         )

@@ -139,6 +139,12 @@ class Config:
     APPLE_KEY_PATH = os.getenv("APPLE_KEY_PATH", "")
     APPLE_WWDR_PATH = os.getenv("APPLE_WWDR_PATH", "")
     APPLE_WEB_SERVICE_URL = os.getenv("APPLE_WEB_SERVICE_URL", "")
+    APPLE_WALLET_MODE = os.getenv("APPLE_WALLET_MODE", "mock").lower()
+    APPLE_PASS_AUTH_KEYS = os.getenv("APPLE_PASS_AUTH_KEYS", "")
+    APPLE_APNS_HOST = os.getenv("APPLE_APNS_HOST", "https://api.push.apple.com")
+    APPLE_APNS_TIMEOUT_SECONDS = int(os.getenv("APPLE_APNS_TIMEOUT_SECONDS", 10))
+    APPLE_WALLET_BATCH_SIZE = int(os.getenv("APPLE_WALLET_BATCH_SIZE", 50))
+    APPLE_WALLET_POLL_SECONDS = int(os.getenv("APPLE_WALLET_POLL_SECONDS", 10))
     SESSION_COOKIE_HTTPONLY = True
     SESSION_COOKIE_SAMESITE = "Lax"
     SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "false").lower() == "true"
@@ -175,6 +181,7 @@ class ProductionConfig(Config):
     # persistent object-storage adapter is implemented and verified.
     UPLOAD_STORAGE_BACKEND = os.getenv("UPLOAD_STORAGE_BACKEND", "disabled").lower()
     GOOGLE_WALLET_MODE = os.getenv("GOOGLE_WALLET_MODE", "disabled").lower()
+    APPLE_WALLET_MODE = os.getenv("APPLE_WALLET_MODE", "disabled").lower()
 
 
 class TestingConfig(Config):
@@ -188,6 +195,8 @@ class TestingConfig(Config):
     AUTH_RATE_LIMIT_ATTEMPTS = 10
     GOOGLE_WALLET_MODE = "mock"
     GOOGLE_ISSUER_ID = "3388000000000000000"
+    APPLE_WALLET_MODE = "mock"
+    APPLE_PASS_AUTH_KEYS = "testing-apple-pass-auth-key-at-least-32-bytes"
     REGISTRATION_RESPONSE_MIN_MS = 0
     REGISTRATION_IDENTITY_HMAC_KEY = "testing-registration-identity-key-32-bytes"
     REFERRAL_EVIDENCE_HMAC_KEYS = "testing-referral-evidence-key-at-least-32-bytes"

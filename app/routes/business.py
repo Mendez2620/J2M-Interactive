@@ -90,7 +90,10 @@ def _wallet_delivery_payload(business, customer, credential):
         "status": "success",
         "customer": {"id": customer.id, "full_name": customer.full_name},
         "google_wallet_url": google_url,
-        "apple_wallet_url": f"/api/customers/{customer.id}/wallet/apple?token={token}",
+        "apple_wallet_url": (
+            f"/api/customers/{customer.id}/wallet/apple?token={token}"
+            if current_app.config.get("APPLE_WALLET_MODE") != "disabled" else None
+        ),
         "wallet_delivery_url": url_for(
             "business.resume_wallet_delivery", slug=business.slug, credential=credential
         ),

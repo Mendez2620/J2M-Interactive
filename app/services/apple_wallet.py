@@ -2,16 +2,24 @@ import io
 import json
 import os
 import hashlib
+import base64
+import hmac
+import ssl
 import zipfile
 import logging
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from flask import current_app, has_app_context
 from PIL import Image, ImageOps, UnidentifiedImageError
 from cryptography import x509
+from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.serialization import pkcs7
+import httpx
+
+from app.extensions import db
 
 logger = logging.getLogger(__name__)
 
@@ -79,10 +87,110 @@ class AppleWalletService:
             or os.getenv("APPLE_WEB_SERVICE_URL")
             or "/api/apple/v1"
         )
+        self.mode = (current_app.config.get("APPLE_WALLET_MODE", "mock") if has_app_context() else os.getenv("APPLE_WALLET_MODE", "mock")).lower()
+
+    @staticmethod
+    def _auth_keys():
+        configured = current_app.config.get("APPLE_PASS_AUTH_KEYS", "") if has_app_context() else os.getenv("APPLE_PASS_AUTH_KEYS", "")
+        keys = [item.strip().encode("utf-8") for item in str(configured).split(",") if item.strip()]
+        if not keys and (not has_app_context() or current_app.testing):
+            keys = [b"testing-apple-pass-auth-key-at-least-32-bytes"]
+        if not keys or len(keys[0]) < 32:
+            raise RuntimeError("Apple PassKit authentication is not configured securely.")
+        return keys
+
+    def _derive_auth_token(self, customer, key_version=1, serial_number=None):
+        keys = self._auth_keys()
+        if key_version < 1 or key_version > len(keys):
+            raise RuntimeError("Apple PassKit authentication key version is unavailable.")
+        return self._derive_auth_token_with_key(customer, keys[key_version - 1], serial_number)
+
+    def _derive_auth_token_with_key(self, customer, key, serial_number=None):
+        serial_number = serial_number or self.get_serial_number(customer)
+        material = f"apple-pass:v1:{customer.business_id}:{customer.id}:{serial_number}".encode()
+        digest = hmac.new(key, material, hashlib.sha256).digest()
+        return base64.urlsafe_b64encode(digest).decode().rstrip("=")
+
+    def ensure_pass_credential(self, customer):
+        from app.models import ApplePassCredential
+        credential = ApplePassCredential.query.filter_by(
+            business_id=customer.business_id, customer_id=customer.id,
+        ).one_or_none()
+        if credential:
+            if credential.pass_type_identifier != self.pass_type_id:
+                raise RuntimeError("Stored Apple pass identity does not match the configured pass.")
+            return credential
+        from app.services.apple_pass_update_sequence import allocate_apple_update_tag
+        serial = self._initial_serial_number(customer)
+        token = self._derive_auth_token(customer, serial_number=serial)
+        credential = ApplePassCredential(
+            business_id=customer.business_id, customer_id=customer.id,
+            pass_type_identifier=self.pass_type_id, serial_number=serial,
+            auth_key_version=1, auth_token_digest=hashlib.sha256(token.encode()).hexdigest(),
+            update_tag=allocate_apple_update_tag(),
+            design_version=max(1, int(customer.business.wallet_design_version or 1)),
+        )
+        db.session.add(credential)
+        db.session.flush()
+        return credential
+
+    def authentication_token(self, customer, credential=None):
+        credential = credential or self.ensure_pass_credential(customer)
+        if credential.revoked_at is not None:
+            raise RuntimeError("Apple pass credential is revoked.")
+        # Match by digest so retained keys remain valid even when a new key is
+        # prepended to the rotation ring.
+        for key in self._auth_keys():
+            token = self._derive_auth_token_with_key(customer, key, credential.serial_number)
+            if hmac.compare_digest(hashlib.sha256(token.encode()).hexdigest(), credential.auth_token_digest):
+                return token
+        raise RuntimeError("Apple pass credential integrity check failed.")
+
+    def authenticate(self, customer, supplied_token, credential=None):
+        if not isinstance(supplied_token, str) or not supplied_token:
+            return False
+        try:
+            expected = self.authentication_token(customer, credential)
+        except RuntimeError:
+            return False
+        return hmac.compare_digest(expected, supplied_token)
 
     def get_serial_number(self, customer) -> str:
-        """Generates a stable unique serial number for the customer's pass."""
+        """Return the persisted pass identity; legacy generation is only for first issue."""
+        from app.models import ApplePassCredential
+        credential = ApplePassCredential.query.filter_by(
+            business_id=customer.business_id, customer_id=customer.id,
+        ).one_or_none()
+        if credential:
+            return credential.serial_number
+        return self._initial_serial_number(customer)
+
+    @staticmethod
+    def _initial_serial_number(customer) -> str:
         return f"customer_{customer.id}_{customer.qr_code_token[:8]}"
+
+    def pass_generation_allowed(self):
+        if self.mode == "real":
+            return True
+        environment = str(current_app.config.get("APP_ENV", "development")).lower() if has_app_context() else ""
+        return bool(
+            self.mode == "mock" and has_app_context() and
+            (current_app.testing or environment in {"development", "testing"})
+        )
+
+    def _validate_pass_certificate(self, cert):
+        now = datetime.now(timezone.utc)
+        if cert.not_valid_before_utc > now or cert.not_valid_after_utc <= now:
+            raise RuntimeError("Apple Pass Type certificate is not currently valid.")
+        pass_ids = {str(attribute.value) for attribute in cert.subject.get_attributes_for_oid(NameOID.USER_ID)}
+        team_ids = {
+            str(attribute.value)
+            for attribute in cert.subject.get_attributes_for_oid(NameOID.ORGANIZATIONAL_UNIT_NAME)
+        }
+        if self.pass_type_id not in pass_ids:
+            raise RuntimeError("Apple certificate does not match APPLE_PASS_TYPE_ID.")
+        if self.team_id not in team_ids:
+            raise RuntimeError("Apple certificate does not match APPLE_TEAM_ID.")
 
     @staticmethod
     def _invitation_url(customer):
@@ -234,10 +342,13 @@ class AppleWalletService:
                 }
             ]
 
-        # WebServiceURL and authenticationToken for real-time push updates via APNs
+        # PassKit authentication is deliberately independent from the loyalty QR.
         if self.web_service_url:
+            parsed_service = urlparse(self.web_service_url)
+            if self.mode == "real" and (parsed_service.scheme != "https" or not parsed_service.netloc):
+                raise RuntimeError("APPLE_WEB_SERVICE_URL must be an absolute HTTPS URL in real mode.")
             pass_dict["webServiceURL"] = self.web_service_url
-            pass_dict["authenticationToken"] = customer.qr_code_token
+            pass_dict["authenticationToken"] = self.authentication_token(customer)
 
         return pass_dict
 
@@ -255,24 +366,31 @@ class AppleWalletService:
                 with open(self.key_path, "rb") as f:
                     private_key = serialization.load_pem_private_key(f.read(), password=password_bytes)
 
+                self._validate_pass_certificate(cert)
+                if not os.path.exists(self.wwdr_path):
+                    raise RuntimeError("Apple WWDR certificate is required.")
+
                 builder = pkcs7.PKCS7SignatureBuilder().set_data(manifest_data)
                 builder = builder.add_signer(cert, private_key, hashes.SHA256())
 
-                if os.path.exists(self.wwdr_path):
-                    with open(self.wwdr_path, "rb") as f:
-                        wwdr_cert = x509.load_pem_x509_certificate(f.read())
-                        builder = builder.add_certificate(wwdr_cert)
+                with open(self.wwdr_path, "rb") as f:
+                    wwdr_cert = x509.load_pem_x509_certificate(f.read())
+                    builder = builder.add_certificate(wwdr_cert)
 
                 return builder.sign(
                     serialization.Encoding.DER,
                     options=[pkcs7.PKCS7Options.DetachedSignature],
                 )
             except Exception as e:
-                logger.warning(
-                    "Failed to sign with certificates at %s (%s). Using dev signature.",
-                    self.cert_path,
-                    str(e),
-                )
+                if self.mode == "real":
+                    raise RuntimeError("Apple pass signing configuration is invalid.") from e
+                logger.warning("Apple pass signing unavailable in non-real mode (%s).", type(e).__name__)
+
+        if self.mode == "real":
+            raise RuntimeError("Apple pass signing credentials are incomplete.")
+
+        if not self.pass_generation_allowed():
+            raise RuntimeError("Apple Wallet pass generation is disabled.")
 
         # Fallback dummy detached signature for local development / testing
         return b"PKCS7_DEV_DUMMY_SIGNATURE_" + hashlib.sha1(manifest_data).digest()
@@ -284,6 +402,8 @@ class AppleWalletService:
         Returns:
             io.BytesIO: Binary stream of the .pkpass file.
         """
+        if not self.pass_generation_allowed():
+            raise RuntimeError("Apple Wallet pass generation is disabled.")
         pass_dict = self.build_pass_json(customer)
         pass_json_bytes = json.dumps(pass_dict, indent=2, ensure_ascii=False).encode("utf-8")
 
@@ -349,11 +469,39 @@ class AppleWalletService:
             logger.warning("Could not load business branding asset: %s", relative_path)
             return None
 
-    def send_push_notification(self, push_token: str) -> bool:
+    def send_push_notification(self, push_token: str) -> dict:
         """
         Sends an empty APNs push notification to prompt the device to request the updated pass.
         In development / mock environments, logs the action and returns True.
         """
-        logger.info("Sending APNs silent pass update push to token: %s", push_token[:16] + "...")
-        # In a production APNs setup with HTTP/2 and PyAPNs2 / httpx, we send POST to https://api.push.apple.com:443
-        return True
+        if not isinstance(push_token, str) or not push_token or len(push_token) > 255:
+            return {"ok": False, "status_code": 400, "permanent": True}
+        if self.mode == "disabled":
+            return {"ok": False, "status_code": 503, "paused": True}
+        if self.mode == "mock":
+            return {"ok": True, "status_code": 200, "mock": True}
+        if (self.mode != "real" or not self.cert_path or not self.key_path
+                or not os.path.isfile(self.cert_path) or not os.path.isfile(self.key_path)):
+            return {"ok": False, "status_code": 503, "permanent": True}
+        host = str(current_app.config.get("APPLE_APNS_HOST", "https://api.push.apple.com")).rstrip("/")
+        timeout = float(current_app.config.get("APPLE_APNS_TIMEOUT_SECONDS", 10))
+        try:
+            with open(self.cert_path, "rb") as cert_file:
+                self._validate_pass_certificate(x509.load_pem_x509_certificate(cert_file.read()))
+            ssl_context = ssl.create_default_context()
+            ssl_context.load_cert_chain(self.cert_path, self.key_path, password=self.key_password)
+        except Exception as exc:
+            logger.warning("apple_apns_configuration_invalid error_type=%s", type(exc).__name__)
+            return {"ok": False, "status_code": 422, "permanent": True}
+        try:
+            with httpx.Client(http2=True, verify=ssl_context, timeout=timeout) as client:
+                response = client.post(
+                    f"{host}/3/device/{push_token}", content=b"{}",
+                    headers={"apns-topic": self.pass_type_id, "apns-push-type": "background", "content-type": "application/json"},
+                )
+            status = response.status_code
+            permanent = status in {400, 403, 404, 410}
+            return {"ok": status == 200, "status_code": status, "permanent": permanent}
+        except (httpx.RequestError, OSError) as exc:
+            logger.warning("apple_apns_transport_failure error_type=%s", type(exc).__name__)
+            return {"ok": False, "status_code": 503, "permanent": False}

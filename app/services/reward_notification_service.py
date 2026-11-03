@@ -1,5 +1,6 @@
 import logging
-from app.services import AppleWalletService
+from app.extensions import db
+from app.services.apple_wallet_update_service import enqueue_apple_pass_update
 
 logger = logging.getLogger(__name__)
 
@@ -19,11 +20,11 @@ class RewardNotificationService:
         """
         notified = False
         try:
-            # Apple push – we reuse the QR code token as the authentication token.
-            # The service method sends a silent APNs notification.
-            AppleWalletService().send_push_notification(customer.qr_code_token)
-            logger.info("Apple Wallet push notification sent for customer %s", customer.id)
-            notified = True
+            queued = enqueue_apple_pass_update(customer, reason="reward")
+            if queued:
+                db.session.commit()
+                logger.info("Apple Wallet update queued for customer %s", customer.id)
+                notified = True
         except Exception as e:
             logger.exception("Failed to send Apple Wallet push: %s", e)
 

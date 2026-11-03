@@ -129,8 +129,12 @@ def get_apple_wallet_pass(customer_id: int):
         )
 
     try:
-        prepare_customer_wallet_invitation(customer)
         apple_service = AppleWalletService()
+        if not apple_service.pass_generation_allowed():
+            return jsonify({"status": "error", "message": "Apple Wallet no está disponible."}), 503
+        prepare_customer_wallet_invitation(customer)
+        apple_service.ensure_pass_credential(customer)
+        db.session.commit()
         pkpass_stream = apple_service.generate_pkpass(customer)
         filename = f"{customer.business.slug}-pass.pkpass"
 
@@ -141,7 +145,7 @@ def get_apple_wallet_pass(customer_id: int):
             download_name=filename,
         )
 
-    except Exception as e:
+    except Exception:
         logger.exception("Error generating Apple Wallet pass for customer %s", customer_id)
         return (
             jsonify({

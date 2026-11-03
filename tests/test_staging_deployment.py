@@ -83,6 +83,7 @@ class StagingDeploymentTestCase(unittest.TestCase):
         self.assertTrue(check_health("web", http_open=lambda *_args, **_kwargs: Response()))
         self.assertFalse(check_health("registration-worker", commandline="flask --app run.py run-registration-email-worker"))
         self.assertTrue(check_health("google-wallet-worker", commandline="flask --app run.py run-google-wallet-sync-worker"))
+        self.assertTrue(check_health("apple-wallet-worker", commandline="flask --app run.py run-apple-wallet-worker"))
         self.assertFalse(check_health("registration-worker", commandline="flask --app run.py run-google-wallet-sync-worker"))
         self.assertFalse(check_health("unknown", commandline="anything"))
         self.assertTrue(check_health("auto", commandline="flask --app run.py run-google-wallet-sync-worker"))
