@@ -717,19 +717,35 @@ def publish_business_wallet(business_id):
     if not business:
         return jsonify({"status": "error", "message": "Negocio no encontrado."}), 404
     data = request.get_json(silent=True) if request.is_json else request.form.to_dict()
-    if not isinstance(data, dict) or str(data.get("confirm", "")).lower() not in {"true", "1", "on"}:
+    if not isinstance(data, dict):
+        return jsonify({"status": "error", "message": "La solicitud no es válida."}), 400
+    confirm = data.get("confirm")
+    confirmed = confirm is True or (isinstance(confirm, str) and confirm.lower() in {"true", "1", "on"})
+    if not confirmed:
         return jsonify({"status": "error", "message": "Confirma explícitamente la publicación."}), 400
+    republish_value = data.get("republish", False)
+    if isinstance(republish_value, str):
+        normalized_republish = republish_value.lower()
+        if normalized_republish in {"true", "1", "on"}:
+            republish_value = True
+        elif normalized_republish in {"false", "0", "off", ""}:
+            republish_value = False
+        else:
+            return jsonify({"status": "error", "message": "La republicación no es válida."}), 400
+    if not isinstance(republish_value, bool):
+        return jsonify({"status": "error", "message": "La republicación no es válida."}), 400
     try:
         publication, replayed = enqueue_wallet_publication(
             business=business, admin=current_platform_admin(),
             provider_mode=current_app.config.get("GOOGLE_WALLET_MODE", "disabled"),
-            reason=data.get("reason"),
+            reason=data.get("reason"), republish=republish_value,
         )
     except WalletPublicationError as exc:
         return jsonify({"status": "error", "message": str(exc)}), exc.status_code
     return jsonify({
         "status": "success", "publication_id": publication.id,
         "design_version": publication.design_version, "provider_mode": publication.provider_mode,
+        "execution_number": publication.execution_number,
         "queued_customers": publication.total_jobs, "idempotent_replay": replayed,
     }), 202
 

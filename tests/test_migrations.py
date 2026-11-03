@@ -90,6 +90,14 @@ class MigrationTestCase(unittest.TestCase):
                     "SELECT version_num FROM alembic_version"
                 ).fetchone()[0], "8c9d0e1f2a3b")
                 self.assertIn("wallet_design_version", columns)
+                publication_columns = {
+                    row[1] for row in connection.execute("PRAGMA table_info(google_wallet_publications)")
+                }
+                job_columns = {
+                    row[1] for row in connection.execute("PRAGMA table_info(google_wallet_publication_jobs)")
+                }
+                self.assertTrue({"execution_number", "active_key", "lease_token"} <= publication_columns)
+                self.assertIn("lease_token", job_columns)
                 default_sql = {
                     row[1]: row[4]
                     for row in connection.execute("PRAGMA table_info(referral_participants)")

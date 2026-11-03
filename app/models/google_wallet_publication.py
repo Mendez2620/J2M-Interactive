@@ -10,13 +10,24 @@ def _utcnow():
 class GoogleWalletPublication(db.Model):
     __tablename__ = "google_wallet_publications"
     __table_args__ = (
-        db.UniqueConstraint("business_id", "design_version", name="uq_google_wallet_publication_version"),
+        db.UniqueConstraint(
+            "business_id", "design_version", "execution_number",
+            name="uq_google_wallet_publication_execution",
+        ),
+        db.UniqueConstraint("business_id", "active_key", name="uq_google_wallet_publication_active"),
         db.UniqueConstraint("business_id", "id", name="uq_google_wallet_publication_business_id_id"),
+        db.CheckConstraint(
+            "(status IN ('pending','processing') AND active_key = 'active') OR "
+            "(status NOT IN ('pending','processing') AND active_key IS NULL)",
+            name="ck_google_wallet_publication_active_state",
+        ),
     )
 
     id = db.Column(db.Integer, primary_key=True)
     business_id = db.Column(db.Integer, db.ForeignKey("businesses.id", ondelete="RESTRICT"), nullable=False, index=True)
     design_version = db.Column(db.Integer, nullable=False)
+    execution_number = db.Column(db.Integer, nullable=False, default=1, server_default="1")
+    active_key = db.Column(db.String(20), nullable=True)
     provider_mode = db.Column(db.String(20), nullable=False)
     status = db.Column(db.String(20), nullable=False, default="pending", server_default="pending", index=True)
     created_by_admin_id = db.Column(db.Integer, nullable=False)
@@ -26,6 +37,7 @@ class GoogleWalletPublication(db.Model):
     attempts = db.Column(db.Integer, nullable=False, default=0, server_default="0")
     next_attempt_at = db.Column(db.DateTime, nullable=True, index=True)
     locked_at = db.Column(db.DateTime, nullable=True)
+    lease_token = db.Column(db.String(64), nullable=True)
     last_status_code = db.Column(db.Integer, nullable=True)
     created_at = db.Column(db.DateTime, nullable=False, default=_utcnow)
     updated_at = db.Column(db.DateTime, nullable=False, default=_utcnow, onupdate=_utcnow)
@@ -55,6 +67,7 @@ class GoogleWalletPublicationJob(db.Model):
     attempts = db.Column(db.Integer, nullable=False, default=0, server_default="0")
     next_attempt_at = db.Column(db.DateTime, nullable=True, index=True)
     locked_at = db.Column(db.DateTime, nullable=True)
+    lease_token = db.Column(db.String(64), nullable=True)
     last_status_code = db.Column(db.Integer, nullable=True)
     created_at = db.Column(db.DateTime, nullable=False, default=_utcnow)
     updated_at = db.Column(db.DateTime, nullable=False, default=_utcnow, onupdate=_utcnow)

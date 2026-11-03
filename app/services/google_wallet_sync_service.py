@@ -209,11 +209,15 @@ def run_google_wallet_sync_worker(*, stop_event=None, sleep_fn=time.sleep, servi
     while not stop_event.is_set():
         try:
             processed = process_pending_google_wallet_jobs(limit=batch_size, service=service)
-            from app.services.google_wallet_publication_service import process_pending_wallet_publications
+            from app.services.google_wallet_publication_service import (
+                process_pending_wallet_publications, wallet_publication_metrics,
+            )
             published = process_pending_wallet_publications(limit=batch_size, service=service)
+            publication_metrics = wallet_publication_metrics()
             metrics = google_wallet_sync_metrics()
             logger.info("google_wallet_worker_metrics %s", json.dumps({
-                "processed": processed, "published": published, **metrics,
+                "processed": processed, "published": published,
+                "publications": publication_metrics, **metrics,
             }, sort_keys=True))
             backlog = metrics["pending"] + metrics["processing"]
             stale = metrics["oldest_pending_seconds"] or 0

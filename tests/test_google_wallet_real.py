@@ -217,6 +217,16 @@ class GoogleWalletRealTestCase(unittest.TestCase):
         ])
         self.assertEqual(patch_body["linksModuleData"]["custom"], "keep")
 
+    def test_controlled_publication_skips_object_not_issued_without_post(self):
+        before = (self.customer.qr_code_token, self.customer.current_points, self.customer.current_stamps)
+        service = self.service([FakeResponse(404)])
+        result = service.publish_loyalty_object_metadata(self.customer)
+        self.assertEqual(result, {"status": "skipped", "status_code": 404, "reason": "not_issued"})
+        self.assertEqual([call[0] for call in service.http.calls], ["GET"])
+        self.assertEqual(
+            (self.customer.qr_code_token, self.customer.current_points, self.customer.current_stamps), before,
+        )
+
     def test_object_create_conflict_never_patches_balance_from_issuance(self):
         prepare_customer_wallet_invitation(self.customer)
         service = self.service([

@@ -14,7 +14,8 @@ branch_labels = None
 depends_on = None
 
 
-STATUSES = "'pending','processing','completed','failed','superseded','cancelled'"
+PUBLICATION_STATUSES = "'pending','processing','completed','failed','superseded','cancelled'"
+JOB_STATUSES = "'pending','processing','completed','failed','skipped','superseded','cancelled'"
 
 
 def upgrade():
@@ -26,6 +27,8 @@ def upgrade():
         sa.Column("id", sa.Integer(), primary_key=True),
         sa.Column("business_id", sa.Integer(), nullable=False),
         sa.Column("design_version", sa.Integer(), nullable=False),
+        sa.Column("execution_number", sa.Integer(), nullable=False, server_default="1"),
+        sa.Column("active_key", sa.String(20), nullable=True),
         sa.Column("provider_mode", sa.String(20), nullable=False),
         sa.Column("status", sa.String(20), nullable=False, server_default="pending"),
         sa.Column("created_by_admin_id", sa.Integer(), nullable=False),
@@ -35,15 +38,28 @@ def upgrade():
         sa.Column("attempts", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("next_attempt_at", sa.DateTime(), nullable=True),
         sa.Column("locked_at", sa.DateTime(), nullable=True),
+        sa.Column("lease_token", sa.String(64), nullable=True),
         sa.Column("last_status_code", sa.Integer(), nullable=True),
         sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.func.now()),
         sa.Column("updated_at", sa.DateTime(), nullable=False, server_default=sa.func.now()),
         sa.ForeignKeyConstraint(["business_id"], ["businesses.id"], ondelete="RESTRICT"),
-        sa.UniqueConstraint("business_id", "design_version", name="uq_google_wallet_publication_version"),
+        sa.UniqueConstraint(
+            "business_id", "design_version", "execution_number",
+            name="uq_google_wallet_publication_execution",
+        ),
+        sa.UniqueConstraint("business_id", "active_key", name="uq_google_wallet_publication_active"),
         sa.UniqueConstraint("business_id", "id", name="uq_google_wallet_publication_business_id_id"),
-        sa.CheckConstraint(f"status IN ({STATUSES})", name="ck_google_wallet_publication_status"),
+        sa.CheckConstraint(f"status IN ({PUBLICATION_STATUSES})", name="ck_google_wallet_publication_status"),
         sa.CheckConstraint("provider_mode IN ('mock','real')", name="ck_google_wallet_publication_mode"),
-        sa.CheckConstraint("design_version > 0 AND total_jobs >= 0 AND attempts >= 0", name="ck_google_wallet_publication_counts"),
+        sa.CheckConstraint(
+            "design_version > 0 AND execution_number > 0 AND total_jobs >= 0 AND attempts >= 0",
+            name="ck_google_wallet_publication_counts",
+        ),
+        sa.CheckConstraint(
+            "(status IN ('pending','processing') AND active_key = 'active') OR "
+            "(status NOT IN ('pending','processing') AND active_key IS NULL)",
+            name="ck_google_wallet_publication_active_state",
+        ),
     )
     op.create_index("ix_google_wallet_publications_business_id", "google_wallet_publications", ["business_id"])
     op.create_index("ix_google_wallet_publications_status", "google_wallet_publications", ["status"])
@@ -59,6 +75,7 @@ def upgrade():
         sa.Column("attempts", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("next_attempt_at", sa.DateTime(), nullable=True),
         sa.Column("locked_at", sa.DateTime(), nullable=True),
+        sa.Column("lease_token", sa.String(64), nullable=True),
         sa.Column("last_status_code", sa.Integer(), nullable=True),
         sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.func.now()),
         sa.Column("updated_at", sa.DateTime(), nullable=False, server_default=sa.func.now()),
@@ -72,7 +89,7 @@ def upgrade():
             ondelete="RESTRICT", name="fk_google_wallet_publication_job_customer_tenant",
         ),
         sa.UniqueConstraint("publication_id", "customer_id", name="uq_google_wallet_publication_job_customer"),
-        sa.CheckConstraint(f"status IN ({STATUSES})", name="ck_google_wallet_publication_job_status"),
+        sa.CheckConstraint(f"status IN ({JOB_STATUSES})", name="ck_google_wallet_publication_job_status"),
         sa.CheckConstraint("design_version > 0 AND attempts >= 0", name="ck_google_wallet_publication_job_counts"),
     )
     for name, columns in (
@@ -86,6 +103,21 @@ def upgrade():
     if op.get_bind().dialect.name == "postgresql":
         op.execute("ALTER TABLE google_wallet_publications ENABLE ROW LEVEL SECURITY")
         op.execute("ALTER TABLE google_wallet_publication_jobs ENABLE ROW LEVEL SECURITY")
+        op.execute("REVOKE ALL ON TABLE google_wallet_publications, google_wallet_publication_jobs FROM PUBLIC")
+        op.execute("REVOKE ALL ON SEQUENCE google_wallet_publications_id_seq, google_wallet_publication_jobs_id_seq FROM PUBLIC")
+        op.execute("""
+            DO $$
+            BEGIN
+              IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+                REVOKE ALL ON TABLE google_wallet_publications, google_wallet_publication_jobs FROM anon;
+                REVOKE ALL ON SEQUENCE google_wallet_publications_id_seq, google_wallet_publication_jobs_id_seq FROM anon;
+              END IF;
+              IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+                REVOKE ALL ON TABLE google_wallet_publications, google_wallet_publication_jobs FROM authenticated;
+                REVOKE ALL ON SEQUENCE google_wallet_publications_id_seq, google_wallet_publication_jobs_id_seq FROM authenticated;
+              END IF;
+            END $$
+        """)
 
 
 def downgrade():

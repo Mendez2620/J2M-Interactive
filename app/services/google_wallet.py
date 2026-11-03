@@ -311,11 +311,11 @@ class GoogleWalletService:
                 emitted.add(item_id)
         return merged
 
-    def publish_loyalty_class(self, business):
+    def publish_loyalty_class(self, business, prepared=None):
         """Publish shared design without changing the stable class identity."""
         if self.mode == "disabled":
             return {"status": "error", "status_code": None}
-        body = self.create_or_update_class(business)
+        body = prepared or self.create_or_update_class(business)
         if self.mode == "mock":
             return {"status": "mock", "class_id": body["id"], "patch_body": body}
         try:
@@ -324,11 +324,11 @@ class GoogleWalletService:
         except GoogleWalletAPIError as exc:
             return {"status": "retry" if exc.retryable else "error", "status_code": exc.status_code}
 
-    def publish_loyalty_object_metadata(self, customer):
+    def publish_loyalty_object_metadata(self, customer, prepared=None):
         """Publish J2M-owned metadata while preserving balance, barcode and foreign modules."""
         if self.mode == "disabled":
             return {"status": "error", "status_code": None}
-        desired = self.create_loyalty_object(customer)
+        desired = prepared or self.create_loyalty_object(customer)
         object_id = desired["id"]
         if self.mode == "mock":
             return {"status": "mock", "object_id": object_id}
@@ -337,18 +337,7 @@ class GoogleWalletService:
             existing = self._request("GET", resource)
         except GoogleWalletAPIError as exc:
             if exc.status_code == 404:
-                try:
-                    self._request("POST", "loyaltyObject", body=desired)
-                    return {"status": "success", "object_id": object_id}
-                except GoogleWalletAPIError as create_error:
-                    if create_error.status_code != 409:
-                        return {"status": "retry" if create_error.retryable else "error",
-                                "status_code": create_error.status_code}
-                    try:
-                        existing = self._request("GET", resource)
-                    except GoogleWalletAPIError as read_error:
-                        return {"status": "retry" if read_error.retryable else "error",
-                                "status_code": read_error.status_code}
+                return {"status": "skipped", "status_code": 404, "reason": "not_issued"}
             else:
                 return {"status": "retry" if exc.retryable else "error", "status_code": exc.status_code}
 

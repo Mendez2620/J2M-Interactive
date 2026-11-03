@@ -3,7 +3,9 @@ import os
 import subprocess
 import sys
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 from unittest.mock import patch
 
 from sqlalchemy import create_engine, text
@@ -236,11 +238,55 @@ class StagingReadinessTestCase(unittest.TestCase):
             ]}).all()
             self.assertEqual(len(protected), 5)
             self.assertTrue(all(row.relrowsecurity for row in protected))
+            wallet_tables = connection.execute(text(
+                "SELECT relname, relrowsecurity FROM pg_class "
+                "WHERE relname = ANY(:tables) ORDER BY relname"
+            ), {"tables": [
+                "google_wallet_publication_jobs", "google_wallet_publications",
+            ]}).all()
+            self.assertEqual(len(wallet_tables), 2)
+            self.assertTrue(all(row.relrowsecurity for row in wallet_tables))
+            public_grants = connection.execute(text(
+                "SELECT COUNT(*) FROM information_schema.table_privileges "
+                "WHERE table_schema=current_schema() "
+                "AND table_name = ANY(:tables) AND grantee='PUBLIC'"
+            ), {"tables": [
+                "google_wallet_publication_jobs", "google_wallet_publications",
+            ]}).scalar()
+            self.assertEqual(public_grants, 0)
             self.assertEqual(connection.execute(text(
                 "SELECT COUNT(*) FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid "
                 "WHERE c.relname='customer_auth_audits' "
                 "AND t.tgname='trg_customer_auth_audits_append_only' AND NOT t.tgisinternal"
             )).scalar(), 1)
+        with engine.begin() as connection:
+            connection.execute(text(
+                "INSERT INTO google_wallet_publications "
+                "(business_id, design_version, execution_number, active_key, provider_mode, status, "
+                "created_by_admin_id, reason) VALUES "
+                "(1, 1, 1, 'active', 'mock', 'pending', 1, 'claim concurrente')"
+            ))
+            publication_id = connection.execute(text(
+                "SELECT id FROM google_wallet_publications WHERE reason='claim concurrente'"
+            )).scalar_one()
+        barrier = Barrier(2)
+
+        def claim(token):
+            with engine.begin() as connection:
+                barrier.wait()
+                return connection.execute(text(
+                    "UPDATE google_wallet_publications "
+                    "SET status='processing', lease_token=:token, locked_at=now() "
+                    "WHERE id=:publication_id AND status='pending' AND active_key='active'"
+                ), {"token": token, "publication_id": publication_id}).rowcount
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            claims = list(executor.map(claim, ("worker-a", "worker-b")))
+        self.assertEqual(sorted(claims), [0, 1])
+        with engine.begin() as connection:
+            connection.execute(text(
+                "DELETE FROM google_wallet_publications WHERE id=:publication_id"
+            ), {"publication_id": publication_id})
         with engine.begin() as connection:
             connection.execute(text(
                 "INSERT INTO referral_participants (business_id, participant_type, staff_id, invitation_code, created_at, updated_at) VALUES (1, 'staff', 1, 'postgres-direct-default', now(), now())"
