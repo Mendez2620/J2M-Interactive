@@ -1,6 +1,6 @@
 # Apple Wallet 8D.1A — Modelo de emisor y preparación para activación
 
-**Estado:** pendiente de respuesta de Apple Developer Support y de decisión formal del titular de J2M. Esta fase NO autoriza emisión comercial, migración de pases ni habilitar APNs. Revisado el 2026-11-03.
+**Estado:** consulta enviada a Apple Developer Support el 2026-11-03, **caso `30000004100447`**; pendiente de respuesta escrita y decisión formal del titular de J2M. Esta fase NO autoriza emisión comercial, migración de pases ni habilitar APNs. Revisado el 2026-11-03.
 
 ## 1. Motivo de la revisión
 
@@ -44,7 +44,7 @@ Canal oficial: https://developer.apple.com/contact/ (iniciar sesión con Apple I
 >
 > Please indicate the permitted model or the appropriate specialist team. Thank you.
 
-No crear una dirección de correo ni marcar la consulta como enviada hasta recibir confirmación real del formulario o de Gmail. Conservar identificador del caso y respuesta escrita. No incluir datos de clientes, claves o certificados.
+**Envío confirmado** por el portal oficial Apple Developer Support (desarrollo técnico → otras preguntas). Identificador del caso: `30000004100447`. Apple indicó que responderá al correo del Apple ID. La **respuesta y autorización contractual siguen pendientes**. Conservar el número de caso y el texto de respuesta escrita en un repositorio privado, sin datos personales ni credenciales en Git. No incluir datos de clientes, claves o certificados.
 
 ## 4. Revisión técnica del estado actual
 
@@ -74,7 +74,7 @@ Preparar una fase posterior con una entidad `WalletIssuer`/equivalente que vincu
 
 ## 7. Estado/entregables para cerrar 8D.1A
 
-- [ ] Número de caso o confirmación de envío a Apple Developer Support.
+- [x] Número de caso y confirmación de envío a Apple Developer Support: `30000004100447`.
 - [ ] Respuesta escrita de Apple guardada de manera privada.
 - [ ] Modelo de emisor escogido y aprobado por el titular de J2M.
 - [ ] Decisión sobre membresía personal para demo o entidad legal para emisión comercial.
