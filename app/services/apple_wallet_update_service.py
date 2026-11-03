@@ -1,4 +1,5 @@
 import json
+import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 
@@ -17,6 +18,7 @@ from app.services.apple_pass_update_sequence import allocate_apple_update_tag
 ACTIVE = ("pending", "processing")
 TERMINAL = ("completed", "failed", "superseded", "cancelled")
 MAX_ATTEMPTS = 6
+logger = logging.getLogger(__name__)
 
 
 class ApplePublicationError(ValueError):
@@ -27,6 +29,14 @@ class ApplePublicationError(ValueError):
 
 def _now():
     return datetime.now(timezone.utc)
+
+
+def _advance_pass_content_timestamp(credential):
+    previous = credential.updated_at
+    if previous is not None and previous.tzinfo is None:
+        previous = previous.replace(tzinfo=timezone.utc)
+    now = _now()
+    credential.updated_at = max(now, previous + timedelta(seconds=1)) if previous else now
 
 
 def _audit(action, publication, admin_id, previous, new):
@@ -72,6 +82,7 @@ def enqueue_apple_publication(*, business, admin, reason, republish=False):
         if device.customer_id not in customer_versions:
             credential.update_version += 1
             credential.update_tag = allocate_apple_update_tag()
+            _advance_pass_content_timestamp(credential)
             credential.design_version = business.wallet_design_version
             customer_versions[device.customer_id] = credential.update_version
         db.session.add(AppleWalletPushJob(
@@ -102,6 +113,7 @@ def enqueue_apple_pass_update(customer, *, reason="balance"):
         return 0
     credential.update_version += 1
     credential.update_tag = allocate_apple_update_tag()
+    _advance_pass_content_timestamp(credential)
     credential.design_version = customer.business.wallet_design_version
     count = 0
     for device in AppleDevice.query.filter_by(customer_id=customer.id, is_active=True).all():
@@ -176,10 +188,33 @@ def process_pending_apple_wallet_jobs(limit=50, service=None):
             continue
         push_token = device.push_token
         db.session.rollback()  # never keep the ORM transaction open during APNs.
-        result = service.send_push_notification(push_token)
+        try:
+            result = service.send_push_notification(push_token)
+            if not isinstance(result, dict):
+                raise TypeError("APNs service returned an invalid result")
+        except Exception as exc:
+            # Never log the push token, certificate contents, or provider body.
+            logger.warning(
+                "apple_apns_job_exception job_id=%s error_type=%s",
+                job_id, type(exc).__name__,
+            )
+            result = {"ok": False, "status_code": 503, "permanent": False}
         job = db.session.get(AppleWalletPushJob, job_id)
         if not job or job.status != "processing" or job.lease_token != token:
             db.session.rollback()
+            continue
+        if result.get("paused"):
+            values = {
+                "status": "pending", "attempts": job.attempts,
+                "last_status_code": result.get("status_code"),
+                "next_attempt_at": _now() + timedelta(minutes=5),
+                "lease_token": None, "locked_at": None,
+            }
+            AppleWalletPushJob.query.filter_by(
+                id=job_id, status="processing", lease_token=token,
+            ).update(values, synchronize_session=False)
+            db.session.commit()
+            processed += 1
             continue
         values = {"attempts": job.attempts + 1, "last_status_code": result.get("status_code"),
                   "lease_token": None, "locked_at": None}

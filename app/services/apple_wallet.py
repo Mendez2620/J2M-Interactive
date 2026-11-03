@@ -14,6 +14,7 @@ from typing import Dict, Any, Optional, List
 from flask import current_app, has_app_context
 from PIL import Image, ImageOps, UnidentifiedImageError
 from cryptography import x509
+from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.serialization import pkcs7
 import httpx
@@ -181,8 +182,15 @@ class AppleWalletService:
         now = datetime.now(timezone.utc)
         if cert.not_valid_before_utc > now or cert.not_valid_after_utc <= now:
             raise RuntimeError("Apple Pass Type certificate is not currently valid.")
-        if self.pass_type_id not in [str(attribute.value) for attribute in cert.subject]:
+        pass_ids = {str(attribute.value) for attribute in cert.subject.get_attributes_for_oid(NameOID.USER_ID)}
+        team_ids = {
+            str(attribute.value)
+            for attribute in cert.subject.get_attributes_for_oid(NameOID.ORGANIZATIONAL_UNIT_NAME)
+        }
+        if self.pass_type_id not in pass_ids:
             raise RuntimeError("Apple certificate does not match APPLE_PASS_TYPE_ID.")
+        if self.team_id not in team_ids:
+            raise RuntimeError("Apple certificate does not match APPLE_TEAM_ID.")
 
     @staticmethod
     def _invitation_url(customer):
@@ -469,7 +477,7 @@ class AppleWalletService:
         if not isinstance(push_token, str) or not push_token or len(push_token) > 255:
             return {"ok": False, "status_code": 400, "permanent": True}
         if self.mode == "disabled":
-            return {"ok": False, "status_code": 503, "permanent": True}
+            return {"ok": False, "status_code": 503, "paused": True}
         if self.mode == "mock":
             return {"ok": True, "status_code": 200, "mock": True}
         if (self.mode != "real" or not self.cert_path or not self.key_path
@@ -482,6 +490,10 @@ class AppleWalletService:
                 self._validate_pass_certificate(x509.load_pem_x509_certificate(cert_file.read()))
             ssl_context = ssl.create_default_context()
             ssl_context.load_cert_chain(self.cert_path, self.key_path, password=self.key_password)
+        except Exception as exc:
+            logger.warning("apple_apns_configuration_invalid error_type=%s", type(exc).__name__)
+            return {"ok": False, "status_code": 422, "permanent": True}
+        try:
             with httpx.Client(http2=True, verify=ssl_context, timeout=timeout) as client:
                 response = client.post(
                     f"{host}/3/device/{push_token}", content=b"{}",
@@ -490,5 +502,6 @@ class AppleWalletService:
             status = response.status_code
             permanent = status in {400, 403, 404, 410}
             return {"ok": status == 200, "status_code": status, "permanent": permanent}
-        except (httpx.TimeoutException, httpx.NetworkError, OSError):
+        except (httpx.RequestError, OSError) as exc:
+            logger.warning("apple_apns_transport_failure error_type=%s", type(exc).__name__)
             return {"ok": False, "status_code": 503, "permanent": False}

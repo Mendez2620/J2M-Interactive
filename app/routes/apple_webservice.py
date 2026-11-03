@@ -1,6 +1,7 @@
 import logging
 import re
 from datetime import datetime, timezone
+from email.utils import format_datetime
 
 from flask import Blueprint, current_app, jsonify, request, send_file
 from itsdangerous import BadData, URLSafeSerializer
@@ -144,15 +145,30 @@ def deliver_pass(pass_type_id, serial_number):
     service = AppleWalletService(pass_type_id=pass_type_id)
     if not service.pass_generation_allowed():
         return jsonify({"error": "Apple Wallet is unavailable"}), 503
+    modified_at = credential.updated_at
+    if modified_at.tzinfo is None:
+        modified_at = modified_at.replace(tzinfo=timezone.utc)
+    modified_at = modified_at.astimezone(timezone.utc).replace(microsecond=0)
+    last_modified = format_datetime(modified_at, usegmt=True)
+    if request.if_modified_since:
+        requested_at = request.if_modified_since
+        if requested_at.tzinfo is None:
+            requested_at = requested_at.replace(tzinfo=timezone.utc)
+        if requested_at.astimezone(timezone.utc) >= modified_at:
+            response = current_app.make_response(("", 304))
+            response.headers["Last-Modified"] = last_modified
+            response.headers["Cache-Control"] = "no-store, private"
+            return response
     stream = service.generate_pkpass(customer)
     # PassKit fetches a pass independently of a particular registered device.
     # Record only that this version was served; never claim every device installed it.
     credential.last_served_at = datetime.now(timezone.utc)
     credential.last_served_update_tag = credential.update_tag
+    credential.updated_at = modified_at
     db.session.commit()
     response = send_file(stream, mimetype="application/vnd.apple.pkpass", as_attachment=True,
                          download_name=f"{customer.business.slug}-pass.pkpass")
-    response.headers["Last-Modified"] = credential.updated_at.strftime("%a, %d %b %Y %H:%M:%S GMT")
+    response.headers["Last-Modified"] = last_modified
     response.headers["Cache-Control"] = "no-store, private"
     return response
 

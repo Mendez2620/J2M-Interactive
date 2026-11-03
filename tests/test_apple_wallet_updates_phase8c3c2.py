@@ -94,6 +94,20 @@ class AppleWalletUpdatesPhase8C3C2TestCase(unittest.TestCase):
         self.assertIsNotNone(credential.last_served_at)
         self.assertEqual(db.session.get(AppleDevice, self.device.id).last_notified_version, 0)
 
+    def test_pass_delivery_honors_if_modified_since(self):
+        url = f"/api/apple/v1/passes/{self.service.pass_type_id}/{self.credential.serial_number}"
+        first = self.client.get(url, headers=self.auth())
+        self.assertEqual(first.status_code, 200)
+        last_modified = first.headers["Last-Modified"]
+        conditional_headers = {**self.auth(), "If-Modified-Since": last_modified}
+        unchanged = self.client.get(url, headers=conditional_headers)
+        self.assertEqual(unchanged.status_code, 304)
+        enqueue_apple_pass_update(self.customer)
+        db.session.commit()
+        changed = self.client.get(url, headers=conditional_headers)
+        self.assertEqual(changed.status_code, 200)
+        self.assertNotEqual(changed.headers["Last-Modified"], last_modified)
+
     def test_marker_is_global_when_one_device_has_multiple_passes(self):
         other_credential = self.service.ensure_pass_credential(self.other_customer)
         shared_device = AppleDevice(
@@ -190,12 +204,45 @@ class AppleWalletUpdatesPhase8C3C2TestCase(unittest.TestCase):
 
         def cancel_during_http(_push_token):
             cancel_apple_publication(db.session.get(AppleWalletPublication, publication.id), self.admin)
-            return {"ok": True, "status_code": 200}
+            raise RuntimeError("provider exception after cancellation")
 
         process_pending_apple_wallet_jobs(service=Mock(send_push_notification=cancel_during_http))
         self.assertEqual(db.session.get(AppleWalletPublication, publication.id).status, "cancelled")
         self.assertEqual(AppleWalletPushJob.query.filter_by(publication_id=publication.id).one().status, "cancelled")
         self.assertEqual(db.session.get(AppleDevice, self.device.id).last_notified_version, 0)
+
+    def test_worker_exceptions_retry_with_backoff_and_stop_after_six_attempts(self):
+        publication = enqueue_apple_publication(
+            business=self.business, admin=self.admin, reason="APNs exception",
+        )
+        sender = Mock(send_push_notification=Mock(side_effect=RuntimeError("private provider failure")))
+        for attempt in range(1, 7):
+            job = AppleWalletPushJob.query.filter_by(publication_id=publication.id).one()
+            if job.next_attempt_at:
+                job.next_attempt_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+                db.session.commit()
+            process_pending_apple_wallet_jobs(service=sender)
+            job = db.session.get(AppleWalletPushJob, job.id)
+            self.assertEqual(job.attempts, attempt)
+            self.assertIsNone(job.lease_token)
+        self.assertEqual(job.status, "failed")
+        self.assertEqual(db.session.get(AppleWalletPublication, publication.id).status, "failed")
+
+    def test_disabled_worker_pauses_without_consuming_job_then_recovers(self):
+        publication = enqueue_apple_publication(
+            business=self.business, admin=self.admin, reason="Pause Apple",
+        )
+        self.app.config["APPLE_WALLET_MODE"] = "disabled"
+        process_pending_apple_wallet_jobs(service=AppleWalletService())
+        job = AppleWalletPushJob.query.filter_by(publication_id=publication.id).one()
+        self.assertEqual((job.status, job.attempts), ("pending", 0))
+        self.assertIsNotNone(job.next_attempt_at)
+        self.assertEqual(db.session.get(AppleWalletPublication, publication.id).status, "pending")
+        self.app.config["APPLE_WALLET_MODE"] = "mock"
+        job.next_attempt_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        db.session.commit()
+        process_pending_apple_wallet_jobs(service=AppleWalletService())
+        self.assertEqual(db.session.get(AppleWalletPushJob, job.id).status, "completed")
 
     def test_newer_design_is_revalidated_before_apns_and_old_job_is_superseded(self):
         publication = enqueue_apple_publication(
@@ -260,22 +307,29 @@ class AppleWalletUpdatesPhase8C3C2TestCase(unittest.TestCase):
         self.assertNotIn(self.customer.full_name, repr(kwargs))
 
     def test_pkpass_uses_real_detached_signature_with_test_certificates(self):
-        def certificate(common_name, key, *, pass_type=None):
+        def certificate(common_name, key, *, pass_type=None, team_id=None,
+                        not_before=None, not_after=None):
             attributes = [x509.NameAttribute(NameOID.COMMON_NAME, common_name)]
             if pass_type:
                 attributes.append(x509.NameAttribute(NameOID.USER_ID, pass_type))
+            if team_id:
+                attributes.append(x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, team_id))
             subject = x509.Name(attributes)
             now = datetime.now(timezone.utc)
             return (x509.CertificateBuilder().subject_name(subject).issuer_name(subject)
                     .public_key(key.public_key()).serial_number(x509.random_serial_number())
-                    .not_valid_before(now - timedelta(minutes=1)).not_valid_after(now + timedelta(days=1))
+                    .not_valid_before(not_before or now - timedelta(minutes=1))
+                    .not_valid_after(not_after or now + timedelta(days=1))
                     .sign(key, hashes.SHA256()))
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
             wwdr_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-            cert = certificate("Test Pass", key, pass_type=self.service.pass_type_id)
+            cert = certificate(
+                "Test Pass", key, pass_type=self.service.pass_type_id,
+                team_id=self.service.team_id,
+            )
             wwdr = certificate("Test WWDR", wwdr_key)
             (root / "key.pem").write_bytes(key.private_bytes(
                 serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
@@ -288,6 +342,68 @@ class AppleWalletUpdatesPhase8C3C2TestCase(unittest.TestCase):
             self.assertFalse(signature.startswith(b"PKCS7_DEV_DUMMY_SIGNATURE_"))
             subjects = x509.load_der_x509_certificate(cert.public_bytes(serialization.Encoding.DER)).subject
             self.assertIn(self.service.pass_type_id, [item.value for item in subjects])
+
+    def test_certificate_requires_exact_pass_type_team_and_valid_dates(self):
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        now = datetime.now(timezone.utc)
+
+        def make(subject, before, after):
+            return (x509.CertificateBuilder().subject_name(subject).issuer_name(subject)
+                    .public_key(key.public_key()).serial_number(x509.random_serial_number())
+                    .not_valid_before(before).not_valid_after(after).sign(key, hashes.SHA256()))
+
+        valid_subject = x509.Name([
+            x509.NameAttribute(NameOID.USER_ID, self.service.pass_type_id),
+            x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, self.service.team_id),
+        ])
+        self.service._validate_pass_certificate(
+            make(valid_subject, now - timedelta(minutes=1), now + timedelta(days=1))
+        )
+        wrong_team = x509.Name([
+            x509.NameAttribute(NameOID.USER_ID, self.service.pass_type_id),
+            x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "WRONGTEAM"),
+        ])
+        with self.assertRaises(RuntimeError):
+            self.service._validate_pass_certificate(
+                make(wrong_team, now - timedelta(minutes=1), now + timedelta(days=1))
+            )
+        wrong_pass = x509.Name([
+            x509.NameAttribute(NameOID.USER_ID, "pass.com.other"),
+            x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, self.service.team_id),
+        ])
+        with self.assertRaises(RuntimeError):
+            self.service._validate_pass_certificate(
+                make(wrong_pass, now - timedelta(minutes=1), now + timedelta(days=1))
+            )
+        with self.assertRaises(RuntimeError):
+            self.service._validate_pass_certificate(
+                make(valid_subject, now - timedelta(days=2), now - timedelta(days=1))
+            )
+
+    def test_malformed_certificate_is_permanent_and_httpx_request_error_retries(self):
+        self.app.config["APPLE_WALLET_MODE"] = "real"
+        service = AppleWalletService(cert_path="cert.pem", key_path="key.pem")
+        with patch("app.services.apple_wallet.os.path.isfile", return_value=True), \
+                patch("builtins.open", mock_open(read_data=b"not-a-certificate")):
+            malformed = service.send_push_notification("push_token_123456")
+        self.assertTrue(malformed["permanent"])
+        self.assertEqual(malformed["status_code"], 422)
+
+        certificate = Mock()
+        ssl_context = Mock()
+        client = Mock()
+        client.__enter__ = Mock(return_value=client)
+        client.__exit__ = Mock(return_value=False)
+        client.post.side_effect = __import__("httpx").ConnectError("network unavailable")
+        with patch("app.services.apple_wallet.os.path.isfile", return_value=True), \
+                patch("builtins.open", mock_open(read_data=b"certificate")), \
+                patch("app.services.apple_wallet.x509.load_pem_x509_certificate", return_value=certificate), \
+                patch.object(service, "_validate_pass_certificate"), \
+                patch("app.services.apple_wallet.ssl.create_default_context", return_value=ssl_context), \
+                patch("app.services.apple_wallet.httpx.Client", return_value=client):
+            transient = service.send_push_notification("push_token_123456")
+        self.assertFalse(transient["permanent"])
+        self.assertEqual(transient["status_code"], 503)
 
 
 if __name__ == "__main__":
