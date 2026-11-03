@@ -24,6 +24,18 @@ Los modos Google Wallet `disabled`, `mock` y `real` se conservan. Un `.pkpass` g
 - Google actualiza la clase y los metadatos del objeto cuando el flujo real vuelve a ejecutar `ensure_resources`, por ejemplo durante una nueva emisión o recuperación. Guardar el diseño por sí solo no hace el `PATCH` remoto ni garantiza cuándo un pase instalado reflejará el cambio.
 - La entrega efectiva en pases instalados depende de credenciales, servicios externos, conectividad y notificaciones reales. No se validó con dispositivos físicos en esta fase.
 
+## Publicación controlada en Google Wallet
+
+Super Admin dispone de una operación explícita «Publicar cambios en Google Wallet». Guardar incrementa la versión del diseño cuando cambia un campo compatible, pero nunca crea trabajos ni llama a Google. La confirmación muestra versión, modo y cantidad de objetos antes de encolar.
+
+La revisión `8c9d0e1f2a3b` añade un outbox separado del outbox contable: una publicación por versión del negocio y un trabajo tenant-scoped por cliente. El worker existente procesa ambos tipos en lotes, con reintentos y backoff, y comparte el bloqueo por cliente para que una publicación de metadatos no compita con el PATCH de saldo. Una versión anterior queda `superseded` y no puede sobrescribir una configuración posterior.
+
+La clase conserva su ID. En cada objeto se leen primero los metadatos remotos y se combinan únicamente los módulos J2M (`program`, `reward`, `instructions`, `terms`, `contact` e `invite_friends`), manteniendo en orden textos, enlaces y atributos ajenos. El PATCH de publicación no contiene barcode ni `loyaltyPoints`. Solo se incluye el enlace público de referido cuando el participante ya está habilitado y consentido; nunca se publica una capacidad temporal de activación.
+
+En modo `mock`, los trabajos se registran y terminan como simulación, pero la interfaz identifica el modo y no afirma que Google haya aplicado cambios. `disabled` rechaza el encolado. Una validación real en staging requiere migración controlada, credenciales autorizadas, una publicación de alcance conocido y comprobación del objeto con Google y del dispositivo; este PR no la ejecuta.
+
+Apple Wallet/PassKit y APNs permanecen como subfase posterior del issue #29. No se presentan como sincronización real en esta implementación.
+
 ## Vista previa de las instrucciones
 
 El editor diferencia «Mensaje de la tarjeta» de «Cómo utilizar la tarjeta (detalles)». Las instrucciones se previsualizan en tiempo real en secciones de detalles: el reverso de Apple y los módulos de información de Google, no en el frente. Se renderizan como texto con `textContent`, no como HTML. Las vistas previas son aproximaciones: guardar no hace `PATCH` de tarjetas instaladas ni envía una notificación de actualización.

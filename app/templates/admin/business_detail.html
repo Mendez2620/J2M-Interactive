@@ -269,6 +269,25 @@
             </button>
           </div>
         </form>
+
+        <section class="mt-6 rounded-2xl border border-indigo-200 bg-indigo-50 p-4 sm:p-5" aria-labelledby="walletPublishTitle" data-wallet-publication>
+          <div class="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <h4 id="walletPublishTitle" class="text-sm font-bold text-slate-900">Publicar cambios en Google Wallet</h4>
+              <p class="mt-1 text-xs leading-5 text-slate-600">Operación independiente de «Guardar». Alcance actual: versión {{ business.wallet_design_version }}, clase existente y {{ customers|length }} objeto(s) del negocio. No modifica saldos, códigos QR ni Apple Wallet.</p>
+              <p class="mt-1 text-xs font-semibold text-slate-700">Modo configurado: {{ google_wallet_mode }}{% if google_wallet_mode == 'mock' %} · la ejecución será simulada y no aplicada por Google{% endif %}.</p>
+              {% if wallet_publication %}{% set publication = wallet_publication.publication %}
+              <p class="mt-2 text-xs text-slate-700">Última publicación #{{ publication.id }} · versión {{ publication.design_version }} · estado <strong>{{ publication.status }}</strong> · pendientes {{ wallet_publication.counts.get('pending', 0) }} · procesando {{ wallet_publication.counts.get('processing', 0) }} · completados {{ wallet_publication.counts.get('completed', 0) }} · fallidos {{ wallet_publication.counts.get('failed', 0) }}{% if publication.updated_at %} · última sincronización {{ publication.updated_at.strftime('%d/%m/%Y %H:%M') }}{% endif %}.</p>
+              {% endif %}
+              <div class="hidden mt-3 rounded-lg p-3 text-sm" role="status" aria-live="polite" data-wallet-publication-message></div>
+            </div>
+            <div class="flex shrink-0 flex-wrap gap-2">
+              <button type="button" data-publish-wallet data-business-id="{{ business.id }}" data-version="{{ business.wallet_design_version }}" data-customers="{{ customers|length }}" data-mode="{{ google_wallet_mode }}" {% if google_wallet_mode == 'disabled' %}disabled{% endif %} class="btn btn-primary">Publicar cambios</button>
+              {% if wallet_publication and wallet_publication.publication.status == 'failed' %}<button type="button" data-retry-wallet-publication data-business-id="{{ business.id }}" data-publication-id="{{ wallet_publication.publication.id }}" class="btn btn-secondary">Reintentar fallidos</button>{% endif %}
+              {% if wallet_publication and wallet_publication.publication.status in ['pending', 'processing'] %}<button type="button" data-cancel-wallet-publication data-business-id="{{ business.id }}" data-publication-id="{{ wallet_publication.publication.id }}" class="btn btn-secondary">Cancelar publicación</button>{% endif %}
+            </div>
+          </div>
+        </section>
       </div>
 
       <!-- Tab 2: Reglas de Lealtad -->
@@ -787,6 +806,45 @@
       });
     });
     const csrfHeader = () => document.querySelector('meta[name="csrf-token"]').content;
+    const walletPublicationMessage = document.querySelector('[data-wallet-publication-message]');
+    function showWalletPublicationMessage(message, ok) {
+      if (!walletPublicationMessage) return;
+      walletPublicationMessage.textContent = message;
+      walletPublicationMessage.className = `mt-3 rounded-lg p-3 text-sm ${ok ? 'bg-emerald-50 text-emerald-800' : 'bg-rose-50 text-rose-800'}`;
+    }
+    document.querySelector('[data-publish-wallet]')?.addEventListener('click', async (event) => {
+      const button = event.currentTarget;
+      const reason = window.prompt('Motivo de la publicación en Google Wallet:');
+      if (!reason) return;
+      const scope = `versión ${button.dataset.version}, ${button.dataset.customers} tarjeta(s), modo ${button.dataset.mode}`;
+      if (!window.confirm(`¿Publicar ${scope}? Guardar el diseño por sí solo no realiza esta operación.`)) return;
+      button.disabled = true;
+      try {
+        const response = await fetch(`/admin/business/${encodeURIComponent(button.dataset.businessId)}/wallet/publications`, {method:'POST', headers:{'Content-Type':'application/json','Accept':'application/json','X-CSRFToken':csrfHeader()}, body:JSON.stringify({confirm:true, reason})});
+        const data = await response.json(); if (!response.ok) throw new Error(data.message || 'No fue posible encolar la publicación.');
+        showWalletPublicationMessage(`Publicación #${data.publication_id} encolada para ${data.queued_customers} tarjeta(s).`, true);
+      } catch (error) { showWalletPublicationMessage(error.message, false); button.disabled = false; }
+    });
+    document.querySelector('[data-retry-wallet-publication]')?.addEventListener('click', async (event) => {
+      const button = event.currentTarget;
+      if (!window.confirm('¿Reintentar únicamente los trabajos fallidos de esta publicación?')) return;
+      button.disabled = true;
+      try {
+        const response = await fetch(`/admin/business/${encodeURIComponent(button.dataset.businessId)}/wallet/publications/${encodeURIComponent(button.dataset.publicationId)}/retry`, {method:'POST', headers:{'Accept':'application/json','X-CSRFToken':csrfHeader()}});
+        const data = await response.json(); if (!response.ok) throw new Error(data.message || 'No fue posible reintentar la publicación.');
+        showWalletPublicationMessage('Reintento encolado.', true);
+      } catch (error) { showWalletPublicationMessage(error.message, false); button.disabled = false; }
+    });
+    document.querySelector('[data-cancel-wallet-publication]')?.addEventListener('click', async (event) => {
+      const button = event.currentTarget;
+      if (!window.confirm('¿Cancelar los trabajos pendientes de esta publicación? Los ya completados no se revierten.')) return;
+      button.disabled = true;
+      try {
+        const response = await fetch(`/admin/business/${encodeURIComponent(button.dataset.businessId)}/wallet/publications/${encodeURIComponent(button.dataset.publicationId)}/cancel`, {method:'POST', headers:{'Accept':'application/json','X-CSRFToken':csrfHeader()}});
+        const data = await response.json(); if (!response.ok) throw new Error(data.message || 'No fue posible cancelar la publicación.');
+        showWalletPublicationMessage('Publicación cancelada. Los trabajos pendientes no se enviarán.', true);
+      } catch (error) { showWalletPublicationMessage(error.message, false); button.disabled = false; }
+    });
     const referralMessage = document.querySelector('[data-referrals-message]');
     function showReferralMessage(message, ok) {
       if (!referralMessage) return;
