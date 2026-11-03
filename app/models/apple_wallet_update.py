@@ -16,7 +16,7 @@ class ApplePassCredential(db.Model):
         ),
         db.UniqueConstraint("business_id", "customer_id", name="uq_apple_pass_credential_customer"),
         db.UniqueConstraint("pass_type_identifier", "serial_number", name="uq_apple_pass_identity"),
-        db.CheckConstraint("update_version >= 1 AND auth_key_version >= 1", name="ck_apple_pass_versions_positive"),
+        db.CheckConstraint("update_version >= 1 AND update_tag >= 1 AND auth_key_version >= 1", name="ck_apple_pass_versions_positive"),
     )
 
     id = db.Column(db.Integer, primary_key=True)
@@ -27,7 +27,10 @@ class ApplePassCredential(db.Model):
     auth_key_version = db.Column(db.Integer, nullable=False, default=1, server_default="1")
     auth_token_digest = db.Column(db.String(64), nullable=False)
     update_version = db.Column(db.BigInteger, nullable=False, default=1, server_default="1")
+    update_tag = db.Column(db.BigInteger, nullable=False, index=True)
     design_version = db.Column(db.Integer, nullable=False, default=1, server_default="1")
+    last_served_at = db.Column(db.DateTime, nullable=True)
+    last_served_update_tag = db.Column(db.BigInteger, nullable=True)
     revoked_at = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, nullable=False, default=_utcnow)
     updated_at = db.Column(db.DateTime, nullable=False, default=_utcnow, onupdate=_utcnow)
@@ -67,6 +70,10 @@ class AppleWalletPushJob(db.Model):
             ondelete="RESTRICT", name="fk_apple_wallet_push_customer_tenant",
         ),
         db.ForeignKeyConstraint(
+            ["customer_id", "device_id"], ["apple_devices.customer_id", "apple_devices.id"],
+            ondelete="RESTRICT", name="fk_apple_wallet_push_device_customer",
+        ),
+        db.ForeignKeyConstraint(
             ["business_id", "publication_id"], ["apple_wallet_publications.business_id", "apple_wallet_publications.id"],
             ondelete="RESTRICT", name="fk_apple_wallet_push_publication_tenant",
         ),
@@ -78,7 +85,7 @@ class AppleWalletPushJob(db.Model):
     publication_id = db.Column(db.Integer, nullable=True)
     business_id = db.Column(db.Integer, nullable=False, index=True)
     customer_id = db.Column(db.Integer, nullable=False, index=True)
-    device_id = db.Column(db.Integer, db.ForeignKey("apple_devices.id", ondelete="RESTRICT"), nullable=False, index=True)
+    device_id = db.Column(db.Integer, nullable=False, index=True)
     design_version = db.Column(db.Integer, nullable=False)
     target_update_version = db.Column(db.BigInteger, nullable=False)
     reason = db.Column(db.String(30), nullable=False)
@@ -90,3 +97,11 @@ class AppleWalletPushJob(db.Model):
     last_status_code = db.Column(db.Integer, nullable=True)
     created_at = db.Column(db.DateTime, nullable=False, default=_utcnow)
     updated_at = db.Column(db.DateTime, nullable=False, default=_utcnow, onupdate=_utcnow)
+
+
+class ApplePassUpdateSequence(db.Model):
+    """Single locked row that orders collection updates by commit."""
+    __tablename__ = "apple_pass_update_sequence"
+
+    id = db.Column(db.Integer, primary_key=True)
+    value = db.Column(db.BigInteger, nullable=False, default=0, server_default="0")

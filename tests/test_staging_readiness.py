@@ -249,9 +249,9 @@ class StagingReadinessTestCase(unittest.TestCase):
                 "WHERE relname = ANY(:tables) ORDER BY relname"
             ), {"tables": [
                 "google_wallet_publication_jobs", "google_wallet_publications",
-                "apple_pass_credentials", "apple_wallet_publications", "apple_wallet_push_jobs",
+                "apple_pass_update_sequence", "apple_pass_credentials", "apple_wallet_publications", "apple_wallet_push_jobs",
             ]}).all()
-            self.assertEqual(len(wallet_tables), 5)
+            self.assertEqual(len(wallet_tables), 6)
             self.assertTrue(all(row.relrowsecurity for row in wallet_tables))
             public_grants = connection.execute(text(
                 "SELECT COUNT(*) FROM information_schema.table_privileges "
@@ -259,7 +259,7 @@ class StagingReadinessTestCase(unittest.TestCase):
                 "AND table_name = ANY(:tables) AND grantee='PUBLIC'"
             ), {"tables": [
                 "google_wallet_publication_jobs", "google_wallet_publications",
-                "apple_pass_credentials", "apple_wallet_publications", "apple_wallet_push_jobs",
+                "apple_pass_update_sequence", "apple_pass_credentials", "apple_wallet_publications", "apple_wallet_push_jobs",
             ]}).scalar()
             self.assertEqual(public_grants, 0)
             self.assertEqual(connection.execute(text(
@@ -360,12 +360,19 @@ class StagingReadinessTestCase(unittest.TestCase):
                 "VALUES (1, 1, 'Apple PG', 0, 0, 'apple-pg-qr', now())"
             ))
             connection.execute(text(
-                "INSERT INTO apple_pass_credentials (business_id, customer_id, pass_type_identifier, serial_number, auth_token_digest) "
-                "VALUES (1, 1, 'pass.com.j2m.test', 'customer_1_pg', repeat('a', 64))"
+                "UPDATE apple_pass_update_sequence SET value=1 WHERE id=1"
+            ))
+            connection.execute(text(
+                "INSERT INTO apple_pass_credentials (business_id, customer_id, pass_type_identifier, serial_number, auth_token_digest, update_tag) "
+                "VALUES (1, 1, 'pass.com.j2m.test', 'customer_1_pg', repeat('a', 64), 1)"
             ))
             connection.execute(text(
                 "INSERT INTO apple_devices (id, customer_id, device_library_identifier, push_token, pass_type_identifier, serial_number, created_at, updated_at) "
                 "VALUES (1, 1, 'device-postgres-1', 'push-postgres-1', 'pass.com.j2m.test', 'customer_1_pg', now(), now())"
+            ))
+            connection.execute(text(
+                "INSERT INTO customers (id, business_id, full_name, current_points, current_stamps, qr_code_token, created_at) "
+                "VALUES (2, 1, 'Apple PG Two', 0, 0, 'apple-pg-qr-two', now())"
             ))
             connection.execute(text(
                 "INSERT INTO apple_wallet_publications (id, business_id, design_version, active_key, status, created_by_admin_id, reason) "
@@ -376,6 +383,12 @@ class StagingReadinessTestCase(unittest.TestCase):
                 "VALUES (1, 1, 1, 1, 1, 2, 'design')"
             ))
             apple_job_id = connection.execute(text("SELECT id FROM apple_wallet_push_jobs")).scalar_one()
+        with self.assertRaises(Exception):
+            with engine.begin() as connection:
+                connection.execute(text(
+                    "INSERT INTO apple_wallet_push_jobs (business_id, customer_id, device_id, design_version, target_update_version, reason) "
+                    "VALUES (1, 2, 1, 1, 1, 'balance')"
+                ))
         apple_barrier = Barrier(2)
 
         def claim_apple(token):
@@ -389,12 +402,25 @@ class StagingReadinessTestCase(unittest.TestCase):
         with ThreadPoolExecutor(max_workers=2) as executor:
             apple_claims = list(executor.map(claim_apple, ("apple-a", "apple-b")))
         self.assertEqual(sorted(apple_claims), [0, 1])
+
+        sequence_barrier = Barrier(2)
+
+        def allocate_passkit_marker(_worker):
+            sequence_barrier.wait()
+            with engine.begin() as connection:
+                return connection.execute(text(
+                    "UPDATE apple_pass_update_sequence SET value=value+1 WHERE id=1 RETURNING value"
+                )).scalar_one()
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            markers = list(executor.map(allocate_passkit_marker, ("marker-a", "marker-b")))
+        self.assertEqual(sorted(markers), [2, 3])
         with engine.begin() as connection:
             connection.execute(text("DELETE FROM apple_wallet_push_jobs"))
             connection.execute(text("DELETE FROM apple_wallet_publications"))
             connection.execute(text("DELETE FROM apple_devices WHERE id=1"))
             connection.execute(text("DELETE FROM apple_pass_credentials"))
-            connection.execute(text("DELETE FROM customers WHERE id=1"))
+            connection.execute(text("DELETE FROM customers WHERE id IN (1, 2)"))
         with engine.begin() as connection:
             connection.execute(text(
                 "INSERT INTO referral_participants (business_id, participant_type, staff_id, invitation_code, created_at, updated_at) VALUES (1, 'staff', 1, 'postgres-direct-default', now(), now())"

@@ -19,8 +19,10 @@ from app.models import (
     Business, Customer, PlatformAdmin,
 )
 from app.services import AppleWalletService
+from app.wallet_access import issue_wallet_token
 from app.services.apple_wallet_update_service import (
-    cancel_apple_publication, enqueue_apple_publication, process_pending_apple_wallet_jobs,
+    cancel_apple_publication, enqueue_apple_pass_update, enqueue_apple_publication,
+    process_pending_apple_wallet_jobs,
 )
 
 
@@ -73,13 +75,13 @@ class AppleWalletUpdatesPhase8C3C2TestCase(unittest.TestCase):
         url = f"/api/apple/v1/passes/{self.service.pass_type_id}/{self.credential.serial_number}"
         self.assertEqual(self.client.get(url, headers={"Authorization": f"ApplePass {self.customer.qr_code_token}"}).status_code, 401)
 
-    def test_update_marker_and_download_confirmation(self):
+    def test_global_update_marker_and_delivery_does_not_confirm_every_device(self):
         list_url = f"/api/apple/v1/devices/{self.device.device_library_identifier}/registrations/{self.service.pass_type_id}"
         first = self.client.get(list_url)
         self.assertEqual(first.status_code, 200)
         marker = first.get_json()["lastUpdated"]
         self.assertEqual(self.client.get(list_url, query_string={"passesUpdatedSince": marker}).status_code, 204)
-        self.credential.update_version += 1
+        enqueue_apple_pass_update(self.customer)
         db.session.commit()
         self.assertEqual(self.client.get(list_url, query_string={"passesUpdatedSince": marker}).status_code, 200)
         deliver = self.client.get(
@@ -87,7 +89,57 @@ class AppleWalletUpdatesPhase8C3C2TestCase(unittest.TestCase):
         )
         self.assertEqual(deliver.status_code, 200)
         self.assertTrue(zipfile.is_zipfile(io.BytesIO(deliver.data)))
-        self.assertEqual(db.session.get(AppleDevice, self.device.id).last_downloaded_version, self.credential.update_version)
+        credential = db.session.get(ApplePassCredential, self.credential.id)
+        self.assertEqual(credential.last_served_update_tag, credential.update_tag)
+        self.assertIsNotNone(credential.last_served_at)
+        self.assertEqual(db.session.get(AppleDevice, self.device.id).last_notified_version, 0)
+
+    def test_marker_is_global_when_one_device_has_multiple_passes(self):
+        other_credential = self.service.ensure_pass_credential(self.other_customer)
+        shared_device = AppleDevice(
+            customer_id=self.other_customer.id,
+            device_library_identifier=self.device.device_library_identifier,
+            pass_type_identifier=self.service.pass_type_id,
+            serial_number=other_credential.serial_number,
+            push_token="push_token_other_123",
+        )
+        db.session.add(shared_device)
+        db.session.commit()
+        url = f"/api/apple/v1/devices/{self.device.device_library_identifier}/registrations/{self.service.pass_type_id}"
+        initial = self.client.get(url).get_json()["lastUpdated"]
+        enqueue_apple_pass_update(self.other_customer)
+        db.session.commit()
+        response = self.client.get(url, query_string={"passesUpdatedSince": initial})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["serialNumbers"], [other_credential.serial_number])
+
+    def test_pass_identity_survives_loyalty_qr_rotation(self):
+        serial = self.credential.serial_number
+        token = self.token
+        self.customer.qr_code_token = "rotated-loyalty-qr-token"
+        db.session.commit()
+        credential = self.service.ensure_pass_credential(self.customer)
+        payload = self.service.build_pass_json(self.customer)
+        self.assertEqual(credential.serial_number, serial)
+        self.assertEqual(payload["serialNumber"], serial)
+        self.assertEqual(payload["authenticationToken"], token)
+        self.assertEqual(payload["barcodes"][0]["message"], "rotated-loyalty-qr-token")
+
+    def test_disabled_mode_never_serves_public_dummy_pkpass(self):
+        self.app.config["APPLE_WALLET_MODE"] = "disabled"
+        service = AppleWalletService()
+        with self.assertRaises(RuntimeError):
+            service.generate_pkpass(self.customer)
+        response = self.client.get(
+            f"/api/apple/v1/passes/{service.pass_type_id}/{self.credential.serial_number}",
+            headers=self.auth(),
+        )
+        self.assertEqual(response.status_code, 503)
+        public_response = self.client.get(
+            f"/api/customers/{self.customer.id}/wallet/apple",
+            query_string={"token": issue_wallet_token(self.customer)},
+        )
+        self.assertEqual(public_response.status_code, 503)
 
     def test_registration_rejects_cross_tenant_and_invalid_input(self):
         url = f"/api/apple/v1/devices/device_library_new/registrations/{self.service.pass_type_id}/{self.credential.serial_number}"
@@ -100,6 +152,19 @@ class AppleWalletUpdatesPhase8C3C2TestCase(unittest.TestCase):
             f"/api/apple/v1/devices/device_library_new/registrations/{self.service.pass_type_id}/{other_credential.serial_number}",
             json={"pushToken": "push_token_123456"}, headers=self.auth(),
         ).status_code, 401)
+
+    def test_worker_rejects_device_from_another_customer_without_apns(self):
+        job = AppleWalletPushJob(
+            business_id=self.other.id, customer_id=self.other_customer.id,
+            device_id=self.device.id, design_version=1,
+            target_update_version=1, reason="balance",
+        )
+        db.session.add(job)
+        db.session.commit()
+        sender = Mock(send_push_notification=Mock(return_value={"ok": True, "status_code": 200}))
+        process_pending_apple_wallet_jobs(service=sender)
+        sender.send_push_notification.assert_not_called()
+        self.assertEqual(db.session.get(AppleWalletPushJob, job.id).status, "cancelled")
 
     def test_persistent_publication_mock_and_permanent_apns_failure(self):
         publication = enqueue_apple_publication(

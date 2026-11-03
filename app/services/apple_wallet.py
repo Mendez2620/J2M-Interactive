@@ -98,32 +98,35 @@ class AppleWalletService:
             raise RuntimeError("Apple PassKit authentication is not configured securely.")
         return keys
 
-    def _derive_auth_token(self, customer, key_version=1):
+    def _derive_auth_token(self, customer, key_version=1, serial_number=None):
         keys = self._auth_keys()
         if key_version < 1 or key_version > len(keys):
             raise RuntimeError("Apple PassKit authentication key version is unavailable.")
-        return self._derive_auth_token_with_key(customer, keys[key_version - 1])
+        return self._derive_auth_token_with_key(customer, keys[key_version - 1], serial_number)
 
-    def _derive_auth_token_with_key(self, customer, key):
-        material = f"apple-pass:v1:{customer.business_id}:{customer.id}:{self.get_serial_number(customer)}".encode()
+    def _derive_auth_token_with_key(self, customer, key, serial_number=None):
+        serial_number = serial_number or self.get_serial_number(customer)
+        material = f"apple-pass:v1:{customer.business_id}:{customer.id}:{serial_number}".encode()
         digest = hmac.new(key, material, hashlib.sha256).digest()
         return base64.urlsafe_b64encode(digest).decode().rstrip("=")
 
     def ensure_pass_credential(self, customer):
         from app.models import ApplePassCredential
-        serial = self.get_serial_number(customer)
         credential = ApplePassCredential.query.filter_by(
             business_id=customer.business_id, customer_id=customer.id,
         ).one_or_none()
         if credential:
-            if credential.pass_type_identifier != self.pass_type_id or credential.serial_number != serial:
+            if credential.pass_type_identifier != self.pass_type_id:
                 raise RuntimeError("Stored Apple pass identity does not match the configured pass.")
             return credential
-        token = self._derive_auth_token(customer)
+        from app.services.apple_pass_update_sequence import allocate_apple_update_tag
+        serial = self._initial_serial_number(customer)
+        token = self._derive_auth_token(customer, serial_number=serial)
         credential = ApplePassCredential(
             business_id=customer.business_id, customer_id=customer.id,
             pass_type_identifier=self.pass_type_id, serial_number=serial,
             auth_key_version=1, auth_token_digest=hashlib.sha256(token.encode()).hexdigest(),
+            update_tag=allocate_apple_update_tag(),
             design_version=max(1, int(customer.business.wallet_design_version or 1)),
         )
         db.session.add(credential)
@@ -137,7 +140,7 @@ class AppleWalletService:
         # Match by digest so retained keys remain valid even when a new key is
         # prepended to the rotation ring.
         for key in self._auth_keys():
-            token = self._derive_auth_token_with_key(customer, key)
+            token = self._derive_auth_token_with_key(customer, key, credential.serial_number)
             if hmac.compare_digest(hashlib.sha256(token.encode()).hexdigest(), credential.auth_token_digest):
                 return token
         raise RuntimeError("Apple pass credential integrity check failed.")
@@ -152,8 +155,27 @@ class AppleWalletService:
         return hmac.compare_digest(expected, supplied_token)
 
     def get_serial_number(self, customer) -> str:
-        """Generates a stable unique serial number for the customer's pass."""
+        """Return the persisted pass identity; legacy generation is only for first issue."""
+        from app.models import ApplePassCredential
+        credential = ApplePassCredential.query.filter_by(
+            business_id=customer.business_id, customer_id=customer.id,
+        ).one_or_none()
+        if credential:
+            return credential.serial_number
+        return self._initial_serial_number(customer)
+
+    @staticmethod
+    def _initial_serial_number(customer) -> str:
         return f"customer_{customer.id}_{customer.qr_code_token[:8]}"
+
+    def pass_generation_allowed(self):
+        if self.mode == "real":
+            return True
+        environment = str(current_app.config.get("APP_ENV", "development")).lower() if has_app_context() else ""
+        return bool(
+            self.mode == "mock" and has_app_context() and
+            (current_app.testing or environment in {"development", "testing"})
+        )
 
     def _validate_pass_certificate(self, cert):
         now = datetime.now(timezone.utc)
@@ -359,6 +381,9 @@ class AppleWalletService:
         if self.mode == "real":
             raise RuntimeError("Apple pass signing credentials are incomplete.")
 
+        if not self.pass_generation_allowed():
+            raise RuntimeError("Apple Wallet pass generation is disabled.")
+
         # Fallback dummy detached signature for local development / testing
         return b"PKCS7_DEV_DUMMY_SIGNATURE_" + hashlib.sha1(manifest_data).digest()
 
@@ -369,6 +394,8 @@ class AppleWalletService:
         Returns:
             io.BytesIO: Binary stream of the .pkpass file.
         """
+        if not self.pass_generation_allowed():
+            raise RuntimeError("Apple Wallet pass generation is disabled.")
         pass_dict = self.build_pass_json(customer)
         pass_json_bytes = json.dumps(pass_dict, indent=2, ensure_ascii=False).encode("utf-8")
 

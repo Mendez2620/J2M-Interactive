@@ -123,11 +123,11 @@ def get_updated_passes(device_id, pass_type_id):
         AppleDevice.device_library_identifier == device_id,
         AppleDevice.pass_type_identifier == pass_type_id,
         AppleDevice.is_active.is_(True), ApplePassCredential.revoked_at.is_(None),
-        ApplePassCredential.update_version > since,
+        ApplePassCredential.update_tag > since,
     ).all()
     if not rows:
         return "", 204
-    newest = max(credential.update_version for _, credential in rows)
+    newest = max(credential.update_tag for _, credential in rows)
     return jsonify({"lastUpdated": _encode_marker(newest),
                     "serialNumbers": sorted({device.serial_number for device, _ in rows})}), 200
 
@@ -141,11 +141,14 @@ def deliver_pass(pass_type_id, serial_number):
     if not customer or not customer.business or not customer.business.is_active:
         return jsonify({"error": "Unauthorized"}), 401
     prepare_customer_wallet_invitation(customer)
-    stream = AppleWalletService(pass_type_id=pass_type_id).generate_pkpass(customer)
-    AppleDevice.query.filter_by(
-        customer_id=customer.id, pass_type_identifier=pass_type_id,
-        serial_number=serial_number, is_active=True,
-    ).update({"last_downloaded_version": credential.update_version}, synchronize_session=False)
+    service = AppleWalletService(pass_type_id=pass_type_id)
+    if not service.pass_generation_allowed():
+        return jsonify({"error": "Apple Wallet is unavailable"}), 503
+    stream = service.generate_pkpass(customer)
+    # PassKit fetches a pass independently of a particular registered device.
+    # Record only that this version was served; never claim every device installed it.
+    credential.last_served_at = datetime.now(timezone.utc)
+    credential.last_served_update_tag = credential.update_tag
     db.session.commit()
     response = send_file(stream, mimetype="application/vnd.apple.pkpass", as_attachment=True,
                          download_name=f"{customer.business.slug}-pass.pkpass")

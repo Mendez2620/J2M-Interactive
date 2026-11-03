@@ -19,11 +19,17 @@ def upgrade():
     for column in (
         sa.Column("is_active", sa.Boolean(), nullable=False, server_default=sa.true()),
         sa.Column("last_notified_version", sa.BigInteger(), nullable=False, server_default="0"),
-        sa.Column("last_downloaded_version", sa.BigInteger(), nullable=False, server_default="0"),
         sa.Column("invalidated_at", sa.DateTime(), nullable=True),
     ):
         if column.name not in existing_device_columns:
             op.add_column("apple_devices", column)
+    op.create_index("uq_apple_device_customer_id_id", "apple_devices", ["customer_id", "id"], unique=True)
+    op.create_table(
+        "apple_pass_update_sequence",
+        sa.Column("id", sa.Integer(), primary_key=True),
+        sa.Column("value", sa.BigInteger(), nullable=False, server_default="0"),
+    )
+    op.execute(sa.text("INSERT INTO apple_pass_update_sequence (id, value) VALUES (1, 0)"))
     op.create_table(
         "apple_pass_credentials",
         sa.Column("id", sa.Integer(), primary_key=True),
@@ -34,7 +40,10 @@ def upgrade():
         sa.Column("auth_key_version", sa.Integer(), nullable=False, server_default="1"),
         sa.Column("auth_token_digest", sa.String(64), nullable=False),
         sa.Column("update_version", sa.BigInteger(), nullable=False, server_default="1"),
+        sa.Column("update_tag", sa.BigInteger(), nullable=False),
         sa.Column("design_version", sa.Integer(), nullable=False, server_default="1"),
+        sa.Column("last_served_at", sa.DateTime(), nullable=True),
+        sa.Column("last_served_update_tag", sa.BigInteger(), nullable=True),
         sa.Column("revoked_at", sa.DateTime(), nullable=True),
         sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.func.now()),
         sa.Column("updated_at", sa.DateTime(), nullable=False, server_default=sa.func.now()),
@@ -42,11 +51,12 @@ def upgrade():
                                 ondelete="RESTRICT", name="fk_apple_pass_credential_customer_tenant"),
         sa.UniqueConstraint("business_id", "customer_id", name="uq_apple_pass_credential_customer"),
         sa.UniqueConstraint("pass_type_identifier", "serial_number", name="uq_apple_pass_identity"),
-        sa.CheckConstraint("update_version >= 1 AND auth_key_version >= 1", name="ck_apple_pass_versions_positive"),
+        sa.CheckConstraint("update_version >= 1 AND update_tag >= 1 AND auth_key_version >= 1", name="ck_apple_pass_versions_positive"),
     )
     op.create_index("ix_apple_pass_credentials_business_id", "apple_pass_credentials", ["business_id"])
     op.create_index("ix_apple_pass_credentials_customer_id", "apple_pass_credentials", ["customer_id"])
     op.create_index("ix_apple_pass_credentials_serial_number", "apple_pass_credentials", ["serial_number"])
+    op.create_index("ix_apple_pass_credentials_update_tag", "apple_pass_credentials", ["update_tag"])
     op.create_table(
         "apple_wallet_publications",
         sa.Column("id", sa.Integer(), primary_key=True),
@@ -89,7 +99,7 @@ def upgrade():
         sa.Column("updated_at", sa.DateTime(), nullable=False, server_default=sa.func.now()),
         sa.ForeignKeyConstraint(["business_id", "customer_id"], ["customers.business_id", "customers.id"], ondelete="RESTRICT", name="fk_apple_wallet_push_customer_tenant"),
         sa.ForeignKeyConstraint(["business_id", "publication_id"], ["apple_wallet_publications.business_id", "apple_wallet_publications.id"], ondelete="RESTRICT", name="fk_apple_wallet_push_publication_tenant"),
-        sa.ForeignKeyConstraint(["device_id"], ["apple_devices.id"], ondelete="RESTRICT"),
+        sa.ForeignKeyConstraint(["customer_id", "device_id"], ["apple_devices.customer_id", "apple_devices.id"], ondelete="RESTRICT", name="fk_apple_wallet_push_device_customer"),
         sa.UniqueConstraint("publication_id", "device_id", name="uq_apple_wallet_publication_device"),
         sa.CheckConstraint("status IN ('pending','processing','completed','failed','superseded','cancelled')", name="ck_apple_wallet_push_status"),
         sa.CheckConstraint("attempts >= 0 AND target_update_version >= 1", name="ck_apple_wallet_push_counts"),
@@ -97,7 +107,7 @@ def upgrade():
     for column in ("publication_id", "business_id", "customer_id", "device_id", "status", "next_attempt_at"):
         op.create_index(f"ix_apple_wallet_push_jobs_{column}", "apple_wallet_push_jobs", [column])
     if op.get_bind().dialect.name == "postgresql":
-        tables = "apple_pass_credentials, apple_wallet_publications, apple_wallet_push_jobs"
+        tables = "apple_pass_update_sequence, apple_pass_credentials, apple_wallet_publications, apple_wallet_push_jobs"
         for table in tables.split(", "):
             op.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
         op.execute(f"REVOKE ALL ON TABLE {tables} FROM PUBLIC")
@@ -105,10 +115,10 @@ def upgrade():
         op.execute("""
             DO $$ BEGIN
               IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='anon') THEN
-                REVOKE ALL ON TABLE apple_pass_credentials, apple_wallet_publications, apple_wallet_push_jobs FROM anon;
+                REVOKE ALL ON TABLE apple_pass_update_sequence, apple_pass_credentials, apple_wallet_publications, apple_wallet_push_jobs FROM anon;
               END IF;
               IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='authenticated') THEN
-                REVOKE ALL ON TABLE apple_pass_credentials, apple_wallet_publications, apple_wallet_push_jobs FROM authenticated;
+                REVOKE ALL ON TABLE apple_pass_update_sequence, apple_pass_credentials, apple_wallet_publications, apple_wallet_push_jobs FROM authenticated;
               END IF;
             END $$
         """)
@@ -122,8 +132,9 @@ def downgrade():
     op.drop_table("apple_wallet_push_jobs")
     op.drop_table("apple_wallet_publications")
     op.drop_table("apple_pass_credentials")
+    op.drop_table("apple_pass_update_sequence")
+    op.drop_index("uq_apple_device_customer_id_id", table_name="apple_devices")
     with op.batch_alter_table("apple_devices") as batch:
         batch.drop_column("invalidated_at")
-        batch.drop_column("last_downloaded_version")
         batch.drop_column("last_notified_version")
         batch.drop_column("is_active")

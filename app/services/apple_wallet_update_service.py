@@ -11,6 +11,7 @@ from app.models import (
     AppleWalletPushJob, Business, Customer,
 )
 from app.services.apple_wallet import AppleWalletService
+from app.services.apple_pass_update_sequence import allocate_apple_update_tag
 
 
 ACTIVE = ("pending", "processing")
@@ -70,6 +71,7 @@ def enqueue_apple_publication(*, business, admin, reason, republish=False):
             continue
         if device.customer_id not in customer_versions:
             credential.update_version += 1
+            credential.update_tag = allocate_apple_update_tag()
             credential.design_version = business.wallet_design_version
             customer_versions[device.customer_id] = credential.update_version
         db.session.add(AppleWalletPushJob(
@@ -99,6 +101,7 @@ def enqueue_apple_pass_update(customer, *, reason="balance"):
     if not credential or credential.revoked_at is not None:
         return 0
     credential.update_version += 1
+    credential.update_tag = allocate_apple_update_tag()
     credential.design_version = customer.business.wallet_design_version
     count = 0
     for device in AppleDevice.query.filter_by(customer_id=customer.id, is_active=True).all():
@@ -155,7 +158,15 @@ def process_pending_apple_wallet_jobs(limit=50, service=None):
         job = db.session.get(AppleWalletPushJob, job_id)
         device = db.session.get(AppleDevice, job.device_id)
         business = db.session.get(Business, job.business_id)
+        credential = ApplePassCredential.query.filter_by(
+            business_id=job.business_id, customer_id=job.customer_id,
+        ).one_or_none()
         if (not device or not device.is_active or not business or not business.is_active or
+                device.customer_id != job.customer_id or
+                not credential or credential.revoked_at is not None or
+                device.pass_type_identifier != credential.pass_type_identifier or
+                device.serial_number != credential.serial_number or
+                job.target_update_version > credential.update_version or
                 (job.publication_id and business.wallet_design_version != job.design_version)):
             final = "superseded" if job.publication_id else "cancelled"
             AppleWalletPushJob.query.filter_by(id=job_id, status="processing", lease_token=token).update(
@@ -174,7 +185,9 @@ def process_pending_apple_wallet_jobs(limit=50, service=None):
                   "lease_token": None, "locked_at": None}
         if result.get("ok"):
             values.update(status="completed", next_attempt_at=None)
-            AppleDevice.query.filter_by(id=job.device_id, is_active=True).update(
+            AppleDevice.query.filter_by(
+                id=job.device_id, customer_id=job.customer_id, is_active=True,
+            ).update(
                 {"last_notified_version": case(
                     (AppleDevice.last_notified_version < job.target_update_version, job.target_update_version),
                     else_=AppleDevice.last_notified_version,
@@ -184,7 +197,7 @@ def process_pending_apple_wallet_jobs(limit=50, service=None):
         elif result.get("permanent"):
             values.update(status="failed", next_attempt_at=None)
             if result.get("status_code") == 410:
-                AppleDevice.query.filter_by(id=job.device_id).update(
+                AppleDevice.query.filter_by(id=job.device_id, customer_id=job.customer_id).update(
                     {"is_active": False, "invalidated_at": _now()}, synchronize_session=False)
         elif values["attempts"] >= MAX_ATTEMPTS:
             values.update(status="failed", next_attempt_at=None)

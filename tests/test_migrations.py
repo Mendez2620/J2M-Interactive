@@ -32,7 +32,7 @@ EXPECTED_TABLES = {
     "customer_auth_challenges", "customer_auth_audits",
     "customer_referral_activations",
     "google_wallet_publications", "google_wallet_publication_jobs",
-    "apple_pass_credentials", "apple_wallet_publications", "apple_wallet_push_jobs",
+    "apple_pass_update_sequence", "apple_pass_credentials", "apple_wallet_publications", "apple_wallet_push_jobs",
 }
 
 
@@ -125,6 +125,7 @@ class MigrationTestCase(unittest.TestCase):
             with engine.begin() as connection:
                 for table in (
                     "apple_wallet_push_jobs", "apple_wallet_publications", "apple_pass_credentials",
+                    "apple_pass_update_sequence",
                     "google_wallet_publication_jobs", "google_wallet_publications",
                     "customer_referral_activations",
                     "customer_auth_audits", "customer_sessions", "customer_auth_challenges",
@@ -154,8 +155,8 @@ class MigrationTestCase(unittest.TestCase):
                 connection.execute(text("ALTER TABLE staff DROP COLUMN permissions"))
                 connection.execute(text("ALTER TABLE apple_devices DROP COLUMN is_active"))
                 connection.execute(text("ALTER TABLE apple_devices DROP COLUMN last_notified_version"))
-                connection.execute(text("ALTER TABLE apple_devices DROP COLUMN last_downloaded_version"))
                 connection.execute(text("ALTER TABLE apple_devices DROP COLUMN invalidated_at"))
+                connection.execute(text("DROP INDEX uq_apple_device_customer_id_id"))
                 connection.execute(text("DROP TABLE staff_sessions"))
                 connection.execute(text("INSERT INTO businesses (id, name, slug, primary_color, secondary_color, loyalty_type, points_per_currency, stamps_reward_limit, cooldown_minutes, is_active, created_at) VALUES (1, 'Negocio existente', 'existente', '#000000', '#FFFFFF', 'stamps', 1.0, 10, 60, 1, '2026-01-01')"))
             engine.dispose()

@@ -16,7 +16,6 @@ class AppleDevice(db.Model):
     serial_number = db.Column(db.String(120), nullable=False, index=True)
     is_active = db.Column(db.Boolean, nullable=False, default=True, server_default=db.true())
     last_notified_version = db.Column(db.BigInteger, nullable=False, default=0, server_default="0")
-    last_downloaded_version = db.Column(db.BigInteger, nullable=False, default=0, server_default="0")
     invalidated_at = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(
         db.DateTime,
@@ -37,6 +36,7 @@ class AppleDevice(db.Model):
             "serial_number",
             name="uq_device_pass_registration",
         ),
+        db.Index("uq_apple_device_customer_id_id", "customer_id", "id", unique=True),
     )
 
     # Relationships
@@ -51,7 +51,6 @@ class AppleDevice(db.Model):
             "serial_number": self.serial_number,
             "is_active": self.is_active,
             "last_notified_version": self.last_notified_version,
-            "last_downloaded_version": self.last_downloaded_version,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }

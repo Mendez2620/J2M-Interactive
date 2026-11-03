@@ -188,7 +188,9 @@
     const googleButton = document.getElementById('google-wallet-btn');
     googleButton.classList.toggle('hidden', !data.google_wallet_url);
     if (data.google_wallet_url) googleButton.href = data.google_wallet_url;
-    document.getElementById('apple-wallet-btn').href = data.apple_wallet_url;
+    const appleButton = document.getElementById('apple-wallet-btn');
+    appleButton.classList.toggle('hidden', !data.apple_wallet_url);
+    if (data.apple_wallet_url) appleButton.href = data.apple_wallet_url;
   };
   const resumeWalletUrl = {{ wallet_delivery_url|default(none)|tojson }};
   const endWalletUrl = {{ wallet_delivery_end_url|default(none)|tojson }};

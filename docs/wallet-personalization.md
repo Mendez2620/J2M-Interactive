@@ -36,6 +36,8 @@ En modo `mock`, los trabajos se registran y terminan como simulación, pero la i
 
 Apple Wallet/PassKit y APNs se implementan en la revisión `9d0e1f2a3b4c` mediante una cola separada y publicación explícita. La activación real sigue condicionada a certificados Apple, HTTPS público, worker dedicado y validación física; los modos de prueba no se presentan como sincronización real.
 
+El marcador `passesUpdatedSince` se asigna desde una secuencia global y monotónica para toda la colección PassKit, no desde la versión particular de un pase. La descarga HTTP registra únicamente la versión servida del pase: no confirma instalación ni descarga en todos los dispositivos registrados. El modo `disabled` no emite archivos `.pkpass`; las firmas ficticias quedan limitadas al modo `mock` en desarrollo y pruebas. El serial y la credencial de autenticación se conservan desde `apple_pass_credentials`, aunque rote el QR de lealtad usado en caja.
+
 ## Vista previa de las instrucciones
 
 El editor diferencia «Mensaje de la tarjeta» de «Cómo utilizar la tarjeta (detalles)». Las instrucciones se previsualizan en tiempo real en secciones de detalles: el reverso de Apple y los módulos de información de Google, no en el frente. Se renderizan como texto con `textContent`, no como HTML. Las vistas previas son aproximaciones: guardar no hace `PATCH` de tarjetas instaladas ni envía una notificación de actualización.
