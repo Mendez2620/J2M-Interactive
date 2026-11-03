@@ -5,7 +5,7 @@ import sys
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from threading import Barrier
+from threading import Barrier, Event
 from unittest.mock import patch
 
 from sqlalchemy import create_engine, text
@@ -14,6 +14,9 @@ from app import create_app
 from app.config import normalize_database_url
 from app.extensions import db
 from app.staging_preflight import _https_endpoint_url
+from app.services.google_wallet_sync_service import (
+    _ADVISORY_NAMESPACE, _CLASS_ADVISORY_NAMESPACE, _postgres_session_lock,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -283,6 +286,66 @@ class StagingReadinessTestCase(unittest.TestCase):
         with ThreadPoolExecutor(max_workers=2) as executor:
             claims = list(executor.map(claim, ("worker-a", "worker-b")))
         self.assertEqual(sorted(claims), [0, 1])
+
+        remote_started = Event()
+        release_remote = Event()
+
+        def slow_customer_http():
+            with _postgres_session_lock(
+                engine, _ADVISORY_NAMESPACE, 991,
+            ) as acquired:
+                self.assertTrue(acquired)
+                remote_started.set()
+                self.assertTrue(release_remote.wait(5))
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(slow_customer_http)
+            self.assertTrue(remote_started.wait(5))
+            with _postgres_session_lock(
+                engine, _ADVISORY_NAMESPACE, 991,
+            ) as balance_worker_acquired:
+                self.assertFalse(balance_worker_acquired)
+            release_remote.set()
+            future.result(timeout=5)
+        with _postgres_session_lock(engine, _ADVISORY_NAMESPACE, 991) as acquired_after_http:
+            self.assertTrue(acquired_after_http)
+        with self.assertRaisesRegex(RuntimeError, "simulated HTTP failure"):
+            with _postgres_session_lock(engine, _ADVISORY_NAMESPACE, 992) as acquired:
+                self.assertTrue(acquired)
+                raise RuntimeError("simulated HTTP failure")
+        with _postgres_session_lock(engine, _ADVISORY_NAMESPACE, 992) as acquired_after_error:
+            self.assertTrue(acquired_after_error)
+
+        class_started = Event()
+        release_class = Event()
+        remote_order = []
+
+        def slow_v1_class_http():
+            with _postgres_session_lock(
+                engine, _CLASS_ADVISORY_NAMESPACE, 1,
+            ) as acquired:
+                self.assertTrue(acquired)
+                remote_order.append("v1-start")
+                class_started.set()
+                self.assertTrue(release_class.wait(5))
+                remote_order.append("v1-finish")
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(slow_v1_class_http)
+            self.assertTrue(class_started.wait(5))
+            with _postgres_session_lock(
+                engine, _CLASS_ADVISORY_NAMESPACE, 1,
+            ) as v2_while_v1_acquired:
+                self.assertFalse(v2_while_v1_acquired)
+            release_class.set()
+            future.result(timeout=5)
+        with _postgres_session_lock(
+            engine, _CLASS_ADVISORY_NAMESPACE, 1,
+        ) as v2_after_v1_acquired:
+            self.assertTrue(v2_after_v1_acquired)
+            remote_order.append("v2")
+        self.assertEqual(remote_order, ["v1-start", "v1-finish", "v2"])
+
         with engine.begin() as connection:
             connection.execute(text(
                 "DELETE FROM google_wallet_publications WHERE id=:publication_id"

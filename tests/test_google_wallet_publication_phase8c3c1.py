@@ -346,6 +346,34 @@ class GoogleWalletPublicationPhase8C3C1TestCase(unittest.TestCase):
         newest = GoogleWalletPublication.query.order_by(GoogleWalletPublication.id.desc()).first()
         self.assertEqual((newest.status, newest.active_key), ("pending", "active"))
 
+    def test_class_lock_serializes_replacement_until_old_remote_call_finishes(self):
+        admin = db.session.get(PlatformAdmin, self.admin_id)
+        self.enqueue()
+        versions_sent = []
+        publisher = MockPublisher()
+
+        def publish_class(business):
+            versions_sent.append(business.wallet_design_version)
+            if len(versions_sent) == 1:
+                business.wallet_design_version += 1
+                db.session.commit()
+                enqueue_wallet_publication(
+                    business=business, admin=admin, provider_mode="mock",
+                    reason="versión dos",
+                )
+                self.assertEqual(
+                    process_pending_wallet_publications(service=publisher), 0,
+                )
+            return {"status": "mock"}
+
+        publisher.publish_loyalty_class = publish_class
+        self.assertEqual(process_pending_wallet_publications(service=publisher), 0)
+        publications = GoogleWalletPublication.query.order_by(GoogleWalletPublication.id).all()
+        self.assertEqual([item.status for item in publications], ["superseded", "pending"])
+        self.assertEqual(process_pending_wallet_publications(service=publisher), 1)
+        self.assertEqual(versions_sent, [1, 2])
+        self.assertEqual(publications[-1].status, "completed")
+
     def test_stale_worker_claim_is_recovered(self):
         self.enqueue()
         publication = GoogleWalletPublication.query.one()

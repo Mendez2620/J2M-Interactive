@@ -8,7 +8,7 @@ from app.access_audit import access_audit
 from app.extensions import db
 from app.models import Business, Customer, GoogleWalletPublication, GoogleWalletPublicationJob
 from app.services.google_wallet import GoogleWalletService
-from app.services.google_wallet_sync_service import _customer_lock, _now
+from app.services.google_wallet_sync_service import _business_class_lock, _customer_lock, _now
 
 
 LEASE_SECONDS = 300
@@ -226,6 +226,18 @@ def _claim_job(job_id, publication_id, publication_token, now):
     return token if changed == 1 else None
 
 
+def _release_publication_claim(publication_id, token):
+    GoogleWalletPublication.query.filter(
+        GoogleWalletPublication.id == publication_id,
+        GoogleWalletPublication.status == "processing",
+        GoogleWalletPublication.lease_token == token,
+        GoogleWalletPublication.active_key == "active",
+    ).update({
+        "status": "pending", "locked_at": None, "lease_token": None,
+    }, synchronize_session=False)
+    db.session.commit()
+
+
 def _publication_is_owned(publication_id, token, design_version):
     return db.session.query(GoogleWalletPublication.id).join(
         Business, Business.id == GoogleWalletPublication.business_id,
@@ -351,32 +363,54 @@ def process_pending_wallet_publications(limit=50, service=None):
             )
             db.session.commit(); continue
         if not publication.class_published:
-            prepared_class = (
-                service.create_or_update_class(business)
-                if isinstance(service, GoogleWalletService) else None
-            )
-            owned = _publication_is_owned(publication.id, publication_token, publication.design_version)
-            db.session.rollback()
-            if not owned:
-                db.session.rollback(); continue
-            result = (
-                service.publish_loyalty_class(business, prepared=prepared_class)
-                if prepared_class is not None else service.publish_loyalty_class(business)
-            )
-            if result.get("status") in {"success", "mock"}:
-                GoogleWalletPublication.query.filter(
-                    GoogleWalletPublication.id == publication.id,
-                    GoogleWalletPublication.status == "processing",
-                    GoogleWalletPublication.lease_token == publication_token,
-                ).update({"class_published": True}, synchronize_session=False)
-                db.session.commit()
-            else:
-                _store_remote_result(GoogleWalletPublication, publication.id, publication_token, result)
-                db.session.expire_all()
-                current = db.session.get(GoogleWalletPublication, publication.id)
-                if current and current.status == "failed":
-                    current.active_key = None
-                db.session.commit(); continue
+            publication_id_value = publication.id
+            business_id_value = publication.business_id
+            design_version_value = publication.design_version
+            with _business_class_lock(business_id_value) as class_lock_acquired:
+                if not class_lock_acquired:
+                    _release_publication_claim(publication_id_value, publication_token)
+                    continue
+                business = db.session.get(Business, business_id_value)
+                current_design_version = business.wallet_design_version if business else None
+                owned = (
+                    business is not None
+                    and current_design_version == design_version_value
+                    and _publication_is_owned(
+                        publication_id_value, publication_token, design_version_value,
+                    )
+                )
+                prepared_class = (
+                    service.create_or_update_class(business)
+                    if owned and isinstance(service, GoogleWalletService) else None
+                )
+                db.session.rollback()
+                if not owned:
+                    if business is None or current_design_version != design_version_value:
+                        _supersede_publication(publication_id_value)
+                        db.session.commit()
+                    continue
+                result = (
+                    service.publish_loyalty_class(business, prepared=prepared_class)
+                    if prepared_class is not None else service.publish_loyalty_class(business)
+                )
+                if result.get("status") in {"success", "mock"}:
+                    GoogleWalletPublication.query.filter(
+                        GoogleWalletPublication.id == publication_id_value,
+                        GoogleWalletPublication.status == "processing",
+                        GoogleWalletPublication.lease_token == publication_token,
+                    ).update({"class_published": True}, synchronize_session=False)
+                    db.session.commit()
+                else:
+                    _store_remote_result(
+                        GoogleWalletPublication, publication_id_value,
+                        publication_token, result,
+                    )
+                    db.session.expire_all()
+                    current = db.session.get(GoogleWalletPublication, publication_id_value)
+                    if current and current.status == "failed":
+                        current.active_key = None
+                    db.session.commit()
+                    continue
         if not _publication_is_owned(publication.id, publication_token, publication.design_version):
             db.session.rollback(); continue
         job_ids = [row[0] for row in db.session.query(GoogleWalletPublicationJob.id).filter(
