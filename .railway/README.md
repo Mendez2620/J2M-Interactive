@@ -23,6 +23,12 @@
 
 `APPLE_WALLET_MODE=disabled` ya está definido en web y Google worker. No cambiarlo a `mock` o `real` durante la migración. La nueva base en Supabase ya tiene Alembic `9d0e1f2a3b4c`; **no volver a aplicar migraciones como prueba del IaC**.
 
+### Dependencia requerida por Railway CLI
+
+La propia CLI de Railway requiere tener instalado el SDK de authoring TypeScript **`railway`** para evaluar `import ... from "railway/iac"`. Este PR **todavía no añade** la dependencia al `package.json` y `package-lock.json` porque la sesión actual no puede descargar/verificar una versión npm. Antes de ejecutar el plan en el entorno autenticado, instalar el SDK de manera controlada con `npm install --save-dev railway` en la rama del PR, registrar los cambios de `package.json` y `package-lock.json` en este mismo PR y volver a ejecutar CI. No inventar un número de versión. El paquete `railway` es distinto del CLI `@railway/cli` y de los servicios que despliega el proyecto.
+
+Fuente oficial: https://docs.railway.com/cli/config
+
 ## Comprobación segura (solo lectura) antes de un merge
 
 Usar una sesión autenticada del Railway CLI, desde la **rama del PR**, en un equipo de confianza con la CLI actualizada y acceso al proyecto de staging. No pegar credenciales ni tokens en ChatGPT.
