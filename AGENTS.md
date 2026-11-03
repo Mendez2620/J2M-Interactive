@@ -1,0 +1,22 @@
+# Reglas permanentes del repositorio
+
+- Trabajar en una rama `codex/*` creada desde `origin/main` actualizado.
+- No hacer merge, despliegues ni migraciones externas sin autorización expresa.
+- No modificar Railway, Supabase real ni secretos desde tareas de desarrollo.
+- Mantener aislamiento multi-tenant en modelos, consultas, FKs y permisos.
+- Conservar CSRF para cookies y sesiones revocables para personal.
+- No registrar tokens, credenciales, códigos completos ni datos privados.
+- No usar QR de caja, IDs o teléfonos como autorización de clientes.
+- Mantener Apple Wallet y Google Wallet con IDs y saldos estables.
+- No sobrescribir módulos Wallet ajenos al cambio solicitado.
+- No activar recompensas automáticas ni modificar ledger o movimientos.
+- Los consentimientos deben ser expresos, versionados y no preseleccionados.
+- Las invitaciones públicas atribuyen; nunca autentican ni administran cuentas.
+- Aplicar cambios mínimos y conservar compatibilidad histórica.
+- Crear migraciones incrementales, no destructivas y con un solo head.
+- Validar SQLite y PostgreSQL cuando cambie persistencia o concurrencia.
+- Ejecutar pruebas focalizadas antes de una única suite completa final.
+- Comprobar `compileall`, `pip check` y `git diff --check`.
+- No tocar Flutter salvo petición explícita.
+- Documentar limitaciones de proveedores y pruebas físicas no realizadas.
+- Mantener el PR abierto para revisión manual.

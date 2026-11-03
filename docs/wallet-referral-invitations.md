@@ -8,7 +8,9 @@ Las altas nuevas crean la identidad en la misma transacción que el cliente. La 
 
 ## Apple y Google Wallet
 
-Los pases nuevos de Google incluyen `LoyaltyObject.appLinkData`; nunca se guarda una URL personal en `LoyaltyClass`. Apple añade un campo HTTPS `Invitar amigos` en `storeCard.backFields`. Se conservan los IDs, seriales, códigos de caja, saldos y módulos existentes.
+Los pases nuevos de Google incluyen la misma URL personal en `LoyaltyObject.appLinkData` y, como superficie complementaria documentada para los detalles del pase, en `LoyaltyObject.linksModuleData`; nunca se guarda una URL personal en `LoyaltyClass`. Apple añade un campo HTTPS `Invitar amigos` en `storeCard.backFields`. Se conservan los IDs, seriales, códigos de caja, saldos y módulos existentes. La presencia exacta del acceso en Google Wallet Web o Android depende del cliente de Google y debe verificarse físicamente; no se afirma que ambas interfaces lo presenten igual.
+
+El alta de lealtad no solicita consentimiento de referidos. La aceptación específica se muestra únicamente al abrir por primera vez la capacidad privada incluida en el pase. Una capacidad vencida o consumida no se renueva desde el enlace público ni se convierte en autoridad permanente. Una entrega o reemisión ya autorizada del mismo pase crea una capacidad nueva para el mismo cliente y objeto Wallet; actualizar tarjetas previamente instaladas sigue dependiendo del pipeline controlado del issue #29.
 
 Esto no demuestra que todos los pases ya instalados reciban el enlace. Google requiere publicar el cambio del objeto correspondiente. Apple requiere que el dispositivo solicite una versión nueva, normalmente después de una notificación PassKit/APNs. La publicación masiva y su observabilidad quedan coordinadas en el issue #29 y requieren autorización separada; no se fuerza reinstalación ni se duplican pases.
 
