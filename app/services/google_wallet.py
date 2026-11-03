@@ -286,6 +286,93 @@ class GoogleWalletService:
                 metadata["linksModuleData"] = merged_module
         return self._request("PATCH", resource, body=metadata)
 
+    @staticmethod
+    def _merge_items(existing, desired, controlled_ids):
+        """Replace only J2M-owned IDs while preserving foreign items and order."""
+        desired_by_id = {
+            item.get("id"): copy.deepcopy(item) for item in (desired or [])
+            if isinstance(item, dict) and item.get("id") in controlled_ids
+        }
+        merged = []
+        emitted = set()
+        for item in existing or []:
+            item_id = item.get("id") if isinstance(item, dict) else None
+            if item_id not in controlled_ids:
+                merged.append(copy.deepcopy(item))
+            elif item_id in desired_by_id and item_id not in emitted:
+                updated = copy.deepcopy(item)
+                updated.update(desired_by_id[item_id])
+                merged.append(updated)
+                emitted.add(item_id)
+        for item in desired or []:
+            item_id = item.get("id") if isinstance(item, dict) else None
+            if item_id in controlled_ids and item_id not in emitted:
+                merged.append(copy.deepcopy(item))
+                emitted.add(item_id)
+        return merged
+
+    def publish_loyalty_class(self, business, prepared=None):
+        """Publish shared design without changing the stable class identity."""
+        if self.mode == "disabled":
+            return {"status": "error", "status_code": None}
+        body = prepared or self.create_or_update_class(business)
+        if self.mode == "mock":
+            return {"status": "mock", "class_id": body["id"], "patch_body": body}
+        try:
+            self._upsert("loyaltyClass", body["id"], body)
+            return {"status": "success", "class_id": body["id"]}
+        except GoogleWalletAPIError as exc:
+            return {"status": "retry" if exc.retryable else "error", "status_code": exc.status_code}
+
+    def publish_loyalty_object_metadata(self, customer, prepared=None):
+        """Publish J2M-owned metadata while preserving balance, barcode and foreign modules."""
+        if self.mode == "disabled":
+            return {"status": "error", "status_code": None}
+        desired = prepared or self.create_loyalty_object(customer)
+        object_id = desired["id"]
+        if self.mode == "mock":
+            return {"status": "mock", "object_id": object_id}
+        resource = f"loyaltyObject/{quote(object_id, safe='')}"
+        try:
+            existing = self._request("GET", resource)
+        except GoogleWalletAPIError as exc:
+            if exc.status_code == 404:
+                return {"status": "skipped", "status_code": 404, "reason": "not_issued"}
+            else:
+                return {"status": "retry" if exc.retryable else "error", "status_code": exc.status_code}
+
+        controlled_text = {"program", "reward", "instructions", "terms", "contact"}
+        existing_text = existing.get("textModulesData") if isinstance(existing, dict) else []
+        patch_body = {"textModulesData": self._merge_items(
+            existing_text if isinstance(existing_text, list) else [],
+            desired.get("textModulesData", []), controlled_text,
+        )}
+        existing_links = existing.get("linksModuleData") if isinstance(existing, dict) else None
+        desired_links = desired.get("linksModuleData")
+        merged_links = copy.deepcopy(existing_links) if isinstance(existing_links, dict) else {}
+        current_uris = merged_links.get("uris") if isinstance(merged_links.get("uris"), list) else []
+        wanted_uris = desired_links.get("uris", []) if isinstance(desired_links, dict) else []
+        merged_links["uris"] = self._merge_items(current_uris, wanted_uris, {"invite_friends"})
+        if merged_links["uris"] or existing_links is not None:
+            patch_body["linksModuleData"] = merged_links
+
+        if "appLinkData" in desired:
+            patch_body["appLinkData"] = desired["appLinkData"]
+        else:
+            current_app_link = existing.get("appLinkData") if isinstance(existing, dict) else None
+            try:
+                current_uri = current_app_link["webAppLinkInfo"]["appTarget"]["targetUri"]["uri"]
+            except (KeyError, TypeError):
+                current_uri = ""
+            base = str(self._config("PUBLIC_BASE_URL", "") or "").rstrip("/")
+            if base and current_uri.startswith(f"{base}/invite/"):
+                patch_body["appLinkData"] = None
+        try:
+            self._request("PATCH", resource, body=patch_body)
+            return {"status": "success", "object_id": object_id}
+        except GoogleWalletAPIError as exc:
+            return {"status": "retry" if exc.retryable else "error", "status_code": exc.status_code}
+
     def ensure_resources(self, customer):
         if self.mode != "real":
             return

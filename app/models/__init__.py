@@ -15,6 +15,9 @@ from app.models.customer_recovery import (
 from app.models.loyalty_ledger import LoyaltyLedgerEntry
 from app.models.auth_rate_limit import AuthRateLimitSlot
 from app.models.google_wallet_sync_job import GoogleWalletSyncJob
+from app.models.google_wallet_publication import (
+    GoogleWalletPublication, GoogleWalletPublicationJob,
+)
 from app.models.customer_registration import (
     CustomerRegistrationChallenge, CustomerRegistrationIdentityClaim,
 )
@@ -52,6 +55,7 @@ __all__ = [
     "LoyaltyLedgerEntry",
     "AuthRateLimitSlot",
     "GoogleWalletSyncJob",
+    "GoogleWalletPublication", "GoogleWalletPublicationJob",
     "CustomerRegistrationChallenge",
     "CustomerRegistrationIdentityClaim",
     "RegistrationEmailJob",

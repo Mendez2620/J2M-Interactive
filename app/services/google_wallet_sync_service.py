@@ -15,6 +15,7 @@ from app.services.google_wallet import GoogleWalletService
 _SQLITE_LOCKS = {}
 _SQLITE_LOCKS_GUARD = threading.Lock()
 _ADVISORY_NAMESPACE = 1246907724
+_CLASS_ADVISORY_NAMESPACE = 1246907725
 
 
 def _now():
@@ -38,24 +39,57 @@ def _eligible(now):
 
 
 @contextmanager
-def _customer_lock(customer_id):
-    """Fence Google updates per customer without blocking loyalty transactions."""
-    dialect = db.session.get_bind().dialect.name
+def _postgres_session_lock(engine, namespace, resource_id):
+    """Hold a session advisory lock on a dedicated connection through remote I/O."""
+    connection = engine.connect()
+    acquired = False
+    try:
+        acquired = bool(connection.execute(
+            text("SELECT pg_try_advisory_lock(:namespace, :resource_id)"),
+            {"namespace": namespace, "resource_id": resource_id},
+        ).scalar())
+        yield acquired
+    finally:
+        if acquired:
+            try:
+                released = bool(connection.execute(
+                    text("SELECT pg_advisory_unlock(:namespace, :resource_id)"),
+                    {"namespace": namespace, "resource_id": resource_id},
+                ).scalar())
+                if not released:
+                    connection.invalidate()
+            except Exception:
+                connection.invalidate()
+        connection.close()
+
+
+@contextmanager
+def _resource_lock(namespace, resource_id):
+    dialect = db.engine.dialect.name
     local_lock = None
     if dialect == "postgresql":
-        acquired = bool(db.session.execute(
-            text("SELECT pg_try_advisory_xact_lock(:namespace, :customer_id)"),
-            {"namespace": _ADVISORY_NAMESPACE, "customer_id": customer_id},
-        ).scalar())
+        with _postgres_session_lock(db.engine, namespace, resource_id) as acquired:
+            yield acquired
+        return
     else:
         with _SQLITE_LOCKS_GUARD:
-            local_lock = _SQLITE_LOCKS.setdefault(customer_id, threading.Lock())
+            local_lock = _SQLITE_LOCKS.setdefault((namespace, resource_id), threading.Lock())
         acquired = local_lock.acquire(blocking=False)
     try:
         yield acquired
     finally:
         if local_lock is not None and acquired:
             local_lock.release()
+
+
+def _customer_lock(customer_id):
+    """Fence balance and metadata updates for one customer through remote I/O."""
+    return _resource_lock(_ADVISORY_NAMESPACE, customer_id)
+
+
+def _business_class_lock(business_id):
+    """Serialize LoyaltyClass updates for one business across versions/workers."""
+    return _resource_lock(_CLASS_ADVISORY_NAMESPACE, business_id)
 
 
 def _record_result(job_ids, result, now):
@@ -209,8 +243,16 @@ def run_google_wallet_sync_worker(*, stop_event=None, sleep_fn=time.sleep, servi
     while not stop_event.is_set():
         try:
             processed = process_pending_google_wallet_jobs(limit=batch_size, service=service)
+            from app.services.google_wallet_publication_service import (
+                process_pending_wallet_publications, wallet_publication_metrics,
+            )
+            published = process_pending_wallet_publications(limit=batch_size, service=service)
+            publication_metrics = wallet_publication_metrics()
             metrics = google_wallet_sync_metrics()
-            logger.info("google_wallet_worker_metrics %s", json.dumps({"processed": processed, **metrics}, sort_keys=True))
+            logger.info("google_wallet_worker_metrics %s", json.dumps({
+                "processed": processed, "published": published,
+                "publications": publication_metrics, **metrics,
+            }, sort_keys=True))
             backlog = metrics["pending"] + metrics["processing"]
             stale = metrics["oldest_pending_seconds"] or 0
             if backlog >= alert_pending or (backlog and stale >= alert_stale_seconds):
