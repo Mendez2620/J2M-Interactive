@@ -47,4 +47,7 @@ jobs:
       - run: python -m pip check
       - run: flask --app run.py staging-preflight --help
       - run: python -m unittest discover tests -v
+      - run: docker compose --env-file .env.selfhost.example -f compose.selfhost.yml config --quiet
+        env:
+          J2M_ENV_FILE: .env.selfhost.example
       - run: docker build --tag j2m-staging:test .

@@ -1,0 +1,90 @@
+name: j2m-selfhost
+
+x-j2m-app: &j2m-app
+  image: ${J2M_IMAGE:-j2m-interactive:local}
+  build:
+    context: .
+    dockerfile: Dockerfile
+  env_file:
+    - ${J2M_ENV_FILE:-.env.selfhost}
+  init: true
+  read_only: true
+  tmpfs:
+    - /tmp:size=128m,mode=1777
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  networks:
+    - j2m-private
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "5"
+
+services:
+  web:
+    <<: *j2m-app
+    environment:
+      J2M_PROCESS_TYPE: web
+      PORT: "8000"
+    ports:
+      - 127.0.0.1:${J2M_LOCAL_PORT:-8000}:8000
+    restart: unless-stopped
+    stop_grace_period: 30s
+    cpus: 2.0
+    mem_limit: 2g
+
+  google-wallet-worker:
+    <<: *j2m-app
+    command: ["flask", "--app", "run.py", "run-google-wallet-sync-worker"]
+    environment:
+      J2M_PROCESS_TYPE: google-wallet-worker
+    restart: unless-stopped
+    stop_grace_period: 30s
+    cpus: 1.5
+    mem_limit: 1g
+
+  migrator:
+    <<: *j2m-app
+    command: ["flask", "--app", "run.py", "db", "upgrade"]
+    environment:
+      J2M_PROCESS_TYPE: migrator
+    profiles: ["migrate"]
+    restart: "no"
+    healthcheck:
+      disable: true
+    cpus: 1.0
+    mem_limit: 1g
+
+  cloudflared:
+    image: cloudflare/cloudflared:2026.11.0@sha256:b94b96edf2c9c4360f8879c8580cfaa99077f19c849ec595ca2f711b27d4f344
+    command: ["tunnel", "--no-autoupdate", "--loglevel", "info", "--metrics", "0.0.0.0:2000", "run"]
+    env_file:
+      - ${J2M_ENV_FILE:-.env.selfhost}
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    profiles: ["tunnel"]
+    depends_on:
+      web:
+        condition: service_healthy
+    ports:
+      - 127.0.0.1:${CLOUDFLARED_METRICS_PORT:-2000}:2000
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - j2m-private
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+
+networks:
+  j2m-private:
+    driver: bridge

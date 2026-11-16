@@ -40,6 +40,11 @@ venv.bak/
 .env.local
 .env.*.local
 *.env
+.env.selfhost
+.env.selfhost.*
+!.env.selfhost.example
+!.env.selfhost.test.example
+selfhost-backups/
 
 # Certificates & Wallet Passes
 *.pem
