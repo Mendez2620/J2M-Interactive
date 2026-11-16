@@ -1,8 +1,8 @@
 # J2M Interactive — Railway Infrastructure as Code (Phase #33)
 
-**Estado: candidato en revisión; no aplicado.** El 2026-11-03 se consultó la configuración real de `j2m-interactive-staging` mediante la integración Railway, y se preparó `.railway/railway.ts` con los tres servicios existentes.
+**Estado: candidato validado; no aplicado.** El 2026-11-16 se verificó `.railway/railway.ts` con Railway CLI `5.71.0` y el SDK oficial `railway` `3.17.0`, autenticados contra el proyecto y entorno indicados abajo. Se ejecutaron únicamente operaciones de lectura: `partials list`, `config pull` en un worktree temporal y `config plan`.
 
-**No se pudo ejecutar `railway config pull` ni `railway config plan` desde ChatGPT** porque la sesión CLI local de Railway no está instalada/autenticada aquí; las lecturas de la integración son de solo consulta y no sustituyen el plan oficial. El archivo se redactó como **candidato**, no como exportación comprobada por la CLI. **No marcar como migración completada, no hacer merge de este PR antes de probar el plan en una sesión CLI autenticada.**
+El plan oficial terminó con código `0` y **0 recursos por crear, 0 por modificar y 0 por eliminar**. No se ejecutó `railway config apply`; la migración de ownership continúa pendiente de autorización separada y este PR debe permanecer en Draft hasta entonces.
 
 ## Fuente de verdad y alcance
 
@@ -13,7 +13,7 @@
 - Los dominios `*.up.railway.app` son generados por Railway y no aparecen en el IaC. No remover ni reemplazar el dominio público actual.
 - No agregar servicios Apple, buckets, volúmenes o bases de datos que **no existan** actualmente en este proyecto. PostgreSQL se aloja por separado en Supabase.
 
-### Estado real leído el 2026-11-03
+### Estado real verificado el 2026-11-16
 
 | Servicio | Rama | Builder | Start / health | Función |
 | --- | --- | --- | --- | --- |
@@ -25,7 +25,9 @@
 
 ### Dependencia requerida por Railway CLI
 
-La propia CLI de Railway requiere tener instalado el SDK de authoring TypeScript **`railway`** para evaluar `import ... from "railway/iac"`. Este PR **todavía no añade** la dependencia al `package.json` y `package-lock.json` porque la sesión actual no puede descargar/verificar una versión npm. Antes de ejecutar el plan en el entorno autenticado, instalar el SDK de manera controlada con `npm install --save-dev railway` en la rama del PR, registrar los cambios de `package.json` y `package-lock.json` en este mismo PR y volver a ejecutar CI. No inventar un número de versión. El paquete `railway` es distinto del CLI `@railway/cli` y de los servicios que despliega el proyecto.
+La propia CLI de Railway requiere el SDK de authoring TypeScript **`railway`** para evaluar `import ... from "railway/iac"`. Este PR fija exactamente `railway@3.17.0` en `package.json` y `package-lock.json`; el paquete es distinto del CLI `@railway/cli` y de los servicios que despliega el proyecto.
+
+`railway config partials list` confirmó que no existe ownership nombrado en el entorno. El `config pull --variables unmanaged` aislado representó además defaults explícitos (build environment V3, una réplica en `iad`, flags de source y el endpoint privado de web). El candidato usa formas abreviadas equivalentes y `preserve()` para las variables existentes. La comparación autoritativa es el plan normalizado: tanto `config plan --json` como `config plan --detailed-exit-code` devolvieron **No changes** sin mostrar valores.
 
 Fuente oficial: https://docs.railway.com/cli/config
 

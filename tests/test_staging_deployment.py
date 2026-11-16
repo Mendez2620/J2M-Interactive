@@ -44,6 +44,9 @@ class StagingDeploymentTestCase(unittest.TestCase):
     def test_railway_build_uses_gunicorn_port_and_readiness(self):
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
         railway = (ROOT / ".railway" / "railway.ts").read_text(encoding="utf-8")
+        railway_readme = (ROOT / ".railway" / "README.md").read_text(encoding="utf-8")
+        package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
+        package_lock = json.loads((ROOT / "package-lock.json").read_text(encoding="utf-8"))
         requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
         self.assertIn("npm ci", dockerfile)
         self.assertIn("npm run build:css", dockerfile)
@@ -57,6 +60,10 @@ class StagingDeploymentTestCase(unittest.TestCase):
         self.assertIn('branch: "staging"', railway)
         self.assertIn('restartPolicyType: "NEVER"', railway)
         self.assertIn('APPLE_WALLET_MODE: preserve()', railway)
+        self.assertEqual(package["devDependencies"]["railway"], "3.17.0")
+        self.assertEqual(package_lock["packages"][""]["devDependencies"]["railway"], "3.17.0")
+        self.assertIn("0 recursos por crear, 0 por modificar y 0 por eliminar", railway_readme)
+        self.assertIn("No changes", railway_readme)
         worker_block = railway.split('service("j2m-google-wallet-worker"', 1)[1].split('service("j2m-migrator-77a"', 1)[0]
         self.assertNotIn("healthcheck:", worker_block)
         self.assertNotIn("db upgrade", worker_block)
