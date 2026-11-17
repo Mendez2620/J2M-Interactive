@@ -1,0 +1,15 @@
+# Docker Desktop does not publish host ports from an internal-only network.
+# This optional rehearsal network is attached only to the web container and
+# binds exclusively to loopback. PostgreSQL remains on j2m-private without a
+# host port. Use only synthetic configuration with both Wallet modes disabled.
+services:
+  web:
+    networks:
+      - j2m-private
+      - j2m-loopback
+
+networks:
+  j2m-loopback:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.host_binding_ipv4: 127.0.0.1

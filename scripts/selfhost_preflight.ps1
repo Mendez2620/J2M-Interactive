@@ -2,6 +2,7 @@ param(
     [string]$EnvFile = ".env.selfhost",
     [string]$CloudflareEnvFile = ".env.cloudflared",
     [switch]$RequireTunnel,
+    [switch]$SkipExternalConnectivity,
     [int]$MinimumFreeGB = 20
 )
 
@@ -30,10 +31,6 @@ if ($docker) {
     Write-Check "docker-compose" ($LASTEXITCODE -eq 0) "Docker Compose v2 accesible"
 }
 
-$ports = @(80, 443, 2000, 5432, 8000, 8080)
-$busy = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -in $ports })
-Write-Check "ports" ($busy.Count -eq 0) ($(if ($busy) { "ocupados: " + (($busy.LocalPort | Sort-Object -Unique) -join ", ") } else { "sin conflictos conocidos" }))
-
 $envPath = Resolve-Path -LiteralPath $EnvFile -ErrorAction SilentlyContinue
 Write-Check "private-env" ($null -ne $envPath) "archivo privado fuera de Git disponible"
 if ($envPath) {
@@ -49,7 +46,28 @@ if ($envPath) {
     $missing = @($required | Where-Object { -not $pairs.ContainsKey($_) -or [string]::IsNullOrWhiteSpace($pairs[$_]) -or $pairs[$_] -match '^REQUIRED' })
     Write-Check "required-env" ($missing.Count -eq 0) ($(if ($missing) { "faltan nombres: " + ($missing -join ", ") } else { "nombres requeridos presentes" }))
     Write-Check "apple-disabled" ($pairs["APPLE_WALLET_MODE"] -eq "disabled") "Apple Wallet debe permanecer disabled"
+    Write-Check "google-disabled" ($pairs["GOOGLE_WALLET_MODE"] -eq "disabled") "Google Wallet debe permanecer disabled"
     Write-Check "app-secret-separation" (-not $pairs.ContainsKey("TUNNEL_TOKEN") -and -not $pairs.ContainsKey("CLOUDFLARE_TUNNEL_TOKEN")) "el token del túnel no debe estar en el entorno de la aplicación"
+
+    $configuredPorts = [System.Collections.Generic.List[int]]::new()
+    $localPortText = if ($pairs.ContainsKey("J2M_LOCAL_PORT")) { $pairs["J2M_LOCAL_PORT"] } else { "8000" }
+    $localPort = 0
+    if ([int]::TryParse($localPortText, [ref]$localPort) -and $localPort -ge 1 -and $localPort -le 65535) {
+        $configuredPorts.Add($localPort)
+    } else {
+        Write-Check "web-port-config" $false "J2M_LOCAL_PORT debe ser un puerto válido"
+    }
+    if ($RequireTunnel) {
+        $metricsPortText = if ($pairs.ContainsKey("CLOUDFLARED_METRICS_PORT")) { $pairs["CLOUDFLARED_METRICS_PORT"] } else { "2000" }
+        $metricsPort = 0
+        if ([int]::TryParse($metricsPortText, [ref]$metricsPort) -and $metricsPort -ge 1 -and $metricsPort -le 65535) {
+            $configuredPorts.Add($metricsPort)
+        } else {
+            Write-Check "tunnel-port-config" $false "CLOUDFLARED_METRICS_PORT debe ser un puerto válido"
+        }
+    }
+    $busy = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -in $configuredPorts })
+    Write-Check "ports" ($busy.Count -eq 0) ($(if ($busy) { "ocupados: " + (($busy.LocalPort | Sort-Object -Unique) -join ", ") } else { "puertos configurados libres: " + (($configuredPorts | Sort-Object -Unique) -join ", ") } ))
 }
 
 if ($RequireTunnel) {
@@ -68,10 +86,14 @@ if ($RequireTunnel) {
     }
 }
 
-foreach ($target in @("github.com", "supabase.com", "region1.v2.argotunnel.com")) {
-    $port = if ($target -like "*.argotunnel.com") { 7844 } else { 443 }
-    $reachable = Test-NetConnection $target -Port $port -InformationLevel Quiet -WarningAction SilentlyContinue
-    Write-Check "network-$target" $reachable "TCP $port"
+if (-not $SkipExternalConnectivity) {
+    foreach ($target in @("github.com", "supabase.com", "region1.v2.argotunnel.com")) {
+        $port = if ($target -like "*.argotunnel.com") { 7844 } else { 443 }
+        $reachable = Test-NetConnection $target -Port $port -InformationLevel Quiet -WarningAction SilentlyContinue
+        Write-Check "network-$target" $reachable "TCP $port"
+    }
+} else {
+    Write-Host "[OK] external-connectivity - omitida explícitamente para ensayo aislado"
 }
 
 if ($failures.Count) {

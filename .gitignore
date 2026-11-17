@@ -44,6 +44,7 @@ venv.bak/
 .env.selfhost.*
 !.env.selfhost.example
 !.env.selfhost.test.example
+!.env.selfhost.production-test.example
 .env.cloudflared
 .env.cloudflared.*
 !.env.cloudflared.example

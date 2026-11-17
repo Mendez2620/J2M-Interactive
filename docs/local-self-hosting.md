@@ -30,8 +30,11 @@ El destino debe ser un medio externo cifrado o retirado físicamente. Conservar 
 
 - `compose.selfhost.yml`: web, Google Wallet worker, migrador manual y perfil opcional `tunnel`.
 - `compose.selfhost.test.yml`: PostgreSQL 16 temporal en `tmpfs` para ensayos aislados.
+- `compose.selfhost.production-test.yml`: PostgreSQL temporal con TLS y aplicación en modo producción, siempre con credenciales sintéticas.
+- `compose.selfhost.loopback-test.yml`: red adicional exclusiva de web para comprobar el binding de Windows en loopback; no sustituye la prueba principal con red interna.
 - `.env.selfhost.example`: inventario fail-closed de producción, sin secretos.
 - `.env.selfhost.test.example`: valores públicos desechables para la base temporal; nunca usar con Supabase.
+- `.env.selfhost.production-test.example`: valores sintéticos reproducibles para `FLASK_ENV=production`; nunca reutilizar como secretos reales.
 - `.env.cloudflared.example`: único inventario del túnel; no contiene secretos de aplicación.
 
 La imagen de `cloudflared` está fijada a `2026.11.0` y al digest multi-arquitectura observado. El token se entrega como `TUNNEL_TOKEN` desde `.env.cloudflared`; cloudflared ya no recibe `DATABASE_URL`, claves Flask/JWT ni credenciales Wallet. Solo web publica un puerto, ligado a `127.0.0.1`; Cloudflare usa la red Docker. Web y worker reinician `unless-stopped`; el migrador es un perfil one-shot con `restart: no`.
@@ -52,7 +55,44 @@ docker compose -p j2m-pr70-test --env-file .env.selfhost.test.example -f compose
 El PostgreSQL temporal no publica puertos y se pierde al detener el contenedor. `GOOGLE_WALLET_MODE` y `APPLE_WALLET_MODE` permanecen `disabled`, por lo que no hay llamadas ni escrituras Wallet.
 La red del overlay de ensayo usa `internal: true`: web, worker, migrador y PostgreSQL no tienen salida a Supabase, Railway ni proveedores Wallet. Esta defensa impide que una URL externa accidental funcione durante el ensayo.
 
-En Docker Desktop para Windows, una red marcada `internal` conserva en la configuración el binding `127.0.0.1:8000`, pero no lo materializó en el host durante este ensayo. Para no añadir una segunda red con salida, las solicitudes HTTP se ejecutaron dentro de web contra `127.0.0.1:8000`. El Compose base, sin el overlay aislado, mantiene el binding exclusivo a loopback; debe probarse nuevamente antes del corte.
+En Docker Desktop para Windows, una red marcada `internal` conserva en la configuración el binding, pero no lo materializa en el host. Por ello la prueba principal mantiene esa red y ejecuta HTTP desde web. Una segunda prueba explícita puede añadir `compose.selfhost.loopback-test.yml`: solo web recibe una red bridge adicional y PostgreSQL continúa exclusivamente en la red interna sin publicar puerto. Esta topología permite validar desde Windows sin abrir la aplicación a la LAN.
+
+## Ensayo sintético de producción y loopback
+
+El perfil no utiliza `.env.selfhost`, DPAPI, Supabase ni credenciales de proveedores. PostgreSQL genera al arrancar un certificado TLS autofirmado efímero mediante la imagen de prueba `Dockerfile.postgres-test`; la clave queda en el `tmpfs` del contenedor y desaparece al eliminarlo.
+
+```powershell
+docker compose -p j2m-pr70-production --env-file .env.selfhost.production-test.example `
+  -f compose.selfhost.yml -f compose.selfhost.test.yml -f compose.selfhost.production-test.yml config --quiet
+docker compose -p j2m-pr70-production --env-file .env.selfhost.production-test.example `
+  -f compose.selfhost.yml -f compose.selfhost.test.yml -f compose.selfhost.production-test.yml build
+docker compose -p j2m-pr70-production --env-file .env.selfhost.production-test.example `
+  -f compose.selfhost.yml -f compose.selfhost.test.yml -f compose.selfhost.production-test.yml up -d --wait postgres-test
+docker compose -p j2m-pr70-production --env-file .env.selfhost.production-test.example `
+  -f compose.selfhost.yml -f compose.selfhost.test.yml -f compose.selfhost.production-test.yml --profile migrate run --rm migrator
+docker compose -p j2m-pr70-production --env-file .env.selfhost.production-test.example `
+  -f compose.selfhost.yml -f compose.selfhost.test.yml -f compose.selfhost.production-test.yml up -d --wait web google-wallet-worker
+```
+
+Para comprobar el acceso de Windows se repite con un nombre de proyecto distinto y el cuarto overlay:
+
+```powershell
+docker compose -p j2m-pr70-loopback --env-file .env.selfhost.production-test.example `
+  -f compose.selfhost.yml -f compose.selfhost.test.yml -f compose.selfhost.production-test.yml `
+  -f compose.selfhost.loopback-test.yml up -d --wait postgres-test
+docker compose -p j2m-pr70-loopback --env-file .env.selfhost.production-test.example `
+  -f compose.selfhost.yml -f compose.selfhost.test.yml -f compose.selfhost.production-test.yml `
+  -f compose.selfhost.loopback-test.yml --profile migrate run --rm migrator
+docker compose -p j2m-pr70-loopback --env-file .env.selfhost.production-test.example `
+  -f compose.selfhost.yml -f compose.selfhost.test.yml -f compose.selfhost.production-test.yml `
+  -f compose.selfhost.loopback-test.yml up -d --wait web google-wallet-worker
+Invoke-WebRequest http://127.0.0.1:18080/api/health
+Invoke-WebRequest http://127.0.0.1:18080/api/ready
+```
+
+El ensayo real confirmó `FLASK_ENV=production`, debug deshabilitado, origen canónico HTTPS, CORS restringido a `https://j2m.local.test`, cookie `Secure`, WebAuthn con origen/RP ID compatibles, claves Flask/JWT diferentes, uploads y ambos Wallet deshabilitados. PostgreSQL aceptó exclusivamente la conexión TLS configurada y Alembic llegó a `9d0e1f2a3b4c`. La red interna bloqueó resolución hacia Supabase, Railway, Google Wallet y APNs. Desde Windows, `health` y `ready` respondieron 200 en `127.0.0.1:18080`; la inspección de Docker mostró únicamente `127.0.0.1:18080->8000`, nunca `0.0.0.0` ni `[::]`.
+
+Las regresiones existentes de configuración comprueban además que producción falla al usar HTTP, CORS abierto, cookies inseguras, claves ausentes/iguales, WebAuthn incompatible, SQLite o TLS de PostgreSQL inseguro. No se relajan esos controles para el ensayo.
 
 ## Resultado real del ensayo PR #70
 
@@ -67,6 +107,7 @@ En Docker Desktop para Windows, una red marcada `internal` conserva en la config
 - La resolución/conexión hacia Supabase, Railway, Google Wallet y APNs falló desde web como exige la red interna. Cloudflared no se creó.
 - La imagen no contiene archivos DPAPI, respaldos portables, certificados privados ni archivos de entorno privados. `.env.example` sí está presente y contiene únicamente valores de ejemplo versionados.
 - `pip check` dentro de la imagen no encontró dependencias rotas. `npm audit` reportó dos vulnerabilidades altas transitivas de build (`@parcel/watcher`/`picomatch`); no existe versión corregida publicada de `picomatch` y `node_modules` no forma parte de la imagen final. Mantener seguimiento y actualizar el toolchain cuando exista corrección.
+- El preflight ahora comprueba únicamente `J2M_LOCAL_PORT` y, cuando se solicita el perfil de túnel, `CLOUDFLARED_METRICS_PORT`. Con `18080` ocupado bloqueó el arranque; tras detener el stack aprobó. También bloquea si Apple Wallet o Google Wallet no están exactamente en `disabled` durante el primer corte. El switch `-SkipExternalConnectivity` permite que el ensayo sintético no contacte ni siquiera los endpoints de disponibilidad; no debe usarse en el preflight real del corte.
 
 ## Preparación de producción sin corte
 

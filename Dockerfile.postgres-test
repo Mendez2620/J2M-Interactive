@@ -1,0 +1,4 @@
+FROM postgres:16-alpine
+
+# Test-only dependency used to create an ephemeral self-signed TLS certificate.
+RUN apk add --no-cache openssl
