@@ -1,5 +1,7 @@
 param(
     [string]$EnvFile = ".env.selfhost",
+    [string]$CloudflareEnvFile = ".env.cloudflared",
+    [switch]$RequireTunnel,
     [int]$MinimumFreeGB = 20
 )
 
@@ -47,6 +49,23 @@ if ($envPath) {
     $missing = @($required | Where-Object { -not $pairs.ContainsKey($_) -or [string]::IsNullOrWhiteSpace($pairs[$_]) -or $pairs[$_] -match '^REQUIRED' })
     Write-Check "required-env" ($missing.Count -eq 0) ($(if ($missing) { "faltan nombres: " + ($missing -join ", ") } else { "nombres requeridos presentes" }))
     Write-Check "apple-disabled" ($pairs["APPLE_WALLET_MODE"] -eq "disabled") "Apple Wallet debe permanecer disabled"
+    Write-Check "app-secret-separation" (-not $pairs.ContainsKey("TUNNEL_TOKEN") -and -not $pairs.ContainsKey("CLOUDFLARE_TUNNEL_TOKEN")) "el token del túnel no debe estar en el entorno de la aplicación"
+}
+
+if ($RequireTunnel) {
+    $tunnelPath = Resolve-Path -LiteralPath $CloudflareEnvFile -ErrorAction SilentlyContinue
+    Write-Check "tunnel-private-env" ($null -ne $tunnelPath) "archivo privado exclusivo de cloudflared disponible"
+    if ($tunnelPath) {
+        $tunnelPairs = @{}
+        foreach ($line in Get-Content -LiteralPath $tunnelPath) {
+            if ($line -match '^([A-Za-z_][A-Za-z0-9_]*)=(.*)$') { $tunnelPairs[$Matches[1]] = $Matches[2] }
+        }
+        $appSecretNames = @("DATABASE_URL", "SECRET_KEY", "JWT_SECRET_KEY", "GOOGLE_SERVICE_ACCOUNT_JSON")
+        $hasAppSecrets = @($appSecretNames | Where-Object { $tunnelPairs.ContainsKey($_) }).Count -gt 0
+        $validToken = $tunnelPairs.ContainsKey("TUNNEL_TOKEN") -and $tunnelPairs["TUNNEL_TOKEN"] -notmatch '^\s*(REQUIRED)?\s*$'
+        Write-Check "tunnel-token" $validToken "TUNNEL_TOKEN debe existir solo en el archivo del túnel"
+        Write-Check "tunnel-secret-separation" (-not $hasAppSecrets) "cloudflared no debe recibir secretos de aplicación"
+    }
 }
 
 foreach ($target in @("github.com", "supabase.com", "region1.v2.argotunnel.com")) {

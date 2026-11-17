@@ -3,6 +3,15 @@
 .env
 .env.*
 !.env.example
+.env.selfhost
+.env.selfhost.*
+.env.cloudflared
+.env.cloudflared.*
+selfhost-backups
+*.dpapi
+*.j2mbackup
+*.age
+*.gpg
 venv
 .venv
 node_modules

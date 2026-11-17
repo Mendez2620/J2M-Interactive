@@ -29,3 +29,7 @@ services:
     depends_on:
       postgres-test:
         condition: service_healthy
+
+networks:
+  j2m-private:
+    internal: true

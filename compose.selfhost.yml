@@ -62,9 +62,7 @@ services:
     image: cloudflare/cloudflared:2026.11.0@sha256:b94b96edf2c9c4360f8879c8580cfaa99077f19c849ec595ca2f711b27d4f344
     command: ["tunnel", "--no-autoupdate", "--loglevel", "info", "--metrics", "0.0.0.0:2000", "run"]
     env_file:
-      - ${J2M_ENV_FILE:-.env.selfhost}
-    environment:
-      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+      - ${J2M_CLOUDFLARED_ENV_FILE:-.env.cloudflared}
     profiles: ["tunnel"]
     depends_on:
       web:

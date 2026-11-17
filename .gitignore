@@ -44,7 +44,14 @@ venv.bak/
 .env.selfhost.*
 !.env.selfhost.example
 !.env.selfhost.test.example
+.env.cloudflared
+.env.cloudflared.*
+!.env.cloudflared.example
 selfhost-backups/
+*.dpapi
+*.j2mbackup
+*.age
+*.gpg
 
 # Certificates & Wallet Passes
 *.pem
