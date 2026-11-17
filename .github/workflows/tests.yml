@@ -47,4 +47,14 @@ jobs:
       - run: python -m pip check
       - run: flask --app run.py staging-preflight --help
       - run: python -m unittest discover tests -v
+      - run: docker compose --env-file .env.selfhost.example -f compose.selfhost.yml config --quiet
+        env:
+          J2M_ENV_FILE: .env.selfhost.example
+          J2M_CLOUDFLARED_ENV_FILE: .env.cloudflared.example
+      - run: docker compose -p j2m-pr70-ci --env-file .env.selfhost.test.example -f compose.selfhost.yml -f compose.selfhost.test.yml config --quiet
+        env:
+          J2M_IMAGE: j2m-interactive:pr70-ci
+      - run: docker compose -p j2m-pr70-production-ci --env-file .env.selfhost.production-test.example -f compose.selfhost.yml -f compose.selfhost.test.yml -f compose.selfhost.production-test.yml config --quiet
+      - run: docker compose -p j2m-pr70-loopback-ci --env-file .env.selfhost.production-test.example -f compose.selfhost.yml -f compose.selfhost.test.yml -f compose.selfhost.production-test.yml -f compose.selfhost.loopback-test.yml config --quiet
       - run: docker build --tag j2m-staging:test .
+      - run: docker build --file Dockerfile.postgres-test --tag j2m-postgres:production-test .

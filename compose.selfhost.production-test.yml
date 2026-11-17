@@ -1,0 +1,29 @@
+services:
+  postgres-test:
+    image: j2m-postgres:production-test
+    build:
+      context: .
+      dockerfile: Dockerfile.postgres-test
+    command:
+      - sh
+      - -ec
+      - |
+        openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+          -subj /CN=postgres-test \
+          -keyout /tmp/server.key -out /tmp/server.crt >/dev/null 2>&1
+        chmod 600 /tmp/server.key
+        chown postgres:postgres /tmp/server.key /tmp/server.crt
+        exec docker-entrypoint.sh postgres -c ssl=on \
+          -c ssl_cert_file=/tmp/server.crt -c ssl_key_file=/tmp/server.key
+
+  web:
+    environment:
+      J2M_PROCESS_TYPE: web
+
+  google-wallet-worker:
+    environment:
+      J2M_PROCESS_TYPE: google-wallet-worker
+
+  migrator:
+    environment:
+      J2M_PROCESS_TYPE: migrator
