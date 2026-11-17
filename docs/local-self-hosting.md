@@ -4,7 +4,7 @@ Esta fase prepara la salida de Railway sin eliminar ni modificar sus servicios. 
 
 ## Estado y bloqueos del host
 
-La reinspección del 2026-11-17 confirmó Windows, WSL 3.0.5 con Ubuntu como distribución WSL2, 32 GB de RAM, hipervisor activo y 117.38 GB libres en C:. El bloqueo de almacenamiento quedó resuelto. Docker Desktop todavía no estaba instalado ni disponible en `PATH`, por lo que la ejecución de contenedores continúa bloqueada hasta completar su instalación AMD64 con backend WSL2.
+La reinspección del 2026-11-17 confirmó Windows, WSL 3.0.5 con Ubuntu como distribución WSL2, 32 GB de RAM, hipervisor activo y más de 116 GB libres en C:. Docker Desktop 4.99.0, Engine/CLI 29.9.3 y Compose v5.7.0 funcionan con el contexto `desktop-linux`. El named pipe está fuera del sandbox de Codex, por lo que los comandos automatizados requieren la autorización normal para ejecutarse en el contexto del usuario; no se reinició Codex ni Windows.
 
 Windows Firewall y Microsoft Defender estaban habilitados, incluida la protección en tiempo real. La comprobación elevada indicó que C: no tiene un volumen BitLocker asociado; el disco no debe considerarse cifrado. El plan `Turbo` se ajustó para no suspender el equipo conectado a corriente; la suspensión en batería permanece en 240 segundos. El cambio debe confirmarse después de actualizaciones del fabricante y todavía falta probar un reinicio completo.
 
@@ -36,23 +36,41 @@ El destino debe ser un medio externo cifrado o retirado físicamente. Conservar 
 
 La imagen de `cloudflared` está fijada a `2026.11.0` y al digest multi-arquitectura observado. El token se entrega como `TUNNEL_TOKEN` desde `.env.cloudflared`; cloudflared ya no recibe `DATABASE_URL`, claves Flask/JWT ni credenciales Wallet. Solo web publica un puerto, ligado a `127.0.0.1`; Cloudflare usa la red Docker. Web y worker reinician `unless-stopped`; el migrador es un perfil one-shot con `restart: no`.
 
-## Ensayo aislado (cuando Docker esté disponible)
+## Ensayo aislado reproducible
 
 ```powershell
-$env:J2M_ENV_FILE = ".env.selfhost.test.example"
-docker compose --env-file .env.selfhost.test.example -f compose.selfhost.yml -f compose.selfhost.test.yml --profile migrate run --rm migrator
-docker compose --env-file .env.selfhost.test.example -f compose.selfhost.yml -f compose.selfhost.test.yml up -d web google-wallet-worker
-Invoke-WebRequest http://127.0.0.1:8000/api/health
-Invoke-WebRequest http://127.0.0.1:8000/api/ready
-docker compose --env-file .env.selfhost.test.example -f compose.selfhost.yml -f compose.selfhost.test.yml down
+$env:J2M_IMAGE = "j2m-interactive:pr70-test"
+docker compose -p j2m-pr70-test --env-file .env.selfhost.test.example -f compose.selfhost.yml -f compose.selfhost.test.yml config --quiet
+docker compose -p j2m-pr70-test --env-file .env.selfhost.test.example -f compose.selfhost.yml -f compose.selfhost.test.yml build web
+docker compose -p j2m-pr70-test --env-file .env.selfhost.test.example -f compose.selfhost.yml -f compose.selfhost.test.yml up -d --wait postgres-test
+docker compose -p j2m-pr70-test --env-file .env.selfhost.test.example -f compose.selfhost.yml -f compose.selfhost.test.yml --profile migrate run --rm migrator
+docker compose -p j2m-pr70-test --env-file .env.selfhost.test.example -f compose.selfhost.yml -f compose.selfhost.test.yml up -d --no-build --wait web google-wallet-worker
+docker exec j2m-pr70-test-web-1 python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/api/ready').status)"
+docker compose -p j2m-pr70-test --env-file .env.selfhost.test.example -f compose.selfhost.yml -f compose.selfhost.test.yml down --remove-orphans
 ```
 
 El PostgreSQL temporal no publica puertos y se pierde al detener el contenedor. `GOOGLE_WALLET_MODE` y `APPLE_WALLET_MODE` permanecen `disabled`, por lo que no hay llamadas ni escrituras Wallet.
 La red del overlay de ensayo usa `internal: true`: web, worker, migrador y PostgreSQL no tienen salida a Supabase, Railway ni proveedores Wallet. Esta defensa impide que una URL externa accidental funcione durante el ensayo.
 
+En Docker Desktop para Windows, una red marcada `internal` conserva en la configuración el binding `127.0.0.1:8000`, pero no lo materializó en el host durante este ensayo. Para no añadir una segunda red con salida, las solicitudes HTTP se ejecutaron dentro de web contra `127.0.0.1:8000`. El Compose base, sin el overlay aislado, mantiene el binding exclusivo a loopback; debe probarse nuevamente antes del corte.
+
+## Resultado real del ensayo PR #70
+
+- La imagen Linux `j2m-interactive:pr70-test` se construyó completamente con usuario final `j2m`.
+- PostgreSQL `16.16` arrancó healthy en `tmpfs`, sin puerto publicado.
+- El migrador actualizó una base vacía hasta el único head `9d0e1f2a3b4c`; quedaron 42 tablas públicas.
+- Web, Google Wallet worker y PostgreSQL alcanzaron estado healthy. Web y worker usaron root filesystem de solo lectura, `no-new-privileges` y `cap_drop: ALL`.
+- `/api/health` y `/api/ready` respondieron 200. Login de Super Admin, gerente y acceso unificado respondieron 200; `/admin`, `/admin/dashboard` y `/manager/portal` redirigieron al login; un POST de login sin CSRF respondió 400; rutas inexistentes respondieron 404.
+- Una tabla temporal y un registro ficticio se crearon, leyeron y revirtieron mediante la conexión Flask/PostgreSQL; no persistieron negocios, clientes ni movimientos.
+- Reiniciar y detener/iniciar web y worker recuperó sus healthchecks, mientras PostgreSQL permaneció healthy y conservó la revisión Alembic.
+- El apagado final eliminó exclusivamente los tres contenedores, la red interna, el PostgreSQL en `tmpfs` y la imagen etiquetada `j2m-interactive:pr70-test`; no quedaron recursos del proyecto Compose de ensayo.
+- La resolución/conexión hacia Supabase, Railway, Google Wallet y APNs falló desde web como exige la red interna. Cloudflared no se creó.
+- La imagen no contiene archivos DPAPI, respaldos portables, certificados privados ni archivos de entorno privados. `.env.example` sí está presente y contiene únicamente valores de ejemplo versionados.
+- `pip check` dentro de la imagen no encontró dependencias rotas. `npm audit` reportó dos vulnerabilidades altas transitivas de build (`@parcel/watcher`/`picomatch`); no existe versión corregida publicada de `picomatch` y `node_modules` no forma parte de la imagen final. Mantener seguimiento y actualizar el toolchain cuando exista corrección.
+
 ## Preparación de producción sin corte
 
-1. Instalar Docker Desktop AMD64 con backend WSL2 y habilitar su inicio con la sesión de Windows. Verificar `docker info` y `docker compose version`.
+1. Mantener Docker Desktop AMD64 con backend WSL2 e inicio con la sesión de Windows. Verificar `docker info` y `docker compose version` después de cada actualización.
 2. Copiar `.env.selfhost.example` a `.env.selfhost`; rellenarlo desde el respaldo cifrado sin imprimir valores. Mantener `APPLE_WALLET_MODE=disabled` y comenzar con Google Wallet deshabilitado.
 3. Cuando el propietario decida dominio y organización, crear `.env.cloudflared` desde su plantilla y un túnel remoto. Configurar el hostname público hacia `http://web:8000`; no abrir 80/443 en el router. Cloudflare Tunnel realiza conexiones salientes y ofrece `/ready` en su puerto de métricas.
 4. Ejecutar `scripts/selfhost_preflight.ps1`. Corregir todos los errores antes de arrancar.
@@ -76,10 +94,10 @@ La aplicación ya genera URLs con `url_for` en la mayoría de los flujos y permi
 
 ## Límites pendientes
 
-- Docker Desktop aún no está instalado, por lo que no fue posible ejecutar Compose ni una construcción local. El espacio ya no bloquea.
 - C: no usa BitLocker. La suspensión en corriente quedó deshabilitada; falta probar recuperación automática tras un reinicio real.
+- No había un disco o memoria externa conectado durante el ensayo; la copia portable independiente de DPAPI continúa pendiente y no debe guardarse como sustituto en C:.
 - Falta adquirir/controlar el dominio y crear el túnel; no existe token Cloudflare respaldado todavía.
-- No se probó conectividad desde contenedores hacia Supabase ni una restauración de respaldo PostgreSQL.
+- No se probó conectividad real desde contenedores hacia Supabase porque el ensayo la bloquea deliberadamente. Tampoco se probó una restauración de respaldo PostgreSQL.
 - Un único equipo y una única conexión eléctrica/ISP no proporcionan alta disponibilidad. Se recomienda UPS, respaldo externo, monitoreo desde otra red y un segundo host antes de retirar Railway.
 
 ## Referencias operativas

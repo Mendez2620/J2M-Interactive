@@ -52,9 +52,19 @@ class SelfHostInfrastructureTestCase(unittest.TestCase):
         workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
         self.assertIn("docker compose", workflow)
         self.assertIn("compose.selfhost.yml", workflow)
+        self.assertIn("compose.selfhost.test.yml", workflow)
+        self.assertIn("-p j2m-pr70-ci", workflow)
         self.assertIn("J2M_CLOUDFLARED_ENV_FILE: .env.cloudflared.example", workflow)
         package_lock = json.loads((ROOT / "package-lock.json").read_text(encoding="utf-8"))
         self.assertIn("lockfileVersion", package_lock)
+
+    def test_runbook_records_real_isolated_docker_validation(self):
+        runbook = (ROOT / "docs" / "local-self-hosting.md").read_text(encoding="utf-8")
+        self.assertIn("-p j2m-pr70-test", runbook)
+        self.assertIn("PostgreSQL `16.16`", runbook)
+        self.assertIn("9d0e1f2a3b4c", runbook)
+        self.assertIn("/api/health", runbook)
+        self.assertNotIn("Docker Desktop aún no está instalado", runbook)
 
     def test_private_artifacts_are_excluded_from_git_and_docker(self):
         gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
