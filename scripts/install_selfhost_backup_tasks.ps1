@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = "Stop"
 $taskPrefix = "J2M SelfHost"
 $hourlyArgs = "-NoProfile -NonInteractive -File `"$Repository\scripts\run_selfhost_backup.ps1`" -Repository `"$Repository`" -KeyFile `"$KeyFile`""
-$cloudArgs = "-NoProfile -NonInteractive -File `"$Repository\scripts\run_selfhost_cloud_copy.ps1`" -Repository `"$Repository`" -Remote `"$CloudRemote`""
+$cloudArgs = "-NoProfile -NonInteractive -File `"$Repository\scripts\run_selfhost_cloud_copy.ps1`" -Repository `"$Repository`" -Remote `"$CloudRemote`" -KeyFile `"$KeyFile`""
 $restoreArgs = "-NoProfile -NonInteractive -File `"$Repository\scripts\run_selfhost_restore_test.ps1`" -Repository `"$Repository`" -KeyFile `"$KeyFile`""
 
 if (-not $Enable) {
@@ -20,7 +20,9 @@ if (-not (Test-Path -LiteralPath $KeyFile)) { throw "No existe la clave DPAPI lo
 if ([string]::IsNullOrWhiteSpace($CloudRemote)) { throw "CloudRemote es obligatorio para activar copias externas." }
 if (-not (Get-Command rclone -ErrorAction SilentlyContinue)) { throw "rclone no está instalado." }
 
-$principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType S4U -RunLevel Limited
+$null = & docker info 2>$null
+if ($LASTEXITCODE -ne 0) { throw "Docker Desktop no está accesible en la sesión interactiva actual." }
+$principal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 2)
 $hourly = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5) -RepetitionInterval (New-TimeSpan -Hours 1)
 $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $hourlyArgs

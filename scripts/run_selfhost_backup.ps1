@@ -9,8 +9,6 @@ $failure = "selfhost-backups\logs\backup.failed"
 try {
     python -m scripts.selfhost_backup database --env-file .env.selfhost --output-dir selfhost-backups/hourly --key-file $KeyFile --retries 3
     if ($LASTEXITCODE -ne 0) { throw "database backup failed" }
-    python -m scripts.selfhost_backup retain-local selfhost-backups/hourly --keep 48
-    if ($LASTEXITCODE -ne 0) { throw "local retention failed" }
     $configArgs = @("-m", "scripts.selfhost_backup", "configuration", "--path", ".env.selfhost", "--output-dir", "selfhost-backups/configuration", "--key-file", $KeyFile)
     if (Test-Path -LiteralPath ".env.cloudflared") { $configArgs += @("--path", ".env.cloudflared") }
     & python @configArgs

@@ -7,9 +7,10 @@ $ErrorActionPreference = "Stop"
 Set-Location -LiteralPath $Repository
 $failure = "selfhost-backups\logs\restore.failed"
 try {
-    $latest = Get-ChildItem -LiteralPath "selfhost-backups\hourly" -Filter "*.j2mbackup" | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+    $latest = Get-ChildItem -LiteralPath "selfhost-backups\hourly" -Filter "*.complete.json" | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
     if ($null -eq $latest) { throw "encrypted backup unavailable" }
-    python -m scripts.selfhost_backup restore-isolated $latest.FullName --key-file $KeyFile
+    $backup = $latest.FullName.Substring(0, $latest.FullName.Length - ".complete.json".Length)
+    python -m scripts.selfhost_backup restore-isolated $backup --key-file $KeyFile --lock-file "selfhost-backups\.operations.lock" --timeout 900
     if ($LASTEXITCODE -ne 0) { throw "isolated restore failed" }
     Remove-Item -LiteralPath $failure -Force -ErrorAction SilentlyContinue
     exit 0
