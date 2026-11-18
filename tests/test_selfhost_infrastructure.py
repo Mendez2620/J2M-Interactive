@@ -1,8 +1,11 @@
 import json
+import io
 from pathlib import Path
+import tempfile
 import unittest
 
 from scripts.portable_backup import _portable_text, decrypt_bytes, encrypt_bytes
+from scripts.selfhost_backup import decrypt_stream, encrypt_stream, retain_local, verify_sha256
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -126,6 +129,63 @@ class SelfHostInfrastructureTestCase(unittest.TestCase):
         with self.assertRaises(Exception):
             decrypt_bytes(payload, b"wrong-password-value")
         self.assertEqual(_portable_text("texto".encode("utf-16-le")), b"texto")
+
+    def test_stream_backup_encrypts_before_disk_and_detects_tampering(self):
+        cleartext = (b"synthetic-postgresql-dump\x00" * 100_000)
+        key = bytes(range(32))
+        encrypted = io.BytesIO()
+        digest = encrypt_stream(io.BytesIO(cleartext), encrypted, key)
+        payload = encrypted.getvalue()
+        self.assertNotIn(cleartext[:100], payload)
+        restored = io.BytesIO()
+        decrypt_stream(io.BytesIO(payload), restored, key)
+        self.assertEqual(restored.getvalue(), cleartext)
+        altered = bytearray(payload)
+        altered[-8] ^= 1
+        with self.assertRaises(Exception):
+            decrypt_stream(io.BytesIO(altered), io.BytesIO(), key)
+        self.assertEqual(len(digest), 64)
+
+    def test_sha256_and_local_retention_keep_latest_48(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            for index in range(50):
+                backup = directory / f"{index:02d}.j2mbackup"
+                backup.write_bytes(str(index).encode("ascii"))
+                import hashlib
+                digest = hashlib.sha256(backup.read_bytes()).hexdigest()
+                backup.with_suffix(backup.suffix + ".sha256").write_text(
+                    f"{digest}  {backup.name}\n", encoding="ascii"
+                )
+                backup.touch()
+            newest = directory / "49.j2mbackup"
+            self.assertTrue(verify_sha256(newest))
+            self.assertEqual(retain_local(directory, 48), 2)
+            self.assertEqual(len(list(directory.glob("*.j2mbackup"))), 48)
+
+    def test_scheduler_is_fail_closed_until_cloud_and_key_are_authorized(self):
+        installer = (ROOT / "scripts" / "install_selfhost_backup_tasks.ps1").read_text(encoding="utf-8")
+        runner = (ROOT / "scripts" / "run_selfhost_backup.ps1").read_text(encoding="utf-8")
+        self.assertIn("if (-not $Enable)", installer)
+        self.assertIn("CloudRemote es obligatorio", installer)
+        self.assertIn("MultipleInstances IgnoreNew", installer)
+        self.assertIn("--keep 48", runner)
+        cloud = (ROOT / "scripts" / "run_selfhost_cloud_copy.ps1").read_text(encoding="utf-8")
+        self.assertIn("rclone copy", cloud)
+        self.assertIn("rclone check", cloud)
+        self.assertNotIn("rclone sync", cloud.lower())
+        self.assertIn('"$Remote/four-hour"', cloud)
+        self.assertIn('"$Remote/daily"', cloud)
+        self.assertIn("--min-age 7d", cloud)
+        self.assertIn("--min-age 30d", cloud)
+        restore = (ROOT / "scripts" / "run_selfhost_restore_test.ps1").read_text(encoding="utf-8")
+        self.assertIn("restore-isolated", restore)
+        backup_script = (ROOT / "scripts" / "selfhost_backup.py").read_text(encoding="utf-8")
+        self.assertIn('"--network", "none"', backup_script)
+        self.assertIn('"postgres:17-alpine"', backup_script)
+        self.assertIn("backup.failed", runner)
+        self.assertIn("cloud.failed", cloud)
+        self.assertIn("restore.failed", restore)
 
 
 if __name__ == "__main__":
