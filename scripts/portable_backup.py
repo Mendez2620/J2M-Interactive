@@ -73,6 +73,24 @@ def _unprotect_dpapi(hex_payload: bytes) -> bytes:
         ctypes.windll.kernel32.LocalFree(clear_blob.pbData)
 
 
+def _protect_dpapi(cleartext: bytes) -> bytes:
+    """Protect bytes for the current Windows user and return an ASCII hex blob."""
+    if not hasattr(ctypes, "windll"):
+        raise RuntimeError("DPAPI solo está disponible en Windows.")
+    source = (ctypes.c_ubyte * len(cleartext)).from_buffer_copy(cleartext)
+    source_blob = _DataBlob(len(cleartext), source)
+    encrypted_blob = _DataBlob()
+    if not ctypes.windll.crypt32.CryptProtectData(
+        ctypes.byref(source_blob), "J2M backup key", None, None, None, 0,
+        ctypes.byref(encrypted_blob),
+    ):
+        raise ctypes.WinError()
+    try:
+        return ctypes.string_at(encrypted_blob.pbData, encrypted_blob.cbData).hex().encode("ascii")
+    finally:
+        ctypes.windll.kernel32.LocalFree(encrypted_blob.pbData)
+
+
 def _portable_text(cleartext: bytes) -> bytes:
     """Normalize PowerShell DPAPI text payloads to portable UTF-8."""
     if len(cleartext) >= 2 and cleartext[1] == 0:

@@ -129,16 +129,67 @@ Las regresiones existentes de configuración comprueban además que producción 
 - GitHub Actions continúa validando PostgreSQL 16 y la imagen Linux. Solo se construye localmente un SHA exacto que sea el `origin/main` aprobado; nunca ejecutar imágenes provenientes de PRs no confiables.
 - Para rollback, conservar al menos la imagen del SHA anterior aprobado y no aplicar downgrades destructivos. Restaurar base únicamente desde un respaldo probado y con autorización.
 
+### Respaldo cifrado y recuperación
+
+El respaldo operativo usa PostgreSQL 17 (`postgres:17-alpine`) para ser compatible con Supabase PostgreSQL 17. El flujo de `pg_dump --format=custom` se cifra en marcos AES-256-GCM antes de escribirlo. Un terminador también autenticado conserva el número de marcos y la longitud total, por lo que la verificación rechaza truncamiento, eliminación, reordenamiento y tamaños inválidos aunque alguien recalcule el SHA-256 externo. Un manifiesto `.complete.json` se publica al final como marcador atómico; procesos de retención, copia y restauración ignoran cualquier archivo sin ese marcador. La clave binaria de trabajo queda protegida con DPAPI CurrentUser y debe existir una segunda envoltura portable cifrada con una contraseña custodiada fuera del equipo. Ninguna de las dos se crea automáticamente.
+
+Preparación, todavía sin activar tareas ni transferencias:
+
+```powershell
+python -m scripts.selfhost_backup init-key `
+  --key-file "$env:LOCALAPPDATA\J2M\backup-key.dpapi" `
+  --recovery-file "R:\J2M\backup-key-recovery.j2mbackup"
+powershell -File scripts/install_selfhost_backup_tasks.ps1
+```
+
+En otro perfil Windows o equipo, recuperar sin sustituir una clave existente:
+
+```powershell
+python -m scripts.selfhost_backup recover-key `
+  --recovery-file "R:\J2M\backup-key-recovery.j2mbackup" `
+  --key-file "$env:LOCALAPPDATA\J2M\backup-key.dpapi"
+
+python -m scripts.selfhost_backup restore-configuration `
+  "R:\J2M\configuration\j2m-configuration-AAAA.zip.j2mbackup" `
+  --destination "$env:LOCALAPPDATA\J2M\recovered-configuration" `
+  --key-file "$env:LOCALAPPDATA\J2M\backup-key.dpapi"
+
+powershell -File scripts/protect_selfhost_secrets.ps1 `
+  -Path "$env:LOCALAPPDATA\J2M\backup-key.dpapi","$env:LOCALAPPDATA\J2M\recovered-configuration"
+```
+
+La contraseña se solicita de forma interactiva. La operación crea una nueva envoltura DPAPI para el perfil actual, verifica que descifra los mismos 32 bytes binarios y falla si el destino ya existe. La restauración de configuración exige archivo cifrado, SHA-256 y manifiesto válidos, rechaza rutas o enlaces inseguros dentro del ZIP y escribe únicamente en un directorio nuevo. Después se protegen las ACL y se comparan los nombres requeridos con `.env.selfhost.example`; no se imprimen sus valores.
+
+`R:` representa una carpeta sincronizada del proveedor que el propietario autorice; no debe sustituirse por una carpeta local en C:. La contraseña se solicita interactivamente, nunca por argumento. Antes de usar `-Enable`, restringir ACL sobre la clave, autorizar el proveedor, configurar `rclone` sin secretos en Git y verificar la recuperación portable desde otro perfil/equipo.
+
+Después de crear la clave, ejecutar `scripts/protect_selfhost_secrets.ps1` sobre el archivo DPAPI, la recuperación portable y el directorio de respaldos. La recuperación portable debe salir del equipo antes de considerar protegido el host; DPAPI por sí solo no cubre pérdida del perfil o del disco.
+
+Al activarse explícitamente, las tareas independientes de Codex ejecutan:
+
+- `run_selfhost_backup.ps1` cada hora: un solo `pg_dump`, tres intentos, límite temporal, bloqueo de sistema operativo contra solapamientos, 48 copias locales cifradas y respaldo de configuración únicamente cuando cambia. Siempre conserva al menos el último respaldo completo de base y configuración.
+- `run_selfhost_cloud_copy.ps1` cada cuatro horas: prepara exactamente el respaldo completo más reciente, lo verifica con SHA-256, manifiesto y AES-GCM, y usa `rclone copy`, nunca `sync`. Después vuelve a descargar el archivo cifrado y repite la verificación completa, incluso cuando el backend no ofrece hashes compatibles. La retención genera una lista exacta por cada categoría y ejecuta `rclone deletefile` solamente sobre esos objetos; no combina filtros `--include`/`--exclude`. Cuatro horas, diarios y configuración protegen de forma independiente su conjunto completo más reciente, aunque sea más antiguo que la ventana.
+- `run_selfhost_restore_test.ps1` semanalmente: restaura el último dump en PostgreSQL 17 con `--network none`, datos en `tmpfs`, ningún puerto y eliminación final del contenedor. Exige el head Alembic esperado, tablas representativas, recuentos legibles, ausencia de clientes huérfanos y saldos no negativos; jamás apunta a producción.
+
+Los resultados se registran sin URLs, contraseñas ni salida de `pg_dump`. El contenedor de `pg_dump` recibe solamente `DATABASE_URL`; para destinos reales fuerza `sslmode=verify-full` y `sslrootcert=system`, y comprueba que `/etc/ssl/certs/ca-certificates.crt` exista y no esté vacío antes de conectar. Así valida TLS, cadena de certificado y hostname sin relajar seguridad. Un fallo devuelve código distinto de cero para el historial del Programador de tareas; el monitoreo debe alertar si falta una ejecución horaria o una copia externa de cuatro horas.
+
+No se usa S4U. Microsoft documenta que S4U no almacena contraseña, pero tampoco ofrece acceso a red ni archivos cifrados. Docker Desktop, DPAPI CurrentUser y `rclone` requieren el token de la sesión del propietario, así que las tareas se preparan con `InteractiveToken`: no guardan la contraseña de Windows, son independientes de Codex y solo ejecutan mientras el propietario tenga una sesión iniciada. No se considera probado el arranque sin login. Para operación totalmente desatendida haría falta migrar Docker a un servicio compatible y rediseñar la custodia de claves; queda fuera de este corte urgente.
+
+El 17 de noviembre de 2026 se comprobó desde la imagen aprobada, sin arrancar J2M, una conexión TLS de solo lectura a Supabase: `SELECT 1` respondió y `alembic_version` fue `9d0e1f2a3b4c`. No se ejecutó migración ni escritura. Un respaldo real y su restauración continúan bloqueados hasta autorizar la clave portable y el proveedor; las pruebas automatizadas y Docker utilizan exclusivamente datos sintéticos.
+
 ## Dominios, subdominios y prefijos
 
 La aplicación ya genera URLs con `url_for` en la mayoría de los flujos y permite configurar el origen canónico mediante `PUBLIC_BASE_URL`, CORS y WebAuthn. Producción exige un origen HTTPS sin ruta; cookies seguras, RP ID y redirecciones dependen de ese origen. Por ello, dominios o subdominios distintos son configurables, pero montar toda la aplicación debajo de un prefijo inverso como `/lealtad` todavía **no está aprobado**: existen redirecciones absolutas `/admin/...`, rutas estáticas y contratos Wallet/WebAuthn que requieren una revisión coordinada. Las rutas actuales `/admin`, `/manager` y `/api` permanecen intactas. No configurar `StripPrefix`, `SCRIPT_NAME` ni reescrituras en Cloudflare hasta aprobar ese contrato.
 
+La configuración preparada para el dominio aún no adquirido es: `PUBLIC_BASE_URL=https://lealtad.j2minteractive.com`, `CORS_ORIGINS` y `WEBAUTHN_ORIGIN` con ese mismo origen, `WEBAUTHN_RP_ID=lealtad.j2minteractive.com`, cookies seguras y `TRUSTED_PROXY_COUNT=1`. No debe copiarse al entorno activo, crear un túnel ni registrarse como origen Wallet/WebAuthn hasta que el propietario controle el dominio y el HTTPS público sea estable.
+
+Si Railway suspende los servicios antes del corte, Supabase conserva los datos pero web, registro, escáner y worker dejan de estar disponibles. Railway no puede considerarse rollback mientras el servicio esté suspendido. El corte mínimo entonces exige dominio controlado, túnel estable, respaldo real restaurado en ensayo, host protegido y una ventana sin workers en paralelo. Ambos Wallet permanecen `disabled` localmente; no se promete emisión ni sincronización hasta una autorización posterior.
+
 ## Límites pendientes
 
 - C: no usa BitLocker. La suspensión en corriente quedó deshabilitada; falta probar recuperación automática tras un reinicio real.
-- No había un disco o memoria externa conectado durante el ensayo; la copia portable independiente de DPAPI continúa pendiente y no debe guardarse como sustituto en C:.
+- No hay disco externo. La alternativa preparada es una copia cifrada en almacenamiento personal, pero faltan proveedor y custodia de la contraseña; no se realizó ninguna transferencia.
 - Falta adquirir/controlar el dominio y crear el túnel; no existe token Cloudflare respaldado todavía.
-- No se probó conectividad real desde contenedores hacia Supabase porque el ensayo la bloquea deliberadamente. Tampoco se probó una restauración de respaldo PostgreSQL.
+- La conectividad TLS de solo lectura desde Docker hacia Supabase sí fue comprobada. Falta crear el primer respaldo real cifrado y restaurarlo aisladamente después de autorizar la custodia; no se probaron escrituras ni migraciones remotas.
 - Un único equipo y una única conexión eléctrica/ISP no proporcionan alta disponibilidad. Se recomienda UPS, respaldo externo, monitoreo desde otra red y un segundo host antes de retirar Railway.
 
 ## Referencias operativas
@@ -147,3 +198,5 @@ La aplicación ya genera URLs con `url_for` en la mayoría de los flujos y permi
 - Token de túnel y variable `TUNNEL_TOKEN`: https://developers.cloudflare.com/tunnel/reference/tunnel-tokens/
 - Publicación de hostnames: https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/routing-to-tunnel/
 - Observabilidad y endpoint `/ready`: https://developers.cloudflare.com/tunnel/observability/
+- Microsoft Task Scheduler, tipos de inicio de sesión y limitaciones S4U: https://learn.microsoft.com/windows/win32/taskschd/taskschedulerschema-logontype-principaltype-element
+- `New-ScheduledTaskPrincipal`: https://learn.microsoft.com/powershell/module/scheduledtasks/new-scheduledtaskprincipal

@@ -4,34 +4,29 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-$system = [System.Security.Principal.SecurityIdentifier]::new("S-1-5-18")
-$administrators = [System.Security.Principal.SecurityIdentifier]::new("S-1-5-32-544")
+$currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 
 foreach ($item in $Path) {
-    $resolved = Resolve-Path -LiteralPath $item -ErrorAction Stop
+    $resolved = (Resolve-Path -LiteralPath $item -ErrorAction Stop).Path
     $isDirectory = (Get-Item -LiteralPath $resolved).PSIsContainer
-    $security = if ($isDirectory) {
-        [System.Security.AccessControl.DirectorySecurity]::new()
+    $currentGrant = if ($isDirectory) { "*$currentSid`:(OI)(CI)F" } else { "*$currentSid`:F" }
+    $systemGrant = if ($isDirectory) { "*S-1-5-18:(OI)(CI)F" } else { "*S-1-5-18:F" }
+    $adminGrant = if ($isDirectory) { "*S-1-5-32-544:(OI)(CI)F" } else { "*S-1-5-32-544:F" }
+
+    # icacls avoids Set-Acl attempting to read/write SACL data without SeSecurityPrivilege.
+    & icacls.exe $resolved /inheritance:r /grant:r $currentGrant $systemGrant $adminGrant *> $null
+    if ($LASTEXITCODE -ne 0) { throw "No fue posible restringir los permisos del destino." }
+
+    $acl = if ($isDirectory) {
+        [System.IO.Directory]::GetAccessControl($resolved)
     } else {
-        [System.Security.AccessControl.FileSecurity]::new()
+        [System.IO.File]::GetAccessControl($resolved)
     }
-    $security.SetAccessRuleProtection($true, $false)
-    $inheritance = if ($isDirectory) {
-        [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
-    } else {
-        [System.Security.AccessControl.InheritanceFlags]::None
-    }
-    foreach ($identity in @($currentUser, $system, $administrators)) {
-        $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
-            $identity,
-            [System.Security.AccessControl.FileSystemRights]::FullControl,
-            $inheritance,
-            [System.Security.AccessControl.PropagationFlags]::None,
-            [System.Security.AccessControl.AccessControlType]::Allow
-        )
-        $security.AddAccessRule($rule)
-    }
-    Set-Acl -LiteralPath $resolved -AclObject $security
+    if (-not $acl.AreAccessRulesProtected) { throw "La herencia ACL continúa habilitada." }
+    $allowed = @($currentSid, "S-1-5-18", "S-1-5-32-544")
+    $unexpected = @($acl.Access | Where-Object {
+        $_.AccessControlType -eq "Allow" -and $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -notin $allowed
+    })
+    if ($unexpected.Count -gt 0) { throw "La ACL contiene identidades no autorizadas." }
     Write-Host "Permisos restringidos: $resolved"
 }
