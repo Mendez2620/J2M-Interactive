@@ -40,13 +40,15 @@ if ($envPath) {
     }
     $required = @(
         "SECRET_KEY", "JWT_SECRET_KEY", "REGISTRATION_IDENTITY_HMAC_KEY",
-        "REFERRAL_EVIDENCE_HMAC_KEYS", "DATABASE_URL", "PUBLIC_BASE_URL",
+        "REFERRAL_EVIDENCE_HMAC_KEYS", "DATABASE_URL", "DATABASE_SSL_ROOT_CERT", "PUBLIC_BASE_URL",
         "CORS_ORIGINS", "SESSION_COOKIE_SECURE", "APPLE_WALLET_MODE"
     )
     $missing = @($required | Where-Object { -not $pairs.ContainsKey($_) -or [string]::IsNullOrWhiteSpace($pairs[$_]) -or $pairs[$_] -match '^REQUIRED' })
     Write-Check "required-env" ($missing.Count -eq 0) ($(if ($missing) { "faltan nombres: " + ($missing -join ", ") } else { "nombres requeridos presentes" }))
     Write-Check "apple-disabled" ($pairs["APPLE_WALLET_MODE"] -eq "disabled") "Apple Wallet debe permanecer disabled"
     Write-Check "google-disabled" ($pairs["GOOGLE_WALLET_MODE"] -eq "disabled") "Google Wallet debe permanecer disabled"
+    $databaseRootCert = if ($pairs.ContainsKey("DATABASE_SSL_ROOT_CERT")) { $pairs["DATABASE_SSL_ROOT_CERT"] } else { "" }
+    Write-Check "database-root-ca" (-not [string]::IsNullOrWhiteSpace($databaseRootCert) -and (Test-Path -LiteralPath $databaseRootCert -PathType Leaf)) "CA PostgreSQL local disponible para verify-full"
     Write-Check "app-secret-separation" (-not $pairs.ContainsKey("TUNNEL_TOKEN") -and -not $pairs.ContainsKey("CLOUDFLARE_TUNNEL_TOKEN")) "el token del túnel no debe estar en el entorno de la aplicación"
 
     $configuredPorts = [System.Collections.Generic.List[int]]::new()

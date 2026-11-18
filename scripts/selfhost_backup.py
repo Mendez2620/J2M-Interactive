@@ -288,12 +288,17 @@ def _safe_log(path: Path, event: str, status: str, detail: str = "") -> None:
         stream.write(json.dumps(record, sort_keys=True) + "\n")
 
 
-def _read_database_url(env_file: Path, allow_insecure_synthetic: bool = False) -> str:
-    value = None
+def _read_env_value(env_file: Path, name: str) -> str | None:
+    prefix = name + "="
     for line in env_file.read_text(encoding="utf-8").splitlines():
-        if line.startswith("DATABASE_URL="):
-            value = line.partition("=")[2].strip().strip("'\"")
-            break
+        if line.startswith(prefix):
+            return line.partition("=")[2].strip().strip("'\"")
+    return None
+
+
+def _read_database_url(env_file: Path, allow_insecure_synthetic: bool = False,
+                       sslrootcert: str | None = None) -> str:
+    value = _read_env_value(env_file, "DATABASE_URL")
     if not value:
         raise ValueError("DATABASE_URL no está disponible.")
     parsed = urlsplit(value)
@@ -305,7 +310,7 @@ def _read_database_url(env_file: Path, allow_insecure_synthetic: bool = False) -
             raise ValueError("La excepción TLS solo se admite para el ensayo sintético aislado.")
     else:
         query["sslmode"] = "verify-full"
-        query["sslrootcert"] = "system"
+        query["sslrootcert"] = sslrootcert or "system"
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment))
 
 
@@ -374,7 +379,18 @@ def database_backup(env_file: Path, output_dir: Path, key_file: Path, retries: i
                     allow_insecure_synthetic: bool = False) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     key = load_dpapi_key(key_file)
-    database_url = _read_database_url(env_file, allow_insecure_synthetic)
+    root_cert = None
+    container_root_cert = None
+    configured_root_cert = _read_env_value(env_file, "DATABASE_SSL_ROOT_CERT")
+    if configured_root_cert and not allow_insecure_synthetic:
+        candidate_root_cert = Path(configured_root_cert).expanduser()
+        if candidate_root_cert.is_symlink():
+            raise ValueError("DATABASE_SSL_ROOT_CERT debe ser un archivo regular existente.")
+        root_cert = candidate_root_cert.resolve(strict=True)
+        if not root_cert.is_file():
+            raise ValueError("DATABASE_SSL_ROOT_CERT debe ser un archivo regular existente.")
+        container_root_cert = "/run/j2m/database-root-ca.crt"
+    database_url = _read_database_url(env_file, allow_insecure_synthetic, container_root_cert)
     lock_file = output_dir.parent / ".operations.lock"
     log_path = output_dir.parent / "logs" / "backup.jsonl"
     with exclusive_lock(lock_file):
@@ -383,10 +399,12 @@ def database_backup(env_file: Path, output_dir: Path, key_file: Path, retries: i
             final = output_dir / f"j2m-postgres-{stamp}-{secrets.token_hex(3)}.dump.j2mbackup"
             partial = final.with_name(final.name + ".partial")
             container = "j2m-pgdump-" + secrets.token_hex(6)
-            command = ["docker", "run", "--rm", "--name", container, "--network", network,
-                       "-e", "DATABASE_URL", "postgres:17-alpine", "sh", "-eu", "-c",
+            command = ["docker", "run", "--rm", "--name", container, "--network", network]
+            if root_cert is not None:
+                command.extend(["--mount", f"type=bind,src={root_cert},dst={container_root_cert},readonly"])
+            command.extend(["-e", "DATABASE_URL", "postgres:17-alpine", "sh", "-eu", "-c",
                        'test -s /etc/ssl/certs/ca-certificates.crt && '
-                       'pg_dump --format=custom --no-owner --no-acl "$DATABASE_URL"']
+                       'pg_dump --format=custom --no-owner --no-acl "$DATABASE_URL"'])
             child_env = os.environ.copy()
             child_env["DATABASE_URL"] = database_url
             try:
@@ -601,8 +619,27 @@ def restore_isolated(backup: Path, key_file: Path, lock_file: Path | None = None
                 time.sleep(1)
             else:
                 raise RuntimeError("PostgreSQL aislado no quedó disponible.")
+            # Supabase Vault is a platform-managed extension unavailable in the
+            # stock PostgreSQL image. Build the pg_restore TOC only inside the
+            # isolated container, remove its extension entries, and exclude the
+            # managed vault schema. The decrypted dump is never persisted.
+            listing = subprocess.Popen(
+                ["docker", "exec", "-i", name, "sh", "-eu", "-c",
+                 "pg_restore --list > /tmp/all.list; "
+                 "grep -v supabase_vault /tmp/all.list > /tmp/j2m-restore.list; "
+                 "test -s /tmp/j2m-restore.list"],
+                stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            )
+            assert listing.stdin is not None
+            with backup.open("rb") as encrypted:
+                decrypt_stream(encrypted, listing.stdin, key)
+            listing.stdin.close()
+            if listing.wait(timeout=30) != 0:
+                raise RuntimeError("No fue posible preparar la lista de restauración aislada.")
             restore = subprocess.Popen(["docker", "exec", "-i", name, "pg_restore",
-                                        "--exit-on-error", "--no-owner", "--no-acl", "-U",
+                                        "--exit-on-error", "--no-owner", "--no-acl",
+                                        "--exclude-schema=vault",
+                                        "--use-list=/tmp/j2m-restore.list", "-U",
                                         "j2m_restore", "-d", "j2m_restore"], stdin=subprocess.PIPE,
                                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
             assert restore.stdin is not None
