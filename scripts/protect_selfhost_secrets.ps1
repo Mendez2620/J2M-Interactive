@@ -17,10 +17,17 @@ foreach ($item in $Path) {
     & icacls.exe $resolved /inheritance:r /grant:r $currentGrant $systemGrant $adminGrant *> $null
     if ($LASTEXITCODE -ne 0) { throw "No fue posible restringir los permisos del destino." }
 
-    $acl = if ($isDirectory) {
-        [System.IO.Directory]::GetAccessControl($resolved)
+    # PowerShell 7 exposes ACL access through FileSystemAclExtensions while
+    # Windows PowerShell 5.1 exposes the legacy Directory/File static methods.
+    # Select the available API so the protection script works in both hosts.
+    $fileSystemInfo = Get-Item -LiteralPath $resolved
+    $aclExtensionType = [Type]::GetType("System.IO.FileSystemAclExtensions, System.IO.FileSystem.AccessControl", $false)
+    if ($null -ne $aclExtensionType) {
+        $acl = $aclExtensionType::GetAccessControl($fileSystemInfo)
+    } elseif ($isDirectory) {
+        $acl = [System.IO.Directory]::GetAccessControl($resolved)
     } else {
-        [System.IO.File]::GetAccessControl($resolved)
+        $acl = [System.IO.File]::GetAccessControl($resolved)
     }
     if (-not $acl.AreAccessRulesProtected) { throw "La herencia ACL continúa habilitada." }
     $allowed = @($currentSid, "S-1-5-18", "S-1-5-32-544")

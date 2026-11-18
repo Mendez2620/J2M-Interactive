@@ -466,12 +466,16 @@ class SelfHostInfrastructureTestCase(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=ROOT / "selfhost-backups") as temporary:
             secret = Path(temporary) / "secret.txt"
             secret.write_text("synthetic", encoding="utf-8")
-            acl_result = subprocess.run(
-                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
-                 str(ROOT / "scripts" / "protect_selfhost_secrets.ps1"), "-Path", str(secret)],
-                capture_output=True, text=True,
-            )
-            self.assertEqual(acl_result.returncode, 0, acl_result.stdout + acl_result.stderr)
+            secret_directory = Path(temporary) / "private"
+            secret_directory.mkdir()
+            for protected_path in (secret, secret_directory):
+                acl_result = subprocess.run(
+                    ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                     str(ROOT / "scripts" / "protect_selfhost_secrets.ps1"), "-Path",
+                     str(protected_path)],
+                    capture_output=True, text=True,
+                )
+                self.assertEqual(acl_result.returncode, 0, acl_result.stdout + acl_result.stderr)
             result = subprocess.run(
                 ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
                  str(ROOT / "scripts" / "install_selfhost_backup_tasks.ps1")],
