@@ -148,9 +148,17 @@ En otro perfil Windows o equipo, recuperar sin sustituir una clave existente:
 python -m scripts.selfhost_backup recover-key `
   --recovery-file "R:\J2M\backup-key-recovery.j2mbackup" `
   --key-file "$env:LOCALAPPDATA\J2M\backup-key.dpapi"
+
+python -m scripts.selfhost_backup restore-configuration `
+  "R:\J2M\configuration\j2m-configuration-AAAA.zip.j2mbackup" `
+  --destination "$env:LOCALAPPDATA\J2M\recovered-configuration" `
+  --key-file "$env:LOCALAPPDATA\J2M\backup-key.dpapi"
+
+powershell -File scripts/protect_selfhost_secrets.ps1 `
+  -Path "$env:LOCALAPPDATA\J2M\backup-key.dpapi","$env:LOCALAPPDATA\J2M\recovered-configuration"
 ```
 
-La contraseña se solicita de forma interactiva. La operación crea una nueva envoltura DPAPI para el perfil actual, verifica que descifra los mismos 32 bytes binarios y falla si el destino ya existe.
+La contraseña se solicita de forma interactiva. La operación crea una nueva envoltura DPAPI para el perfil actual, verifica que descifra los mismos 32 bytes binarios y falla si el destino ya existe. La restauración de configuración exige archivo cifrado, SHA-256 y manifiesto válidos, rechaza rutas o enlaces inseguros dentro del ZIP y escribe únicamente en un directorio nuevo. Después se protegen las ACL y se comparan los nombres requeridos con `.env.selfhost.example`; no se imprimen sus valores.
 
 `R:` representa una carpeta sincronizada del proveedor que el propietario autorice; no debe sustituirse por una carpeta local en C:. La contraseña se solicita interactivamente, nunca por argumento. Antes de usar `-Enable`, restringir ACL sobre la clave, autorizar el proveedor, configurar `rclone` sin secretos en Git y verificar la recuperación portable desde otro perfil/equipo.
 
@@ -159,10 +167,10 @@ Después de crear la clave, ejecutar `scripts/protect_selfhost_secrets.ps1` sobr
 Al activarse explícitamente, las tareas independientes de Codex ejecutan:
 
 - `run_selfhost_backup.ps1` cada hora: un solo `pg_dump`, tres intentos, límite temporal, bloqueo de sistema operativo contra solapamientos, 48 copias locales cifradas y respaldo de configuración únicamente cuando cambia. Siempre conserva al menos el último respaldo completo de base y configuración.
-- `run_selfhost_cloud_copy.ps1` cada cuatro horas: prepara exactamente el respaldo completo más reciente, lo verifica con SHA-256, manifiesto y AES-GCM, y usa `rclone copy`, nunca `sync`. Después vuelve a descargar el archivo cifrado y repite la verificación completa, incluso cuando el backend no ofrece hashes compatibles. Conserva el prefijo de cuatro horas siete días y una copia diaria 30 días, sin borrar nunca el último conjunto válido.
+- `run_selfhost_cloud_copy.ps1` cada cuatro horas: prepara exactamente el respaldo completo más reciente, lo verifica con SHA-256, manifiesto y AES-GCM, y usa `rclone copy`, nunca `sync`. Después vuelve a descargar el archivo cifrado y repite la verificación completa, incluso cuando el backend no ofrece hashes compatibles. La retención genera una lista exacta por cada categoría y ejecuta `rclone deletefile` solamente sobre esos objetos; no combina filtros `--include`/`--exclude`. Cuatro horas, diarios y configuración protegen de forma independiente su conjunto completo más reciente, aunque sea más antiguo que la ventana.
 - `run_selfhost_restore_test.ps1` semanalmente: restaura el último dump en PostgreSQL 17 con `--network none`, datos en `tmpfs`, ningún puerto y eliminación final del contenedor. Exige el head Alembic esperado, tablas representativas, recuentos legibles, ausencia de clientes huérfanos y saldos no negativos; jamás apunta a producción.
 
-Los resultados se registran sin URLs, contraseñas ni salida de `pg_dump`. El contenedor de `pg_dump` recibe solamente `DATABASE_URL`, y para destinos reales el script fuerza `sslmode=verify-full` para validar TLS, certificado y hostname. Un fallo devuelve código distinto de cero para el historial del Programador de tareas; el monitoreo debe alertar si falta una ejecución horaria o una copia externa de cuatro horas.
+Los resultados se registran sin URLs, contraseñas ni salida de `pg_dump`. El contenedor de `pg_dump` recibe solamente `DATABASE_URL`; para destinos reales fuerza `sslmode=verify-full` y `sslrootcert=system`, y comprueba que `/etc/ssl/certs/ca-certificates.crt` exista y no esté vacío antes de conectar. Así valida TLS, cadena de certificado y hostname sin relajar seguridad. Un fallo devuelve código distinto de cero para el historial del Programador de tareas; el monitoreo debe alertar si falta una ejecución horaria o una copia externa de cuatro horas.
 
 No se usa S4U. Microsoft documenta que S4U no almacena contraseña, pero tampoco ofrece acceso a red ni archivos cifrados. Docker Desktop, DPAPI CurrentUser y `rclone` requieren el token de la sesión del propietario, así que las tareas se preparan con `InteractiveToken`: no guardan la contraseña de Windows, son independientes de Codex y solo ejecutan mientras el propietario tenga una sesión iniciada. No se considera probado el arranque sin login. Para operación totalmente desatendida haría falta migrar Docker a un servicio compatible y rediseñar la custodia de claves; queda fuera de este corte urgente.
 

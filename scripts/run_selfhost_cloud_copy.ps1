@@ -7,6 +7,34 @@ param(
 $ErrorActionPreference = "Stop"
 $failure = Join-Path $Repository "selfhost-backups\logs\cloud.failed"
 $verifyDir = $null
+
+function Invoke-ExactRetention([string]$Category, [int]$Days) {
+    $inventoryPath = Join-Path $verifyDir ($Category + "-inventory.json")
+    $inventoryJson = (& rclone lsjson "$Remote/$Category" --files-only --no-mimetype | Out-String)
+    if ($LASTEXITCODE -ne 0) { throw "$Category inventory failed" }
+    Set-Content -LiteralPath $inventoryPath -Value $inventoryJson -Encoding utf8
+    $planJson = (& python -m scripts.selfhost_backup retention-plan --inventory $inventoryPath --max-age-days $Days | Out-String)
+    if ($LASTEXITCODE -ne 0) { throw "$Category retention planning failed" }
+    $plan = $planJson | ConvertFrom-Json
+    if ($null -eq $plan.protected) {
+        if (@($plan.delete).Count -ne 0) { throw "$Category plan is not fail-closed" }
+        return
+    }
+    $categoryVerify = Join-Path $verifyDir ("retention-" + $Category)
+    New-Item -ItemType Directory -Force -Path $categoryVerify | Out-Null
+    rclone copy "$Remote/$Category" $categoryVerify --include ($plan.protected + "*") --retries 3 --contimeout 15s --timeout 5m
+    if ($LASTEXITCODE -ne 0) { throw "$Category protected-set download failed" }
+    python -m scripts.selfhost_backup verify (Join-Path $categoryVerify $plan.protected) --key-file $KeyFile
+    if ($LASTEXITCODE -ne 0) { throw "$Category protected-set verification failed" }
+    foreach ($relativePath in @($plan.delete)) {
+        if ([string]::IsNullOrWhiteSpace($relativePath) -or $relativePath.Contains("/") -or $relativePath.Contains("\")) {
+            throw "$Category retention produced an unsafe path"
+        }
+        rclone deletefile "$Remote/$Category/$relativePath" --retries 3 --contimeout 15s --timeout 5m
+        if ($LASTEXITCODE -ne 0) { throw "$Category exact deletion failed" }
+    }
+}
+
 try {
     if (-not (Get-Command rclone -ErrorAction SilentlyContinue)) { throw "rclone unavailable" }
     Set-Location -LiteralPath $Repository
@@ -28,6 +56,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "remote verification download failed" }
     python -m scripts.selfhost_backup verify (Join-Path $verifyDir $selected.Name) --key-file $KeyFile
     if ($LASTEXITCODE -ne 0) { throw "remote cryptographic verification failed" }
+    foreach ($category in @("daily", "configuration")) {
+        rclone mkdir "$Remote/$category"
+        if ($LASTEXITCODE -ne 0) { throw "$category remote directory preparation failed" }
+    }
 
     $configuration = Join-Path $root "configuration"
     $configSelected = $null
@@ -58,17 +90,10 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "daily cryptographic verification failed" }
     }
 
-    # Retention never removes the current complete bundle, even if it is old.
-    $exclude = @("--exclude", $selected.Name, "--exclude", ($selected.Name + ".sha256"), "--exclude", ($selected.Name + ".complete.json"))
-    rclone delete "$Remote/four-hour" --min-age 7d --include "*.j2mbackup" --include "*.sha256" --include "*.complete.json" @exclude --retries 3
-    if ($LASTEXITCODE -ne 0) { throw "four-hour retention failed" }
-    rclone delete "$Remote/daily" --min-age 30d --include "*.j2mbackup" --include "*.sha256" --include "*.complete.json" @exclude --retries 3
-    if ($LASTEXITCODE -ne 0) { throw "daily retention failed" }
-    if ($null -ne $configSelected) {
-        $configExclude = @("--exclude", $configSelected.Name, "--exclude", ($configSelected.Name + ".sha256"), "--exclude", ($configSelected.Name + ".complete.json"))
-        rclone delete "$Remote/configuration" --min-age 30d --include "*.j2mbackup" --include "*.sha256" --include "*.complete.json" @configExclude --retries 3
-        if ($LASTEXITCODE -ne 0) { throw "configuration retention failed" }
-    }
+    # Each category inventories, authenticates and protects its own newest complete set.
+    Invoke-ExactRetention "four-hour" 7
+    Invoke-ExactRetention "daily" 30
+    Invoke-ExactRetention "configuration" 30
     Remove-Item -LiteralPath $verifyDir -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $failure -Force -ErrorAction SilentlyContinue
     exit 0

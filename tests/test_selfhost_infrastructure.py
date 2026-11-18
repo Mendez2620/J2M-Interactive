@@ -2,7 +2,9 @@ import json
 import hashlib
 import io
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -23,7 +25,9 @@ from scripts.selfhost_backup import (
     exclusive_lock,
     load_dpapi_key,
     recover_key,
+    remote_retention_plan,
     retain_local,
+    restore_configuration,
     stage_offsite,
     verify_backup,
 )
@@ -261,10 +265,26 @@ class SelfHostInfrastructureTestCase(unittest.TestCase):
                 os.utime(_manifest(backup), (index + 1, index + 1))
             newest = directory / "49.j2mbackup"
             self.assertTrue(verify_backup(newest, key))
-            self.assertEqual(retain_local(directory, 48), 2)
+            self.assertEqual(retain_local(directory, key, 48), 2)
             self.assertEqual(len(list(directory.glob("*.j2mbackup"))), 48)
-            self.assertEqual(retain_local(directory, 0), 47)
+            self.assertEqual(retain_local(directory, key, 0), 47)
             self.assertTrue(verify_backup(newest, key))
+
+    def test_local_retention_ignores_manifest_with_recomputed_hash_but_invalid_aead(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            key = bytes(range(32))
+            valid = self._complete_backup(root, "valid.j2mbackup", b"valid", key)
+            invalid = self._complete_backup(root, "invalid.j2mbackup", b"invalid", key)
+            invalid.write_bytes(invalid.read_bytes()[:-1])
+            digest = hashlib.sha256(invalid.read_bytes()).hexdigest()
+            _sidecar(invalid).write_text(f"{digest}  {invalid.name}\n", encoding="ascii")
+            manifest = json.loads(_manifest(invalid).read_text(encoding="utf-8"))
+            manifest.update(sha256=digest, size=invalid.stat().st_size)
+            _manifest(invalid).write_text(json.dumps(manifest), encoding="utf-8")
+            self.assertEqual(retain_local(root, key, 1), 0)
+            self.assertTrue(valid.exists())
+            self.assertTrue(invalid.exists())
 
     def test_offsite_staging_uses_only_latest_complete_verified_bundle(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -285,6 +305,71 @@ class SelfHostInfrastructureTestCase(unittest.TestCase):
             self.assertEqual(len(list(external.glob("*.j2mbackup"))), 1)
             self.assertTrue(_sidecar(selected).exists())
             self.assertTrue(_manifest(selected).exists())
+
+    def test_private_configuration_restores_to_new_machine_directory_without_overwrite(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            key = bytes(range(32))
+            archive = io.BytesIO()
+            import zipfile
+            with zipfile.ZipFile(archive, "w") as bundle:
+                bundle.writestr(".env.selfhost", "SECRET_KEY=synthetic\n")
+                bundle.writestr(".env.cloudflared", "TUNNEL_TOKEN=synthetic\n")
+            backup = self._complete_backup(root, "configuration.zip.j2mbackup", archive.getvalue(), key)
+            destination = root / "recovered-on-new-machine"
+            with patch("scripts.selfhost_backup.load_dpapi_key", return_value=key):
+                restored = restore_configuration(backup, destination, root / "profile.dpapi")
+                self.assertEqual(restored, [".env.cloudflared", ".env.selfhost"])
+                self.assertEqual((destination / ".env.selfhost").read_text(), "SECRET_KEY=synthetic\n")
+                with self.assertRaises(ValueError):
+                    restore_configuration(backup, destination, root / "profile.dpapi")
+
+    @unittest.skipUnless(shutil.which("rclone"), "rclone no está instalado")
+    def test_rclone_exact_retention_protects_each_category_independently(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source, remote = root / "source", root / "remote"
+            key = bytes(range(32))
+            now = datetime(2026, 11, 18, tzinfo=timezone.utc)
+            scenarios = {
+                "four-hour": [("j2m-postgres-four-old", 10, True), ("j2m-postgres-four-last", 8, True)],
+                "daily": [("j2m-postgres-daily-old", 45, True), ("j2m-postgres-daily-last", 35, True)],
+                "configuration": [("j2m-configuration-last", 90, True), ("j2m-configuration-incomplete", 60, False)],
+            }
+            expected_protected = {
+                "four-hour": "j2m-postgres-four-last.j2mbackup",
+                "daily": "j2m-postgres-daily-last.j2mbackup",
+                "configuration": "j2m-configuration-last.j2mbackup",
+            }
+            for category, entries in scenarios.items():
+                local_category = source / category
+                local_category.mkdir(parents=True)
+                for name, age_days, complete in entries:
+                    backup = self._complete_backup(local_category, f"{name}.j2mbackup", name.encode(), key)
+                    if not complete:
+                        _manifest(backup).unlink()
+                    stamp = (now - timedelta(days=age_days)).timestamp()
+                    for item in local_category.glob(f"{backup.name}*"):
+                        os.utime(item, (stamp, stamp))
+                subprocess.run(["rclone", "copy", str(local_category), str(remote / category)], check=True)
+                inventory = json.loads(subprocess.run(
+                    ["rclone", "lsjson", str(remote / category), "--files-only", "--no-mimetype"],
+                    check=True, capture_output=True, text=True,
+                ).stdout)
+                days = 7 if category == "four-hour" else 30
+                plan = remote_retention_plan(inventory, days, now)
+                self.assertEqual(plan["protected"], expected_protected[category])
+                for relative in plan["delete"]:
+                    subprocess.run(["rclone", "deletefile", str(remote / category / relative)], check=True)
+                remaining = subprocess.run(
+                    ["rclone", "lsf", str(remote / category), "--files-only"],
+                    check=True, capture_output=True, text=True,
+                ).stdout
+                self.assertIn(plan["protected"], remaining)
+                if category != "configuration":
+                    self.assertNotIn(entries[0][0] + ".j2mbackup", remaining)
+                else:
+                    self.assertNotIn("j2m-configuration-incomplete.j2mbackup", remaining)
 
     def test_operation_lock_prevents_concurrent_publication(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -310,6 +395,7 @@ class SelfHostInfrastructureTestCase(unittest.TestCase):
             env.write_text("SECRET_KEY=not-forwarded\nDATABASE_URL=postgresql://u:p@db.example/x?sslmode=require\n", encoding="utf-8")
             value = _read_database_url(env)
             self.assertIn("sslmode=verify-full", value)
+            self.assertIn("sslrootcert=system", value)
             self.assertNotIn("SECRET_KEY", value)
             env.write_text("DATABASE_URL=postgresql://u:p@j2m-backup-source/x?sslmode=disable\n", encoding="utf-8")
             with self.assertRaises(ValueError):
@@ -356,15 +442,20 @@ class SelfHostInfrastructureTestCase(unittest.TestCase):
         self.assertIn("rclone copy", cloud)
         self.assertIn("remote cryptographic verification failed", cloud)
         self.assertNotIn("rclone sync", cloud.lower())
+        self.assertNotIn("--exclude", cloud)
+        self.assertNotIn("rclone delete ", cloud)
+        self.assertIn("rclone deletefile", cloud)
         self.assertIn('"$Remote/four-hour"', cloud)
         self.assertIn('"$Remote/daily"', cloud)
-        self.assertIn("--min-age 7d", cloud)
-        self.assertIn("--min-age 30d", cloud)
+        self.assertIn('Invoke-ExactRetention "four-hour" 7', cloud)
+        self.assertIn('Invoke-ExactRetention "daily" 30', cloud)
+        self.assertIn('Invoke-ExactRetention "configuration" 30', cloud)
         restore = (ROOT / "scripts" / "run_selfhost_restore_test.ps1").read_text(encoding="utf-8")
         self.assertIn("restore-isolated", restore)
         backup_script = (ROOT / "scripts" / "selfhost_backup.py").read_text(encoding="utf-8")
         self.assertIn('"--network", "none"', backup_script)
         self.assertIn('"postgres:17-alpine"', backup_script)
+        self.assertIn("/etc/ssl/certs/ca-certificates.crt", backup_script)
         self.assertIn("backup.failed", runner)
         self.assertIn("cloud.failed", cloud)
         self.assertIn("restore.failed", restore)

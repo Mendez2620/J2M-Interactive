@@ -39,6 +39,10 @@ jobs:
         with:
           node-version: "22"
           cache: npm
+      - name: Install rclone for synthetic retention tests
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends rclone
+      - name: Verify PostgreSQL 17 trust store for verify-full backups
+        run: docker run --rm --network none postgres:17-alpine sh -eu -c 'test -s /etc/ssl/certs/ca-certificates.crt'
       - run: npm ci
       - run: npm run build:css
       - run: git diff --exit-code -- app/static/css/tailwind.min.css

@@ -5,12 +5,13 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import io
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import shutil
 import struct
@@ -304,6 +305,7 @@ def _read_database_url(env_file: Path, allow_insecure_synthetic: bool = False) -
             raise ValueError("La excepción TLS solo se admite para el ensayo sintético aislado.")
     else:
         query["sslmode"] = "verify-full"
+        query["sslrootcert"] = "system"
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment))
 
 
@@ -319,13 +321,13 @@ def _publish_bundle(partial: Path, final: Path, kind: str) -> None:
         raise RuntimeError("La publicación atómica no superó la verificación.")
 
 
-def _complete_backups(directory: Path) -> list[Path]:
-    return sorted((p for p in directory.glob("*.j2mbackup") if _verify_manifest(p)),
+def _complete_backups(directory: Path, key: bytes) -> list[Path]:
+    return sorted((p for p in directory.glob("*.j2mbackup") if verify_backup(p, key)),
                   key=lambda item: item.stat().st_mtime, reverse=True)
 
 
-def _retain_local_locked(directory: Path, keep: int) -> int:
-    backups = _complete_backups(directory)
+def _retain_local_locked(directory: Path, keep: int, key: bytes) -> int:
+    backups = _complete_backups(directory, key)
     removed = 0
     for item in backups[max(1, keep):]:
         _manifest(item).unlink(missing_ok=True)
@@ -335,9 +337,10 @@ def _retain_local_locked(directory: Path, keep: int) -> int:
     return removed
 
 
-def retain_local(directory: Path, keep: int = 48, lock_file: Path | None = None) -> int:
+def retain_local(directory: Path, key: bytes, keep: int = 48,
+                 lock_file: Path | None = None) -> int:
     with exclusive_lock(lock_file or directory.parent / ".operations.lock"):
-        return _retain_local_locked(directory, keep)
+        return _retain_local_locked(directory, keep, key)
 
 
 def _run_streaming_dump(command: list[str], child_env: dict[str, str], output: Path,
@@ -382,6 +385,7 @@ def database_backup(env_file: Path, output_dir: Path, key_file: Path, retries: i
             container = "j2m-pgdump-" + secrets.token_hex(6)
             command = ["docker", "run", "--rm", "--name", container, "--network", network,
                        "-e", "DATABASE_URL", "postgres:17-alpine", "sh", "-eu", "-c",
+                       'test -s /etc/ssl/certs/ca-certificates.crt && '
                        'pg_dump --format=custom --no-owner --no-acl "$DATABASE_URL"']
             child_env = os.environ.copy()
             child_env["DATABASE_URL"] = database_url
@@ -390,7 +394,7 @@ def database_backup(env_file: Path, output_dir: Path, key_file: Path, retries: i
                 _publish_bundle(partial, final, "postgresql")
                 if not verify_backup(final, key):
                     raise RuntimeError("El respaldo publicado no superó autenticación completa.")
-                _retain_local_locked(output_dir, 48)
+                _retain_local_locked(output_dir, 48, key)
                 _safe_log(log_path, "database_backup", "ok", f"attempt={attempt}")
                 return final
             except Exception as exc:
@@ -416,8 +420,10 @@ def configuration_backup(paths: list[Path], output_dir: Path, key_file: Path,
             fingerprint.update(path.read_bytes())
         state_path = output_dir / ".configuration.sha256"
         current = fingerprint.hexdigest()
+        key = load_dpapi_key(key_file)
         if state_path.exists() and state_path.read_text(encoding="ascii").strip() == current:
-            if not _complete_backups(output_dir):
+            complete = _complete_backups(output_dir, key)
+            if not complete:
                 raise RuntimeError("La configuración no cambió, pero falta un respaldo completo válido.")
             return None
         archive = io.BytesIO()
@@ -430,12 +436,12 @@ def configuration_backup(paths: list[Path], output_dir: Path, key_file: Path,
         final = output_dir / f"j2m-configuration-{stamp}-{secrets.token_hex(3)}.zip.j2mbackup"
         partial = final.with_name(final.name + ".partial")
         with partial.open("xb") as destination:
-            encrypt_stream(archive, destination, load_dpapi_key(key_file))
+            encrypt_stream(archive, destination, key)
             destination.flush()
             os.fsync(destination.fileno())
         _publish_bundle(partial, final, "configuration")
         _atomic_write(state_path, current.encode("ascii"))
-        _retain_local_locked(output_dir, 30)
+        _retain_local_locked(output_dir, 30, key)
         return final
 
 
@@ -444,7 +450,7 @@ def stage_offsite(source_dir: Path, destination_dir: Path, key_file: Path,
     """Stage exactly the newest complete, SHA and AEAD verified bundle."""
     with exclusive_lock(lock_file or source_dir.parent / ".operations.lock"):
         key = load_dpapi_key(key_file)
-        selected = next((p for p in _complete_backups(source_dir) if verify_backup(p, key)), None)
+        selected = next(iter(_complete_backups(source_dir, key)), None)
         if selected is None:
             raise RuntimeError("No existe un respaldo completo y autenticado para transferir.")
         staging = destination_dir.with_name(destination_dir.name + ".partial-" + secrets.token_hex(4))
@@ -467,6 +473,93 @@ def stage_offsite(source_dir: Path, destination_dir: Path, key_file: Path,
         finally:
             if staging.exists():
                 shutil.rmtree(staging)
+
+
+def restore_configuration(backup: Path, destination: Path, key_file: Path) -> list[str]:
+    """Restore a private configuration archive into a new directory without overwrites."""
+    if destination.exists():
+        raise ValueError("El directorio de recuperación ya existe; no se sobrescribirá.")
+    key = load_dpapi_key(key_file)
+    if not verify_backup(backup, key):
+        raise ValueError("El respaldo de configuración no superó la autenticación completa.")
+    cleartext = io.BytesIO()
+    with backup.open("rb") as source:
+        decrypt_stream(source, cleartext, key)
+    cleartext.seek(0)
+    staging = destination.with_name(destination.name + ".partial-" + secrets.token_hex(4))
+    restored: list[str] = []
+    try:
+        staging.mkdir(parents=True)
+        with zipfile.ZipFile(cleartext, "r") as archive:
+            infos = archive.infolist()
+            if not infos or sum(item.file_size for item in infos) > 32 * 1024 * 1024:
+                raise ValueError("El archivo de configuración está vacío o excede el límite.")
+            for info in infos:
+                name = Path(info.filename)
+                is_symlink = (info.external_attr >> 16) & 0o170000 == 0o120000
+                if (info.is_dir() or is_symlink or "/" in info.filename or "\\" in info.filename
+                        or name.name != info.filename or name.is_absolute()):
+                    raise ValueError("El respaldo contiene una ruta no permitida.")
+                target = staging / name.name
+                with target.open("xb") as output:
+                    output.write(archive.read(info))
+                restored.append(name.name)
+        staging.replace(destination)
+        return sorted(restored)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
+
+
+def _parse_remote_time(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def remote_retention_plan(inventory: list[dict], max_age_days: int,
+                          now: datetime | None = None) -> dict:
+    """Return an exact allowlist of remote objects that may be deleted."""
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=max_age_days)
+    groups: dict[str, dict[str, tuple[str, datetime]]] = {}
+    suffixes = (".complete.json", ".sha256", "")
+    for item in inventory:
+        path = str(item.get("Path") or "")
+        if not path or "/" in path or "\\" in path or path.startswith("."):
+            continue
+        base = None
+        suffix = None
+        for candidate in suffixes:
+            marker = ".j2mbackup" + candidate
+            if path.endswith(marker):
+                base = path[: -len(candidate)] if candidate else path
+                suffix = candidate
+                break
+        if (not base or suffix is None
+                or not re.fullmatch(r"j2m-(?:postgres|configuration)-[A-Za-z0-9._-]+\.j2mbackup", base)):
+            continue
+        try:
+            modified = _parse_remote_time(str(item["ModTime"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        groups.setdefault(base, {})[suffix] = (path, modified)
+    complete = {
+        base: members for base, members in groups.items()
+        if all(suffix in members for suffix in suffixes)
+    }
+    if not complete:
+        return {"protected": None, "delete": []}
+    protected = max(
+        complete,
+        key=lambda base: complete[base][".complete.json"][1],
+    )
+    deletions: list[str] = []
+    for base, members in groups.items():
+        if base == protected:
+            continue
+        if members and all(modified < cutoff for _, modified in members.values()):
+            deletions.extend(path for path, _ in members.values())
+    return {"protected": protected, "delete": sorted(deletions)}
 
 
 @dataclass(frozen=True)
@@ -570,6 +663,7 @@ def main() -> int:
     prune.add_argument("directory", type=Path)
     prune.add_argument("--keep", type=int, default=48)
     prune.add_argument("--lock-file", type=Path)
+    prune.add_argument("--key-file", type=Path, required=True)
     initialize = commands.add_parser("init-key")
     initialize.add_argument("--key-file", type=Path, required=True)
     initialize.add_argument("--recovery-file", type=Path, required=True)
@@ -585,6 +679,13 @@ def main() -> int:
     stage.add_argument("--destination-dir", type=Path, required=True)
     stage.add_argument("--key-file", type=Path, required=True)
     stage.add_argument("--lock-file", type=Path)
+    restore_config = commands.add_parser("restore-configuration")
+    restore_config.add_argument("backup", type=Path)
+    restore_config.add_argument("--destination", type=Path, required=True)
+    restore_config.add_argument("--key-file", type=Path, required=True)
+    retention = commands.add_parser("retention-plan")
+    retention.add_argument("--inventory", type=Path, required=True)
+    retention.add_argument("--max-age-days", type=int, required=True)
     restore = commands.add_parser("restore-isolated")
     restore.add_argument("backup", type=Path)
     restore.add_argument("--key-file", type=Path, required=True)
@@ -612,13 +713,19 @@ def main() -> int:
     elif args.command == "stage-offsite":
         path = stage_offsite(args.source_dir, args.destination_dir, args.key_file, args.lock_file)
         print(f"Copia verificada preparada: {path.name}")
+    elif args.command == "restore-configuration":
+        restored = restore_configuration(args.backup, args.destination, args.key_file)
+        print(f"Configuración recuperada y verificada: {len(restored)} archivos.")
+    elif args.command == "retention-plan":
+        inventory = json.loads(args.inventory.read_text(encoding="utf-8-sig"))
+        print(json.dumps(remote_retention_plan(inventory, max(1, args.max_age_days)), sort_keys=True))
     elif args.command == "restore-isolated":
         report = restore_isolated(args.backup, args.key_file, args.lock_file, args.timeout)
         print(f"Restauración aislada verificada; Alembic={report.alembic_revision}; "
               "tablas=4; recuentos comprobados")
     else:
         print(f"Respaldos eliminados por retención: "
-              f"{retain_local(args.directory, args.keep, args.lock_file)}")
+              f"{retain_local(args.directory, load_dpapi_key(args.key_file), args.keep, args.lock_file)}")
     return 0
 
 
