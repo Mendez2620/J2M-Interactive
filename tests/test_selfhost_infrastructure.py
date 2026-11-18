@@ -397,6 +397,8 @@ class SelfHostInfrastructureTestCase(unittest.TestCase):
             self.assertIn("sslmode=verify-full", value)
             self.assertIn("sslrootcert=system", value)
             self.assertNotIn("SECRET_KEY", value)
+            explicit = _read_database_url(env, sslrootcert="/run/j2m/database-root-ca.crt")
+            self.assertIn("sslrootcert=%2Frun%2Fj2m%2Fdatabase-root-ca.crt", explicit)
             env.write_text("DATABASE_URL=postgresql://u:p@j2m-backup-source/x?sslmode=disable\n", encoding="utf-8")
             with self.assertRaises(ValueError):
                 _read_database_url(env, allow_insecure_synthetic=True)
@@ -409,9 +411,11 @@ class SelfHostInfrastructureTestCase(unittest.TestCase):
             env = root / "app.env"
             env.write_text(
                 "SECRET_KEY=must-not-enter-container\n"
-                "DATABASE_URL=postgresql://u:p@db.example/j2m?sslmode=require\n",
+                "DATABASE_URL=postgresql://u:p@db.example/j2m?sslmode=require\n"
+                f"DATABASE_SSL_ROOT_CERT={root / 'supabase-ca.crt'}\n",
                 encoding="utf-8",
             )
+            (root / "supabase-ca.crt").write_text("synthetic-ca", encoding="ascii")
             captured = {}
             key = bytes(range(32))
             def fake_dump(command, child_env, output, received_key, timeout):
@@ -426,6 +430,8 @@ class SelfHostInfrastructureTestCase(unittest.TestCase):
             self.assertNotIn("--env-file", captured["command"])
             self.assertEqual(captured["command"].count("-e"), 1)
             self.assertIn("verify-full", captured["database_url"])
+            self.assertIn("--mount", captured["command"])
+            self.assertTrue(any("database-root-ca.crt" in item for item in captured["command"]))
             self.assertTrue(verify_backup(backup, key))
             self.assertTrue(_manifest(backup).exists())
 
@@ -456,6 +462,9 @@ class SelfHostInfrastructureTestCase(unittest.TestCase):
         self.assertIn('"--network", "none"', backup_script)
         self.assertIn('"postgres:17-alpine"', backup_script)
         self.assertIn("/etc/ssl/certs/ca-certificates.crt", backup_script)
+        self.assertIn("pg_restore --list", backup_script)
+        self.assertIn("grep -v supabase_vault", backup_script)
+        self.assertIn('"--exclude-schema=vault"', backup_script)
         self.assertIn("backup.failed", runner)
         self.assertIn("cloud.failed", cloud)
         self.assertIn("restore.failed", restore)
