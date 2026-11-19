@@ -1,11 +1,13 @@
 import json
 import hashlib
+import http.server
 import io
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -468,6 +470,103 @@ class SelfHostInfrastructureTestCase(unittest.TestCase):
         self.assertIn("backup.failed", runner)
         self.assertIn("cloud.failed", cloud)
         self.assertIn("restore.failed", restore)
+        monitor = (ROOT / "scripts" / "healthchecks_monitor.py").read_text(encoding="utf-8")
+        self.assertIn("J2M_HEALTHCHECKS_FILE", monitor)
+        self.assertIn('STATES = {"start", "success", "fail"}', monitor)
+        self.assertIn("hc-ping.com", monitor)
+        self.assertIn("timeout=10", monitor)
+        self.assertNotIn("print(", monitor)
+        self.assertIn("scripts.healthchecks_monitor database_hourly start", runner)
+        self.assertIn("scripts.healthchecks_monitor database_hourly success", runner)
+        self.assertIn("scripts.healthchecks_monitor database_hourly fail", runner)
+        self.assertIn("scripts.healthchecks_monitor cloud_four_hour success", cloud)
+        self.assertIn("scripts.healthchecks_monitor restore_weekly success", restore)
+        self.assertLess(
+            cloud.index("Set-Location -LiteralPath $Repository"),
+            cloud.index("scripts.healthchecks_monitor cloud_four_hour start"),
+        )
+
+    @unittest.skipUnless(os.name == "nt", "PowerShell integration only runs on Windows")
+    def test_healthchecks_helper_is_best_effort_and_hides_secret_url(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            secret = root / "healthchecks.json"
+            secret.write_text(
+                '{"database_hourly":"http://127.0.0.1:1/private-token"}',
+                encoding="utf-8",
+            )
+            child_env = os.environ.copy()
+            child_env["J2M_SYNTHETIC_HEALTHCHECK_TEST"] = "1"
+            child_env["J2M_HEALTHCHECKS_FILE"] = str(secret)
+            result = subprocess.run(
+                [sys.executable, "-m", "scripts.healthchecks_monitor", "database_hourly", "fail"],
+                capture_output=True, text=True, timeout=20, cwd=ROOT, env=child_env,
+            )
+            combined = result.stdout + result.stderr
+            self.assertEqual(result.returncode, 0, combined)
+            self.assertEqual(combined, "")
+            self.assertNotIn("private-token", combined)
+
+    @unittest.skipUnless(os.name == "nt", "PowerShell integration only runs on Windows")
+    def test_healthchecks_helper_sends_start_success_and_fail(self):
+        received = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                received.append(self.path)
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, *_args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                secret = Path(temporary) / "healthchecks.json"
+                token_path = "/synthetic-secret-token-value-1234"
+                secret.write_text(json.dumps({
+                    "database_hourly": f"http://127.0.0.1:{server.server_port}{token_path}",
+                }), encoding="utf-8")
+                from scripts.healthchecks_monitor import notify
+                with patch.dict(os.environ, {"J2M_SYNTHETIC_HEALTHCHECK_TEST": "1"}):
+                    for state in ("start", "success", "fail"):
+                        self.assertTrue(notify("database_hourly", state, secret))
+                self.assertEqual(received, [
+                    token_path + "/start", token_path, token_path + "/fail",
+                ])
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+
+    def test_healthchecks_helper_accepts_utf8_bom_and_rejects_unsafe_urls(self):
+        from scripts.healthchecks_monitor import notify
+
+        with tempfile.TemporaryDirectory() as temporary:
+            secret = Path(temporary) / "healthchecks.json"
+            secret.write_text(
+                json.dumps({"database_hourly": "https://hc-ping.com/" + "a" * 32}),
+                encoding="utf-8-sig",
+            )
+            with patch("scripts.healthchecks_monitor.urlopen") as opener:
+                response = opener.return_value.__enter__.return_value
+                response.status = 200
+                self.assertTrue(notify("database_hourly", "success", secret))
+
+            for unsafe in (
+                "http://hc-ping.com/" + "a" * 32,
+                "https://user@hc-ping.com/" + "a" * 32,
+                "https://hc-ping.com/" + "a" * 32 + "?leak=1",
+                "https://hc-ping.com/short",
+                "https://example.com/" + "a" * 32,
+            ):
+                secret.write_text(json.dumps({"database_hourly": unsafe}), encoding="utf-8")
+                with patch("scripts.healthchecks_monitor.urlopen") as opener:
+                    self.assertFalse(notify("database_hourly", "success", secret))
+                    opener.assert_not_called()
 
     @unittest.skipUnless(os.name == "nt", "ACL y Task Scheduler solo se validan en Windows")
     def test_windows_acl_and_scheduler_plan_execute_without_registering_tasks(self):

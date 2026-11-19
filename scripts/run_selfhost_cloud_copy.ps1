@@ -5,6 +5,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+Set-Location -LiteralPath $Repository
 $failure = Join-Path $Repository "selfhost-backups\logs\cloud.failed"
 $verifyDir = $null
 
@@ -36,8 +37,8 @@ function Invoke-ExactRetention([string]$Category, [int]$Days) {
 }
 
 try {
+    python -m scripts.healthchecks_monitor cloud_four_hour start
     if (-not (Get-Command rclone -ErrorAction SilentlyContinue)) { throw "rclone unavailable" }
-    Set-Location -LiteralPath $Repository
     $root = Join-Path $Repository "selfhost-backups"
     $source = Join-Path $root "hourly"
     $outbound = Join-Path $root "outbound\four-hour"
@@ -96,10 +97,12 @@ try {
     Invoke-ExactRetention "configuration" 30
     Remove-Item -LiteralPath $verifyDir -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $failure -Force -ErrorAction SilentlyContinue
+    python -m scripts.healthchecks_monitor cloud_four_hour success
     exit 0
 } catch {
     if ($null -ne $verifyDir) { Remove-Item -LiteralPath $verifyDir -Recurse -Force -ErrorAction SilentlyContinue }
     New-Item -ItemType Directory -Force -Path (Split-Path $failure) | Out-Null
     Set-Content -LiteralPath $failure -Value ((Get-Date).ToUniversalTime().ToString("o") + " cloud_copy_failed") -Encoding ascii
+    python -m scripts.healthchecks_monitor cloud_four_hour fail
     exit 1
 }

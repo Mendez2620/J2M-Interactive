@@ -6,6 +6,7 @@ param(
 $ErrorActionPreference = "Stop"
 Set-Location -LiteralPath $Repository
 $failure = "selfhost-backups\logs\restore.failed"
+python -m scripts.healthchecks_monitor restore_weekly start
 try {
     $latest = Get-ChildItem -LiteralPath "selfhost-backups\hourly" -Filter "*.complete.json" | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
     if ($null -eq $latest) { throw "encrypted backup unavailable" }
@@ -13,9 +14,11 @@ try {
     python -m scripts.selfhost_backup restore-isolated $backup --key-file $KeyFile --lock-file "selfhost-backups\.operations.lock" --timeout 900
     if ($LASTEXITCODE -ne 0) { throw "isolated restore failed" }
     Remove-Item -LiteralPath $failure -Force -ErrorAction SilentlyContinue
+    python -m scripts.healthchecks_monitor restore_weekly success
     exit 0
 } catch {
     New-Item -ItemType Directory -Force -Path (Split-Path $failure) | Out-Null
     Set-Content -LiteralPath $failure -Value ((Get-Date).ToUniversalTime().ToString("o") + " restore_failed") -Encoding ascii
+    python -m scripts.healthchecks_monitor restore_weekly fail
     exit 1
 }
