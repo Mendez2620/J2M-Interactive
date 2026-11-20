@@ -11,6 +11,7 @@ La migración operativa desde Railway al host Windows quedó completada el 2026-
 - Railway web se conserva intacto mientras termina el periodo de prueba. El servicio del worker se conserva como configuración, pero no tiene un despliegue activo; no volver a iniciarlo mientras el worker local esté operativo.
 - Las tareas de respaldo horario, copia cifrada a Google Drive cada cuatro horas y restauración aislada semanal están habilitadas y sus ejecuciones reales verificadas terminaron con código `0`. Healthchecks.io observa las tareas, pero no decide su resultado.
 - Docker Desktop está configurado para iniciar con la sesión. La recuperación de contenedores está preparada, pero todavía falta validar un reinicio físico completo del host.
+- La imagen que mantiene el stack local en ejecución está fijada como `j2m-interactive:e18f073bf479458fb03065810d1421d5cffe8373`. El pin se conserva en `.env.selfhost`; no depende de una variable temporal de PowerShell. Un despliegue posterior debe reemplazarlo únicamente por el SHA exacto de `origin/main` que se construya y apruebe.
 
 ## Estado y bloqueos del host
 
@@ -128,7 +129,7 @@ Las regresiones existentes de configuración comprueban además que producción 
 5. Ensayar Docker con la base temporal. No utilizar la URL Supabase en el ensayo.
 6. Crear un respaldo consistente y restaurable de PostgreSQL con las herramientas de Supabase/`pg_dump` en una ubicación cifrada externa. Probar la restauración en otra base aislada.
 7. Durante la ventana autorizada, detener cualquier worker que pueda escribir en paralelo, ejecutar el migrador una sola vez solo si Alembic lo requiere y validar `/api/ready` además de la revisión Alembic. Esta fase no ejecuta ese paso.
-8. Iniciar la versión exacta aprobada de `origin/main` con `selfhost_deploy_approved.ps1`; el script rechaza un SHA de PR o un árbol sucio y no ejecuta migraciones.
+8. Iniciar la versión exacta aprobada de `origin/main` con `selfhost_deploy_approved.ps1`; el script rechaza un SHA de PR o un árbol sucio, construye `j2m-interactive:<SHA>`, fija atómicamente esa etiqueta en `.env.selfhost` preservando su ACL y no ejecuta migraciones. Compose rechaza un entorno sin `J2M_IMAGE`, por lo que nunca vuelve silenciosamente a una etiqueta genérica.
 9. Mantener Railway activo hasta validar HTTPS, cookies, CSRF, sesiones, registro, escáner y outboxes. El rollback consiste en retirar el hostname del túnel y volver a dirigir tráfico a Railway; no hacer downgrade ni eliminar tablas.
 
 ## Operación y seguridad
@@ -138,6 +139,23 @@ Las regresiones existentes de configuración comprueban además que producción 
 - Los logs rotan en Docker (`10 MB`, cinco archivos). No registrar cuerpos, cookies, tokens ni credenciales.
 - GitHub Actions continúa validando PostgreSQL 16 y la imagen Linux. Solo se construye localmente un SHA exacto que sea el `origin/main` aprobado; nunca ejecutar imágenes provenientes de PRs no confiables.
 - Para rollback, conservar al menos la imagen del SHA anterior aprobado y no aplicar downgrades destructivos. Restaurar base únicamente desde un respaldo probado y con autorización.
+
+### Reconstrucción sin variables temporales
+
+La recuperación normal después de un apagón solo requiere iniciar sesión, esperar a Docker Desktop y dejar que `restart: unless-stopped` recupere web, worker y HTTPS. Si web o worker fueron eliminados pero la imagen sigue presente, ejecutar desde el repositorio aprobado:
+
+```powershell
+powershell -File scripts/invoke_selfhost_compose.ps1 -EnvFile .env.selfhost config --quiet
+powershell -File scripts/invoke_selfhost_compose.ps1 -EnvFile .env.selfhost up -d --no-build web google-wallet-worker
+```
+
+No establecer `$env:J2M_IMAGE` ni `$env:J2M_ENV_FILE`: el wrapper reemplaza valores heredados durante el subproceso, usa siempre el proyecto `j2m-cutover-ready` y restaura el entorno del operador al terminar. También bloquea el arranque si detecta un Google Wallet worker Compose activo bajo otro proyecto. `selfhost_preflight.ps1` exige el formato `j2m-interactive:<SHA completo>` y comprueba que la imagen exista localmente. Si la imagen se perdió, reconstruir primero ese SHA desde un checkout limpio y aprobado; después ejecutar `set_selfhost_image_pin.ps1 -ApprovedSha <SHA>` y finalmente el wrapper. No ejecutar el migrador durante una recuperación ordinaria.
+
+`selfhost_deploy_approved.ps1` requiere que el pin anterior sea único y que su imagen todavía exista. Rechaza un SHA solicitado igual al pin activo para no reconstruir y sobrescribir la única imagen que serviría para rollback. Construye una versión distinta antes de cambiar el pin; la actualización del pin está dentro del bloque recuperable. Después espera los healthchecks de Compose durante un máximo de 120 segundos y exige respuestas 200 de `https://localhost:8443/api/health` y `/api/ready`, con validación normal del certificado. Si el pin, Compose o HTTPS fallan, restaura el pin anterior, vuelve a aplicar web y worker con la imagen previa bajo el mismo proyecto y comprueba nuevamente HTTPS; nunca crea deliberadamente un segundo worker. El archivo temporal del pin recibe su ACL restrictiva cuando todavía está vacío y solo después se escriben las variables privadas.
+
+El proxy HTTPS se reconstruye con la imagen fijada por digest que documenta `LOCAL-RUNBOOK.txt`, la red `j2m-cutover-ready_j2m-private`, el usuario no-root `nginx`, `restart=unless-stopped`, `read_only`, `cap_drop=ALL`, `no-new-privileges`, el `nginx.conf` persistente y el volumen TLS de solo lectura. El volumen debe contener exclusivamente `server.crt` y `server.key`, propiedad de UID/GID 101; nunca montar `ca.key` dentro del contenedor. Antes de recrearlo, validar `nginx -t` en un contenedor efímero sin publicar puertos.
+
+El ensayo de recuperación del 2026-11-20 creó web y worker como contenedores detenidos bajo un proyecto Compose temporal y los eliminó sin arrancarlos ni conectarlos a Supabase. También validó `nginx -t` con la imagen, usuario, red, configuración y volumen TLS reales. El ensayo confirmó que los tres contenedores pueden reconstruirse sin detener el stack activo; además detectó y corrigió la dependencia anterior de una variable temporal `J2M_IMAGE`.
 
 ### Respaldo cifrado y recuperación
 

@@ -122,8 +122,248 @@ class SelfHostInfrastructureTestCase(unittest.TestCase):
         deploy = (ROOT / "scripts" / "selfhost_deploy_approved.ps1").read_text(encoding="utf-8")
         self.assertIn("$ApprovedSha -ne $mainSha", deploy)
         self.assertIn("$headSha -ne $ApprovedSha", deploy)
+        self.assertIn("set_selfhost_image_pin.ps1", deploy)
+        self.assertNotIn("$env:J2M_IMAGE", deploy)
+        self.assertIn("$previousSha", deploy)
+        self.assertIn("la imagen y el pin anteriores fueron restaurados", deploy)
+        self.assertIn("invoke_selfhost_compose.ps1", deploy)
+        self.assertIn("--wait-timeout 120", deploy)
+        self.assertIn("$ApprovedSha -eq $previousSha", deploy)
+        self.assertIn("Test-J2MLocalHttps", deploy)
+        self.assertIn('"/api/health", "/api/ready"', deploy)
+        self.assertLess(deploy.index("try {", deploy.index('$services = @')), deploy.index("set_selfhost_image_pin.ps1", deploy.index('$services = @')))
         self.assertNotIn("db upgrade", deploy)
         self.assertNotIn("config apply", deploy)
+
+    def test_selfhost_image_pin_is_persistent_exact_and_fail_closed(self):
+        compose = (ROOT / "compose.selfhost.yml").read_text(encoding="utf-8")
+        template = (ROOT / ".env.selfhost.example").read_text(encoding="utf-8")
+        preflight = (ROOT / "scripts" / "selfhost_preflight.ps1").read_text(encoding="utf-8")
+        pin = (ROOT / "scripts" / "set_selfhost_image_pin.ps1").read_text(encoding="utf-8")
+        self.assertIn("${J2M_IMAGE:?", compose)
+        self.assertNotIn("J2M_IMAGE:-", compose)
+        self.assertIn("J2M_IMAGE=REQUIRED_APPROVED_IMAGE_TAG", template)
+        self.assertIn('^j2m-interactive:[0-9a-f]{40}$', preflight)
+        self.assertIn('Write-Check "image-pin-local"', preflight)
+        self.assertIn("git merge-base --is-ancestor", pin)
+        self.assertIn("docker image inspect", pin)
+        self.assertIn("protect_selfhost_secrets.ps1", pin)
+        self.assertIn("$pins.Count -ne 1", pin)
+        self.assertLess(pin.index("protect_selfhost_secrets.ps1"), pin.index("WriteAllLines"))
+
+        wrapper = (ROOT / "scripts" / "invoke_selfhost_compose.ps1").read_text(encoding="utf-8")
+        self.assertIn('$projectName = "j2m-cutover-ready"', wrapper)
+        self.assertIn('SetEnvironmentVariable("J2M_IMAGE", $pairs["J2M_IMAGE"]', wrapper)
+        self.assertIn('SetEnvironmentVariable("J2M_ENV_FILE", $envPath.Path', wrapper)
+        self.assertIn("$previousImage", wrapper)
+        self.assertIn("$previousEnvFile", wrapper)
+        self.assertIn("google-wallet-worker", wrapper)
+        self.assertIn("fuera del proyecto autorizado", wrapper)
+        self.assertIn("{{json .Config.Labels}}", wrapper)
+        self.assertIn("'com.docker.compose.project'", wrapper)
+
+    @unittest.skipUnless(os.name == "nt", "PowerShell ACL integration only runs on Windows")
+    def test_selfhost_image_pin_replaces_duplicates_and_preserves_acl(self):
+        approved = "1" * 40
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            env_file = root / ".env.selfhost"
+            env_file.write_text(
+                "SECRET_KEY=opaque-test-value\n"
+                "J2M_IMAGE=j2m-interactive:" + ("0" * 40) + "\n"
+                "J2M_IMAGE=j2m-interactive:duplicate\n",
+                encoding="utf-8",
+            )
+            protect = ROOT / "scripts" / "protect_selfhost_secrets.ps1"
+            pin = ROOT / "scripts" / "set_selfhost_image_pin.ps1"
+            command = (
+                "function global:git { $global:LASTEXITCODE = 0 }; "
+                "function global:docker { $global:LASTEXITCODE = 0 }; "
+                f"& '{protect}' -Path '{env_file}'; "
+                f"& '{pin}' -ApprovedSha {approved} -EnvFile '{env_file}'; "
+                f"$info = Get-Item -LiteralPath '{env_file}'; "
+                "$aclType = [Type]::GetType('System.IO.FileSystemAclExtensions, System.IO.FileSystem.AccessControl', $false); "
+                f"$acl = if ($null -ne $aclType) {{ $aclType::GetAccessControl($info) }} else {{ [System.IO.File]::GetAccessControl('{env_file}') }}; "
+                "if (-not $acl.AreAccessRulesProtected) { exit 9 }"
+            )
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                cwd=ROOT,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            contents = env_file.read_text(encoding="utf-8")
+            self.assertIn("SECRET_KEY=opaque-test-value", contents)
+            self.assertEqual(contents.count("J2M_IMAGE="), 1)
+            self.assertIn(f"J2M_IMAGE=j2m-interactive:{approved}", contents)
+
+    @unittest.skipUnless(os.name == "nt", "PowerShell compose integration only runs on Windows")
+    def test_compose_wrapper_ignores_inherited_image_and_env_file(self):
+        approved = "2" * 40
+        with tempfile.TemporaryDirectory() as temporary:
+            env_file = Path(temporary) / ".env.selfhost"
+            env_file.write_text(f"J2M_IMAGE=j2m-interactive:{approved}\n", encoding="utf-8")
+            wrapper = ROOT / "scripts" / "invoke_selfhost_compose.ps1"
+            command = (
+                "$env:J2M_IMAGE='j2m-interactive:inherited'; $env:J2M_ENV_FILE='inherited.env'; "
+                "function global:docker { "
+                "if ($args[0] -eq 'ps') { $global:LASTEXITCODE=0; return }; "
+                "Write-Output ('CALL=' + ($args -join ' ')); "
+                "Write-Output ('CONTROLLED_IMAGE=' + $env:J2M_IMAGE); "
+                "Write-Output ('CONTROLLED_ENV=' + $env:J2M_ENV_FILE); $global:LASTEXITCODE=0 }; "
+                f"& '{wrapper}' -EnvFile '{env_file}' config --quiet; "
+                "Write-Output ('RESTORED_IMAGE=' + $env:J2M_IMAGE); "
+                "Write-Output ('RESTORED_ENV=' + $env:J2M_ENV_FILE)"
+            )
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+                capture_output=True, text=True, timeout=30, cwd=ROOT,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(f"CONTROLLED_IMAGE=j2m-interactive:{approved}", result.stdout)
+            self.assertIn(f"CONTROLLED_ENV={env_file}", result.stdout)
+            self.assertIn("--project-name j2m-cutover-ready", result.stdout)
+            self.assertIn("RESTORED_IMAGE=j2m-interactive:inherited", result.stdout)
+            self.assertIn("RESTORED_ENV=inherited.env", result.stdout)
+
+    @unittest.skipUnless(os.name == "nt", "PowerShell compose integration only runs on Windows")
+    def test_compose_wrapper_rejects_foreign_worker(self):
+        approved = "3" * 40
+        with tempfile.TemporaryDirectory() as temporary:
+            env_file = Path(temporary) / ".env.selfhost"
+            env_file.write_text(f"J2M_IMAGE=j2m-interactive:{approved}\n", encoding="utf-8")
+            wrapper = ROOT / "scripts" / "invoke_selfhost_compose.ps1"
+            command = (
+                "function global:docker { "
+                "if ($args[0] -eq 'ps') { Write-Output 'foreign-worker'; $global:LASTEXITCODE=0; return }; "
+                "if ($args[0] -eq 'inspect') { Write-Output '{\"com.docker.compose.project\":\"other-project\"}'; $global:LASTEXITCODE=0; return }; "
+                "throw 'compose must not run' }; "
+                f"& '{wrapper}' -EnvFile '{env_file}' up -d google-wallet-worker"
+            )
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+                capture_output=True, text=True, timeout=30, cwd=ROOT,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("fuera del proyecto autorizado", result.stdout + result.stderr)
+            self.assertNotIn("compose must not run", result.stdout + result.stderr)
+
+    @unittest.skipUnless(os.name == "nt", "PowerShell deploy integration only runs on Windows")
+    def test_failed_deploy_restores_previous_pin_and_image(self):
+        previous = "5" * 40
+        requested = "4" * 40
+        with tempfile.TemporaryDirectory() as temporary:
+            env_file = Path(temporary) / ".env.selfhost"
+            env_file.write_text(f"J2M_IMAGE=j2m-interactive:{previous}\n", encoding="utf-8")
+            protect = ROOT / "scripts" / "protect_selfhost_secrets.ps1"
+            deploy = ROOT / "scripts" / "selfhost_deploy_approved.ps1"
+            command = (
+                f"& '{protect}' -Path '{env_file}'; "
+                f"$newSha='{requested}'; $global:upCalls=0; $global:httpsCalls=0; "
+                "function global:git { "
+                "if ($args[0] -eq 'rev-parse') { Write-Output $newSha }; $global:LASTEXITCODE=0 }; "
+                "function global:docker { $joined=$args -join ' '; "
+                "if ($args[0] -eq 'ps') { $global:LASTEXITCODE=0; return }; "
+                "if ($args[0] -eq 'compose' -and $joined -match ' up ') { "
+                "$global:upCalls++; if ($env:J2M_IMAGE -eq ('j2m-interactive:' + $newSha)) { $global:LASTEXITCODE=1 } "
+                "else { $global:LASTEXITCODE=0 }; return }; $global:LASTEXITCODE=0 }; "
+                "function global:Invoke-WebRequest { $global:httpsCalls++; [pscustomobject]@{StatusCode=200} }; "
+                f"try {{ & '{deploy}' -ApprovedSha $newSha -EnvFile '{env_file}' }} "
+                "catch { Write-Output ('DEPLOY_ERROR=' + $_.Exception.Message); "
+                "Write-Output ('UP_CALLS=' + $global:upCalls); Write-Output ('HTTPS_CALLS=' + $global:httpsCalls); exit 7 }"
+            )
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+                capture_output=True, text=True, timeout=30, cwd=ROOT,
+            )
+            self.assertEqual(result.returncode, 7, result.stdout + result.stderr)
+            self.assertIn("la imagen y el pin anteriores fueron restaurados", result.stdout)
+            self.assertIn("UP_CALLS=2", result.stdout)
+            self.assertIn("HTTPS_CALLS=2", result.stdout)
+            contents = env_file.read_text(encoding="utf-8")
+            self.assertEqual(contents.count("J2M_IMAGE="), 1)
+            self.assertIn(f"J2M_IMAGE=j2m-interactive:{previous}", contents)
+
+    @unittest.skipUnless(os.name == "nt", "PowerShell deploy integration only runs on Windows")
+    def test_deploy_rejects_sha_equal_to_rollback_image_before_build(self):
+        approved = "6" * 40
+        with tempfile.TemporaryDirectory() as temporary:
+            env_file = Path(temporary) / ".env.selfhost"
+            env_file.write_text(f"J2M_IMAGE=j2m-interactive:{approved}\n", encoding="utf-8")
+            protect = ROOT / "scripts" / "protect_selfhost_secrets.ps1"
+            deploy = ROOT / "scripts" / "selfhost_deploy_approved.ps1"
+            command = (
+                f"& '{protect}' -Path '{env_file}'; $sha='{approved}'; $global:buildCalls=0; "
+                "function global:git { if ($args[0] -eq 'rev-parse') { Write-Output $sha }; $global:LASTEXITCODE=0 }; "
+                "function global:docker { if ($args[0] -eq 'build') { $global:buildCalls++ }; $global:LASTEXITCODE=0 }; "
+                f"try {{ & '{deploy}' -ApprovedSha $sha -EnvFile '{env_file}' }} catch {{ "
+                "Write-Output ('DEPLOY_ERROR=' + $_.Exception.Message); Write-Output ('BUILD_CALLS=' + $global:buildCalls); exit 6 }"
+            )
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+                capture_output=True, text=True, timeout=30, cwd=ROOT,
+            )
+            self.assertEqual(result.returncode, 6, result.stdout + result.stderr)
+            self.assertIn("se rechaza reconstruir", result.stdout)
+            self.assertIn("BUILD_CALLS=0", result.stdout)
+            self.assertIn(f"J2M_IMAGE=j2m-interactive:{approved}", env_file.read_text(encoding="utf-8"))
+
+    @unittest.skipUnless(os.name == "nt", "PowerShell deploy integration only runs on Windows")
+    def test_local_https_failure_triggers_verified_rollback(self):
+        previous = "7" * 40
+        requested = "8" * 40
+        with tempfile.TemporaryDirectory() as temporary:
+            env_file = Path(temporary) / ".env.selfhost"
+            env_file.write_text(f"J2M_IMAGE=j2m-interactive:{previous}\n", encoding="utf-8")
+            protect = ROOT / "scripts" / "protect_selfhost_secrets.ps1"
+            deploy = ROOT / "scripts" / "selfhost_deploy_approved.ps1"
+            command = (
+                f"& '{protect}' -Path '{env_file}'; $newSha='{requested}'; "
+                "$global:upCalls=0; $global:httpsCalls=0; "
+                "function global:git { if ($args[0] -eq 'rev-parse') { Write-Output $newSha }; $global:LASTEXITCODE=0 }; "
+                "function global:docker { $joined=$args -join ' '; if ($args[0] -eq 'ps') { $global:LASTEXITCODE=0; return }; "
+                "if ($args[0] -eq 'compose' -and $joined -match ' up ') { $global:upCalls++ }; $global:LASTEXITCODE=0 }; "
+                "function global:Invoke-WebRequest { $global:httpsCalls++; if ($global:httpsCalls -eq 1) { throw 'synthetic HTTPS failure' }; "
+                "[pscustomobject]@{StatusCode=200} }; "
+                f"try {{ & '{deploy}' -ApprovedSha $newSha -EnvFile '{env_file}' }} catch {{ "
+                "Write-Output ('DEPLOY_ERROR=' + $_.Exception.Message); Write-Output ('UP_CALLS=' + $global:upCalls); "
+                "Write-Output ('HTTPS_CALLS=' + $global:httpsCalls); exit 7 }"
+            )
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+                capture_output=True, text=True, timeout=30, cwd=ROOT,
+            )
+            self.assertEqual(result.returncode, 7, result.stdout + result.stderr)
+            self.assertIn("la imagen y el pin anteriores fueron restaurados", result.stdout)
+            self.assertIn("UP_CALLS=2", result.stdout)
+            self.assertIn("HTTPS_CALLS=3", result.stdout)
+            self.assertIn(f"J2M_IMAGE=j2m-interactive:{previous}", env_file.read_text(encoding="utf-8"))
+
+    @unittest.skipUnless(os.name == "nt", "PowerShell deploy integration only runs on Windows")
+    def test_successful_deploy_requires_both_local_https_checks(self):
+        previous = "9" * 40
+        requested = "a" * 40
+        with tempfile.TemporaryDirectory() as temporary:
+            env_file = Path(temporary) / ".env.selfhost"
+            env_file.write_text(f"J2M_IMAGE=j2m-interactive:{previous}\n", encoding="utf-8")
+            protect = ROOT / "scripts" / "protect_selfhost_secrets.ps1"
+            deploy = ROOT / "scripts" / "selfhost_deploy_approved.ps1"
+            command = (
+                f"& '{protect}' -Path '{env_file}'; $newSha='{requested}'; $global:httpsCalls=0; "
+                "function global:git { if ($args[0] -eq 'rev-parse') { Write-Output $newSha }; $global:LASTEXITCODE=0 }; "
+                "function global:docker { if ($args[0] -eq 'ps') { $global:LASTEXITCODE=0; return }; $global:LASTEXITCODE=0 }; "
+                "function global:Invoke-WebRequest { $global:httpsCalls++; [pscustomobject]@{StatusCode=200} }; "
+                f"& '{deploy}' -ApprovedSha $newSha -EnvFile '{env_file}'; Write-Output ('HTTPS_CALLS=' + $global:httpsCalls)"
+            )
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+                capture_output=True, text=True, timeout=30, cwd=ROOT,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("HTTPS_CALLS=2", result.stdout)
+            self.assertIn(f"J2M_IMAGE=j2m-interactive:{requested}", env_file.read_text(encoding="utf-8"))
 
     def test_ci_validates_compose_without_private_values(self):
         workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
