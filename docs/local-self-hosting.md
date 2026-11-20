@@ -1,6 +1,16 @@
 # J2M Interactive en infraestructura local
 
-Esta fase prepara la salida de Railway sin eliminar ni modificar sus servicios. La aplicación permanece conectada inicialmente al PostgreSQL alojado en Supabase, pero **ningún ensayo local debe apuntar a esa base** hasta que exista una ventana de cambio autorizada.
+La migración operativa desde Railway al host Windows quedó completada el 2026-11-19, sin eliminar los recursos remotos. Web y el worker local usan el PostgreSQL alojado en Supabase; el worker remoto fue retirado de ejecución para evitar procesamiento paralelo. El acceso público permanece pendiente de un dominio, pero la aplicación está disponible exclusivamente desde la laptop mediante HTTPS local. Los ensayos y las pruebas automatizadas continúan usando bases aisladas y nunca deben apuntar a producción.
+
+## Estado operativo verificado
+
+- Web, Google Wallet worker y proxy HTTPS local están saludables bajo Docker Desktop. Web y worker conservan `restart: unless-stopped`; el migrador no arranca automáticamente.
+- El acceso local es `https://localhost:8443/staff-access`. El puerto HTTPS y el puerto directo de web están ligados únicamente a `127.0.0.1`, no a la LAN.
+- El certificado individual de `localhost` está en `CurrentUser\TrustedPeople` y encadena a `J2M-Local-CA` en `CurrentUser\Root`. La clave privada de la CA permanece fuera del repositorio y de Docker, bajo `%LOCALAPPDATA%\J2M\local-https`, con herencia deshabilitada y acceso limitado al propietario, Administradores y SYSTEM. El volumen TLS del proxy contiene solamente el certificado y la clave individual del servidor. No modificar este material sin una rotación autorizada.
+- `APPLE_WALLET_MODE=disabled` y `GOOGLE_WALLET_MODE=disabled`. La operación local no emite ni sincroniza pases.
+- Railway web se conserva intacto mientras termina el periodo de prueba. El servicio del worker se conserva como configuración, pero no tiene un despliegue activo; no volver a iniciarlo mientras el worker local esté operativo.
+- Las tareas de respaldo horario, copia cifrada a Google Drive cada cuatro horas y restauración aislada semanal están habilitadas y sus ejecuciones reales verificadas terminaron con código `0`. Healthchecks.io observa las tareas, pero no decide su resultado.
+- Docker Desktop está configurado para iniciar con la sesión. La recuperación de contenedores está preparada, pero todavía falta validar un reinicio físico completo del host.
 
 ## Estado y bloqueos del host
 
@@ -176,13 +186,15 @@ Los tres runners pueden notificar a Healthchecks.io sin convertir el servicio de
 
 El plan Hobbyist es suficiente para estas tres comprobaciones. Configuración recomendada: una hora más 20 minutos de gracia para el respaldo local, cuatro horas más 45 minutos para la copia externa y siete días más cuatro horas para la restauración. Las URL de ping son secretos: no deben aparecer en argumentos de tareas, logs, capturas ni documentación.
 
-La integración operativa se validó con un cuarto check sintético independiente: se recibió el aviso de caída y el de recuperación sin interrumpir ninguna tarea real. Los identificadores comprometidos durante la configuración se revocaron y el archivo activo quedó protegido por ACL. Las tareas reales se ejecutaron secuencialmente con resultado `0`; no deben lanzarse simultáneamente porque comparten el bloqueo de operaciones y una copia externa concurrente con el respaldo horario fallará de forma segura para proteger el conjunto.
+La integración operativa se validó con un cuarto check sintético independiente: se recibió el aviso de caída y el de recuperación sin interrumpir ninguna tarea real. Los identificadores comprometidos durante la configuración se revocaron y el archivo activo quedó protegido por ACL. Las tareas reales se ejecutaron secuencialmente con resultado `0`.
+
+Los tres runners adquieren el mismo mutex nombrado antes de iniciar cualquier trabajo y lo mantienen hasta terminar. Si una tarea coincide con otra, espera de forma acotada en vez de acceder simultáneamente a respaldos, retención o restauración. El bloqueo se libera también ante excepciones y puede recuperarse si el proceso propietario terminó abruptamente. `MultipleInstances IgnoreNew` sigue evitando duplicados de la misma tarea, mientras el mutex coordina tareas diferentes. El envío a Healthchecks se ejecuta mediante un wrapper de mejor esfuerzo que descarta su salida, captura fallos de proceso o red y restaura el código de salida anterior; una indisponibilidad del monitor no convierte un respaldo correcto en fallo ni un respaldo fallido en éxito.
 
 Los resultados se registran sin URLs, contraseñas ni salida de `pg_dump`. El contenedor de `pg_dump` recibe solamente `DATABASE_URL` como secreto. Para Supabase, `DATABASE_SSL_ROOT_CERT` apunta en el host al certificado público descargado desde Database Settings; el script valida que sea un archivo regular, lo monta de solo lectura y configura dentro del contenedor `sslmode=verify-full` con esa CA. También comprueba que el almacén CA del contenedor exista antes de conectar. Así valida TLS, cadena de certificado y hostname sin relajar seguridad ni copiar la CA al repositorio o a la imagen. Un fallo devuelve código distinto de cero para el historial del Programador de tareas; el monitoreo debe alertar si falta una ejecución horaria o una copia externa de cuatro horas.
 
 No se usa S4U. Microsoft documenta que S4U no almacena contraseña, pero tampoco ofrece acceso a red ni archivos cifrados. Docker Desktop, DPAPI CurrentUser y `rclone` requieren el token de la sesión del propietario, así que las tareas se preparan con `InteractiveToken`: no guardan la contraseña de Windows, son independientes de Codex y solo ejecutan mientras el propietario tenga una sesión iniciada. No se considera probado el arranque sin login. Para operación totalmente desatendida haría falta migrar Docker a un servicio compatible y rediseñar la custodia de claves; queda fuera de este corte urgente.
 
-El 17 de noviembre de 2026 se comprobó desde la imagen aprobada, sin arrancar J2M, una conexión TLS de solo lectura a Supabase: `SELECT 1` respondió y `alembic_version` fue `9d0e1f2a3b4c`. No se ejecutó migración ni escritura. Un respaldo real y su restauración continúan bloqueados hasta autorizar la clave portable y el proveedor; las pruebas automatizadas y Docker utilizan exclusivamente datos sintéticos.
+El 17 de noviembre de 2026 se comprobó desde la imagen aprobada una conexión TLS de solo lectura a Supabase: `SELECT 1` respondió y `alembic_version` fue `9d0e1f2a3b4c`. Posteriormente se generó el primer respaldo real cifrado, se restauró en PostgreSQL 17 aislado y se verificó nuevamente tras descargarlo desde Google Drive. La clave portable y su recuperación quedaron verificadas sin exponer material secreto. Las tareas automáticas usan la misma cadena autenticada y los ensayos de código siguen utilizando exclusivamente datos sintéticos.
 
 ## Dominios, subdominios y prefijos
 
@@ -190,14 +202,14 @@ La aplicación ya genera URLs con `url_for` en la mayoría de los flujos y permi
 
 La configuración preparada para el dominio aún no adquirido es: `PUBLIC_BASE_URL=https://lealtad.j2minteractive.com`, `CORS_ORIGINS` y `WEBAUTHN_ORIGIN` con ese mismo origen, `WEBAUTHN_RP_ID=lealtad.j2minteractive.com`, cookies seguras y `TRUSTED_PROXY_COUNT=1`. No debe copiarse al entorno activo, crear un túnel ni registrarse como origen Wallet/WebAuthn hasta que el propietario controle el dominio y el HTTPS público sea estable.
 
-Si Railway suspende los servicios antes del corte, Supabase conserva los datos pero web, registro, escáner y worker dejan de estar disponibles. Railway no puede considerarse rollback mientras el servicio esté suspendido. El corte mínimo entonces exige dominio controlado, túnel estable, respaldo real restaurado en ensayo, host protegido y una ventana sin workers en paralelo. Ambos Wallet permanecen `disabled` localmente; no se promete emisión ni sincronización hasta una autorización posterior.
+Si Railway suspende sus servicios, la operación local y Supabase continúan funcionando, pero el acceso público de Railway deja de estar disponible. Railway no puede considerarse rollback mientras esté suspendido. El worker local es el único procesador activo y ambos Wallet permanecen `disabled`; no se promete emisión ni sincronización hasta una autorización posterior. El futuro acceso público requiere dominio controlado, HTTPS estable y una validación específica antes de cambiar tráfico.
 
 ## Límites pendientes
 
 - C: no usa BitLocker. La suspensión en corriente quedó deshabilitada; falta probar recuperación automática tras un reinicio real.
-- No hay disco externo. La alternativa preparada es una copia cifrada en almacenamiento personal, pero faltan proveedor y custodia de la contraseña; no se realizó ninguna transferencia.
+- No hay disco externo. Google Drive personal conserva copias cifradas y verificadas con una clave recuperable de forma portable, pero sigue siendo recomendable una copia física independiente.
 - Falta adquirir/controlar el dominio y crear el túnel; no existe token Cloudflare respaldado todavía.
-- La conectividad TLS de solo lectura desde Docker hacia Supabase sí fue comprobada. Falta crear el primer respaldo real cifrado y restaurarlo aisladamente después de autorizar la custodia; no se probaron escrituras ni migraciones remotas.
+- La conectividad TLS, el respaldo real cifrado, la descarga externa y la restauración aislada fueron comprobados. No se ejecutaron migraciones remotas durante esas verificaciones.
 - Un único equipo y una única conexión eléctrica/ISP no proporcionan alta disponibilidad. Se recomienda UPS, respaldo externo, monitoreo desde otra red y un segundo host antes de retirar Railway.
 
 ## Referencias operativas
