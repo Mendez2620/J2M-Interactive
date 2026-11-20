@@ -23,7 +23,8 @@ if (-not (Get-Command rclone -ErrorAction SilentlyContinue)) { throw "rclone no 
 $null = & docker info 2>$null
 if ($LASTEXITCODE -ne 0) { throw "Docker Desktop no está accesible en la sesión interactiva actual." }
 $principal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
-$settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 2)
+$settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable `
+    -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 2)
 $hourly = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5) -RepetitionInterval (New-TimeSpan -Hours 1)
 $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $hourlyArgs
 Register-ScheduledTask -TaskName "$taskPrefix Database Hourly" -Action $action -Trigger $hourly -Principal $principal -Settings $settings -Force | Out-Null

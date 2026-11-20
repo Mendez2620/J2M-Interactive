@@ -5,8 +5,12 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+Set-Location -LiteralPath $Repository
+. "$PSScriptRoot\selfhost_task_runtime.ps1"
 $failure = Join-Path $Repository "selfhost-backups\logs\cloud.failed"
 $verifyDir = $null
+$taskGuard = $null
+$exitCode = 1
 
 function Invoke-ExactRetention([string]$Category, [int]$Days) {
     $inventoryPath = Join-Path $verifyDir ($Category + "-inventory.json")
@@ -36,8 +40,9 @@ function Invoke-ExactRetention([string]$Category, [int]$Days) {
 }
 
 try {
+    $taskGuard = Enter-J2MSelfHostTaskGuard
+    Send-J2MHealthcheck cloud_four_hour start
     if (-not (Get-Command rclone -ErrorAction SilentlyContinue)) { throw "rclone unavailable" }
-    Set-Location -LiteralPath $Repository
     $root = Join-Path $Repository "selfhost-backups"
     $source = Join-Path $root "hourly"
     $outbound = Join-Path $root "outbound\four-hour"
@@ -96,10 +101,15 @@ try {
     Invoke-ExactRetention "configuration" 30
     Remove-Item -LiteralPath $verifyDir -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $failure -Force -ErrorAction SilentlyContinue
-    exit 0
+    Send-J2MHealthcheck cloud_four_hour success
+    $exitCode = 0
 } catch {
     if ($null -ne $verifyDir) { Remove-Item -LiteralPath $verifyDir -Recurse -Force -ErrorAction SilentlyContinue }
     New-Item -ItemType Directory -Force -Path (Split-Path $failure) | Out-Null
     Set-Content -LiteralPath $failure -Value ((Get-Date).ToUniversalTime().ToString("o") + " cloud_copy_failed") -Encoding ascii
-    exit 1
+    Send-J2MHealthcheck cloud_four_hour fail
+    $exitCode = 1
+} finally {
+    Exit-J2MSelfHostTaskGuard $taskGuard
 }
+exit $exitCode

@@ -1,13 +1,16 @@
 import json
 import hashlib
+import http.server
 import io
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -441,6 +444,8 @@ class SelfHostInfrastructureTestCase(unittest.TestCase):
         self.assertIn("if (-not $Enable)", installer)
         self.assertIn("CloudRemote es obligatorio", installer)
         self.assertIn("MultipleInstances IgnoreNew", installer)
+        self.assertIn("-AllowStartIfOnBatteries", installer)
+        self.assertIn("-DontStopIfGoingOnBatteries", installer)
         self.assertIn("-LogonType Interactive", installer)
         self.assertNotIn("-LogonType S4U", installer)
         self.assertIn("database --env-file", runner)
@@ -468,6 +473,163 @@ class SelfHostInfrastructureTestCase(unittest.TestCase):
         self.assertIn("backup.failed", runner)
         self.assertIn("cloud.failed", cloud)
         self.assertIn("restore.failed", restore)
+        monitor = (ROOT / "scripts" / "healthchecks_monitor.py").read_text(encoding="utf-8")
+        self.assertIn("J2M_HEALTHCHECKS_FILE", monitor)
+        self.assertIn('STATES = {"start", "success", "fail"}', monitor)
+        self.assertIn("hc-ping.com", monitor)
+        self.assertIn("timeout=10", monitor)
+        self.assertNotIn("print(", monitor)
+        runtime = (ROOT / "scripts" / "selfhost_task_runtime.ps1").read_text(encoding="utf-8")
+        self.assertIn("Send-J2MHealthcheck", runtime)
+        self.assertIn("Enter-J2MSelfHostTaskGuard", runtime)
+        self.assertIn("Local\\J2M-SelfHost-Backup-Operations", runtime)
+        self.assertIn("$global:LASTEXITCODE = $previousExitCode", runtime)
+        self.assertIn("Send-J2MHealthcheck database_hourly start", runner)
+        self.assertIn("Send-J2MHealthcheck database_hourly success", runner)
+        self.assertIn("Send-J2MHealthcheck database_hourly fail", runner)
+        self.assertIn("Send-J2MHealthcheck cloud_four_hour success", cloud)
+        self.assertIn("Send-J2MHealthcheck restore_weekly success", restore)
+        for task_runner in (runner, cloud, restore):
+            self.assertIn("Enter-J2MSelfHostTaskGuard", task_runner)
+            self.assertIn("Exit-J2MSelfHostTaskGuard", task_runner)
+        self.assertLess(
+            cloud.index("Set-Location -LiteralPath $Repository"),
+            cloud.index("Send-J2MHealthcheck cloud_four_hour start"),
+        )
+
+    @unittest.skipUnless(os.name == "nt", "PowerShell integration only runs on Windows")
+    def test_healthchecks_helper_is_best_effort_and_hides_secret_url(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            secret = root / "healthchecks.json"
+            token = "unreachable-synthetic-token-value-1234"
+            secret.write_text(
+                json.dumps({"database_hourly": f"http://127.0.0.1:1/{token}"}),
+                encoding="utf-8",
+            )
+            child_env = os.environ.copy()
+            child_env["J2M_SYNTHETIC_HEALTHCHECK_TEST"] = "1"
+            child_env["J2M_HEALTHCHECKS_FILE"] = str(secret)
+            result = subprocess.run(
+                [sys.executable, "-m", "scripts.healthchecks_monitor", "database_hourly", "fail"],
+                capture_output=True, text=True, timeout=20, cwd=ROOT, env=child_env,
+            )
+            combined = result.stdout + result.stderr
+            self.assertEqual(result.returncode, 0, combined)
+            self.assertEqual(combined, "")
+            self.assertNotIn(token, combined)
+            from scripts.healthchecks_monitor import notify
+            with patch.dict(os.environ, {"J2M_SYNTHETIC_HEALTHCHECK_TEST": "1"}):
+                self.assertFalse(notify("database_hourly", "fail", secret))
+
+    @unittest.skipUnless(os.name == "nt", "PowerShell integration only runs on Windows")
+    def test_monitoring_process_failure_does_not_change_task_status(self):
+        runtime = str(ROOT / "scripts" / "selfhost_task_runtime.ps1")
+        command = (
+            f". '{runtime}'; function python {{ throw 'synthetic monitor failure' }}; "
+            "$global:LASTEXITCODE=91; Send-J2MHealthcheck database_hourly fail; "
+            "if ($global:LASTEXITCODE -ne 91) { exit 3 }; Write-Output continued"
+        )
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+            capture_output=True, text=True, timeout=20, cwd=ROOT,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), "continued")
+        self.assertNotIn("synthetic monitor failure", result.stderr)
+
+    @unittest.skipUnless(os.name == "nt", "PowerShell integration only runs on Windows")
+    def test_task_guard_serializes_different_scheduled_runners(self):
+        runtime = str(ROOT / "scripts" / "selfhost_task_runtime.ps1")
+        mutex = "Local\\J2M-Synthetic-" + os.urandom(8).hex()
+        holder_command = (
+            f". '{runtime}'; $m=Enter-J2MSelfHostTaskGuard -TimeoutSeconds 5 -Name '{mutex}'; "
+            "Write-Output locked; try { Start-Sleep -Milliseconds 1200 } "
+            "finally { Exit-J2MSelfHostTaskGuard $m }"
+        )
+        waiter_command = (
+            f". '{runtime}'; $m=Enter-J2MSelfHostTaskGuard -TimeoutSeconds 5 -Name '{mutex}'; "
+            "try { Write-Output acquired } finally { Exit-J2MSelfHostTaskGuard $m }"
+        )
+        holder = subprocess.Popen(
+            ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", holder_command],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=ROOT,
+        )
+        try:
+            self.assertEqual(holder.stdout.readline().strip(), "locked")
+            started = time.monotonic()
+            waiter = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", waiter_command],
+                capture_output=True, text=True, timeout=10, cwd=ROOT,
+            )
+            elapsed = time.monotonic() - started
+            self.assertEqual(waiter.returncode, 0, waiter.stdout + waiter.stderr)
+            self.assertIn("acquired", waiter.stdout)
+            self.assertGreaterEqual(elapsed, 0.8)
+        finally:
+            remaining_stdout, remaining_stderr = holder.communicate(timeout=10)
+            self.assertEqual(holder.returncode, 0, remaining_stdout + remaining_stderr)
+
+    @unittest.skipUnless(os.name == "nt", "PowerShell integration only runs on Windows")
+    def test_healthchecks_helper_sends_start_success_and_fail(self):
+        received = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                received.append(self.path)
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, *_args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                secret = Path(temporary) / "healthchecks.json"
+                token_path = "/synthetic-secret-token-value-1234"
+                secret.write_text(json.dumps({
+                    "database_hourly": f"http://127.0.0.1:{server.server_port}{token_path}",
+                }), encoding="utf-8")
+                from scripts.healthchecks_monitor import notify
+                with patch.dict(os.environ, {"J2M_SYNTHETIC_HEALTHCHECK_TEST": "1"}):
+                    for state in ("start", "success", "fail"):
+                        self.assertTrue(notify("database_hourly", state, secret))
+                self.assertEqual(received, [
+                    token_path + "/start", token_path, token_path + "/fail",
+                ])
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+
+    def test_healthchecks_helper_accepts_utf8_bom_and_rejects_unsafe_urls(self):
+        from scripts.healthchecks_monitor import notify
+
+        with tempfile.TemporaryDirectory() as temporary:
+            secret = Path(temporary) / "healthchecks.json"
+            secret.write_text(
+                json.dumps({"database_hourly": "https://hc-ping.com/" + "a" * 32}),
+                encoding="utf-8-sig",
+            )
+            with patch("scripts.healthchecks_monitor.urlopen") as opener:
+                response = opener.return_value.__enter__.return_value
+                response.status = 200
+                self.assertTrue(notify("database_hourly", "success", secret))
+
+            for unsafe in (
+                "http://hc-ping.com/" + "a" * 32,
+                "https://user@hc-ping.com/" + "a" * 32,
+                "https://hc-ping.com/" + "a" * 32 + "?leak=1",
+                "https://hc-ping.com/short",
+                "https://example.com/" + "a" * 32,
+            ):
+                secret.write_text(json.dumps({"database_hourly": unsafe}), encoding="utf-8")
+                with patch("scripts.healthchecks_monitor.urlopen") as opener:
+                    self.assertFalse(notify("database_hourly", "success", secret))
+                    opener.assert_not_called()
 
     @unittest.skipUnless(os.name == "nt", "ACL y Task Scheduler solo se validan en Windows")
     def test_windows_acl_and_scheduler_plan_execute_without_registering_tasks(self):
