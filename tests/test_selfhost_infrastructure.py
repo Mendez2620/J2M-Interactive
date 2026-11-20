@@ -122,8 +122,62 @@ class SelfHostInfrastructureTestCase(unittest.TestCase):
         deploy = (ROOT / "scripts" / "selfhost_deploy_approved.ps1").read_text(encoding="utf-8")
         self.assertIn("$ApprovedSha -ne $mainSha", deploy)
         self.assertIn("$headSha -ne $ApprovedSha", deploy)
+        self.assertIn("set_selfhost_image_pin.ps1", deploy)
+        self.assertNotIn("$env:J2M_IMAGE", deploy)
         self.assertNotIn("db upgrade", deploy)
         self.assertNotIn("config apply", deploy)
+
+    def test_selfhost_image_pin_is_persistent_exact_and_fail_closed(self):
+        compose = (ROOT / "compose.selfhost.yml").read_text(encoding="utf-8")
+        template = (ROOT / ".env.selfhost.example").read_text(encoding="utf-8")
+        preflight = (ROOT / "scripts" / "selfhost_preflight.ps1").read_text(encoding="utf-8")
+        pin = (ROOT / "scripts" / "set_selfhost_image_pin.ps1").read_text(encoding="utf-8")
+        self.assertIn("${J2M_IMAGE:?", compose)
+        self.assertNotIn("J2M_IMAGE:-", compose)
+        self.assertIn("J2M_IMAGE=REQUIRED_APPROVED_IMAGE_TAG", template)
+        self.assertIn('^j2m-interactive:[0-9a-f]{40}$', preflight)
+        self.assertIn('Write-Check "image-pin-local"', preflight)
+        self.assertIn("git merge-base --is-ancestor", pin)
+        self.assertIn("docker image inspect", pin)
+        self.assertIn("protect_selfhost_secrets.ps1", pin)
+        self.assertIn("$pins.Count -ne 1", pin)
+
+    @unittest.skipUnless(os.name == "nt", "PowerShell ACL integration only runs on Windows")
+    def test_selfhost_image_pin_replaces_duplicates_and_preserves_acl(self):
+        approved = "1" * 40
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            env_file = root / ".env.selfhost"
+            env_file.write_text(
+                "SECRET_KEY=opaque-test-value\n"
+                "J2M_IMAGE=j2m-interactive:" + ("0" * 40) + "\n"
+                "J2M_IMAGE=j2m-interactive:duplicate\n",
+                encoding="utf-8",
+            )
+            protect = ROOT / "scripts" / "protect_selfhost_secrets.ps1"
+            pin = ROOT / "scripts" / "set_selfhost_image_pin.ps1"
+            command = (
+                "function global:git { $global:LASTEXITCODE = 0 }; "
+                "function global:docker { $global:LASTEXITCODE = 0 }; "
+                f"& '{protect}' -Path '{env_file}'; "
+                f"& '{pin}' -ApprovedSha {approved} -EnvFile '{env_file}'; "
+                f"$info = Get-Item -LiteralPath '{env_file}'; "
+                "$aclType = [Type]::GetType('System.IO.FileSystemAclExtensions, System.IO.FileSystem.AccessControl', $false); "
+                f"$acl = if ($null -ne $aclType) {{ $aclType::GetAccessControl($info) }} else {{ [System.IO.File]::GetAccessControl('{env_file}') }}; "
+                "if (-not $acl.AreAccessRulesProtected) { exit 9 }"
+            )
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                cwd=ROOT,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            contents = env_file.read_text(encoding="utf-8")
+            self.assertIn("SECRET_KEY=opaque-test-value", contents)
+            self.assertEqual(contents.count("J2M_IMAGE="), 1)
+            self.assertIn(f"J2M_IMAGE=j2m-interactive:{approved}", contents)
 
     def test_ci_validates_compose_without_private_values(self):
         workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")

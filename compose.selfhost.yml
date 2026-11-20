@@ -1,7 +1,7 @@
 name: j2m-selfhost
 
 x-j2m-app: &j2m-app
-  image: ${J2M_IMAGE:-j2m-interactive:local}
+  image: ${J2M_IMAGE:?J2M_IMAGE must be an exact approved image tag}
   build:
     context: .
     dockerfile: Dockerfile

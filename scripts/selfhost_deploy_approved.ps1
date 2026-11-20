@@ -17,10 +17,12 @@ if ($ApprovedSha -ne $mainSha -or $headSha -ne $ApprovedSha) {
 }
 if (-not (Test-Path -LiteralPath $EnvFile)) { throw "Falta el archivo privado de entorno." }
 
-$env:J2M_ENV_FILE = $EnvFile
-$env:J2M_IMAGE = "j2m-interactive:$ApprovedSha"
-docker build --pull --tag $env:J2M_IMAGE .
+$imageTag = "j2m-interactive:$ApprovedSha"
+docker build --pull --tag $imageTag .
 if ($LASTEXITCODE -ne 0) { throw "Falló la construcción de la imagen." }
+
+& "$PSScriptRoot\set_selfhost_image_pin.ps1" -ApprovedSha $ApprovedSha -EnvFile $EnvFile
+if ($LASTEXITCODE -ne 0) { throw "No se pudo fijar la imagen aprobada en el entorno privado." }
 
 $services = @("web", "google-wallet-worker")
 $profiles = @()
