@@ -145,11 +145,13 @@ Las regresiones existentes de configuración comprueban además que producción 
 La recuperación normal después de un apagón solo requiere iniciar sesión, esperar a Docker Desktop y dejar que `restart: unless-stopped` recupere web, worker y HTTPS. Si web o worker fueron eliminados pero la imagen sigue presente, ejecutar desde el repositorio aprobado:
 
 ```powershell
-docker compose -p j2m-cutover-ready --env-file .env.selfhost -f compose.selfhost.yml config --quiet
-docker compose -p j2m-cutover-ready --env-file .env.selfhost -f compose.selfhost.yml up -d --no-build web google-wallet-worker
+powershell -File scripts/invoke_selfhost_compose.ps1 -EnvFile .env.selfhost config --quiet
+powershell -File scripts/invoke_selfhost_compose.ps1 -EnvFile .env.selfhost up -d --no-build web google-wallet-worker
 ```
 
-No establecer `$env:J2M_IMAGE`: la etiqueta se lee de `.env.selfhost`. `selfhost_preflight.ps1` exige el formato `j2m-interactive:<SHA completo>` y comprueba que la imagen exista localmente. Si la imagen se perdió, reconstruir primero ese SHA desde un checkout limpio y aprobado; después ejecutar `set_selfhost_image_pin.ps1 -ApprovedSha <SHA>` y finalmente Compose. No ejecutar el migrador durante una recuperación ordinaria.
+No establecer `$env:J2M_IMAGE` ni `$env:J2M_ENV_FILE`: el wrapper reemplaza valores heredados durante el subproceso, usa siempre el proyecto `j2m-cutover-ready` y restaura el entorno del operador al terminar. También bloquea el arranque si detecta un Google Wallet worker Compose activo bajo otro proyecto. `selfhost_preflight.ps1` exige el formato `j2m-interactive:<SHA completo>` y comprueba que la imagen exista localmente. Si la imagen se perdió, reconstruir primero ese SHA desde un checkout limpio y aprobado; después ejecutar `set_selfhost_image_pin.ps1 -ApprovedSha <SHA>` y finalmente el wrapper. No ejecutar el migrador durante una recuperación ordinaria.
+
+`selfhost_deploy_approved.ps1` requiere que el pin anterior sea único y que su imagen todavía exista. Construye la versión nueva antes de cambiar el pin y espera los healthchecks durante un máximo de 120 segundos. Si Compose falla o los servicios no quedan saludables después del cambio, restaura el pin anterior y vuelve a aplicar web y worker con la imagen previa bajo el mismo proyecto; nunca crea deliberadamente un segundo worker. El archivo temporal del pin recibe su ACL restrictiva cuando todavía está vacío y solo después se escriben las variables privadas.
 
 El proxy HTTPS se reconstruye con la imagen fijada por digest que documenta `LOCAL-RUNBOOK.txt`, la red `j2m-cutover-ready_j2m-private`, el usuario no-root `nginx`, `restart=unless-stopped`, `read_only`, `cap_drop=ALL`, `no-new-privileges`, el `nginx.conf` persistente y el volumen TLS de solo lectura. El volumen debe contener exclusivamente `server.crt` y `server.key`, propiedad de UID/GID 101; nunca montar `ca.key` dentro del contenedor. Antes de recrearlo, validar `nginx -t` en un contenedor efímero sin publicar puertos.
 

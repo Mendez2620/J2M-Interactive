@@ -49,8 +49,11 @@ if (-not $found) { $updated.Add("J2M_IMAGE=$imageTag") }
 
 $temporary = "$envPath.$([guid]::NewGuid().ToString('N')).tmp"
 try {
-    [System.IO.File]::WriteAllLines($temporary, $updated, [System.Text.UTF8Encoding]::new($false))
+    # Create an empty placeholder, lock down its DACL, and only then write the
+    # environment contents. Credentials never exist in an inherited-ACL temp.
+    [System.IO.File]::WriteAllBytes($temporary, [byte[]]::new(0))
     & "$PSScriptRoot\protect_selfhost_secrets.ps1" -Path $temporary *> $null
+    [System.IO.File]::WriteAllLines($temporary, $updated, [System.Text.UTF8Encoding]::new($false))
     Move-Item -LiteralPath $temporary -Destination $envPath -Force
     & "$PSScriptRoot\protect_selfhost_secrets.ps1" -Path $envPath *> $null
 } finally {
