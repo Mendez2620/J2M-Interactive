@@ -309,7 +309,9 @@ class PersistentMediaTestCase(unittest.TestCase):
 
     @unittest.skipUnless(os.getenv("TEST_POSTGRES_URL"), "PostgreSQL efímero no disponible")
     def test_concurrent_replacements_serialize_and_failed_request_cannot_remove_retention(self):
-        postgres_url = os.environ["TEST_POSTGRES_URL"]
+        postgres_url = os.environ["TEST_POSTGRES_URL"].replace(
+            "postgresql://", "postgresql+psycopg2://", 1,
+        )
         with tempfile.TemporaryDirectory() as media_root, \
              patch.object(TestingConfig, "SQLALCHEMY_DATABASE_URI", postgres_url):
             app = create_app("testing")
