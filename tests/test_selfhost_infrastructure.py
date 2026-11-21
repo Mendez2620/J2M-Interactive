@@ -893,6 +893,27 @@ class SelfHostInfrastructureTestCase(unittest.TestCase):
         self.assertLess(elapsed, 2)
 
     @unittest.skipUnless(os.name == "nt", "PowerShell integration only runs on Windows")
+    def test_docker_probe_selects_one_executable_when_multiple_are_discovered(self):
+        runtime = str(ROOT / "scripts" / "selfhost_task_runtime.ps1")
+        command = (
+            f". '{runtime}'; "
+            "function Get-Command { param($Name, $CommandType, $ErrorAction); "
+            "if ($Name -eq 'docker.exe') { return $null }; "
+            "return @([pscustomobject]@{Source='first-docker.exe'}, "
+            "[pscustomobject]@{Source='second-docker.exe'}) }; "
+            "function Invoke-J2MProcessWithTimeout { param($FileName, $Arguments, $TimeoutSeconds); "
+            "$script:selected=$FileName; return 'ready' }; "
+            "$status=Test-J2MDockerEngine -TimeoutSeconds 10; "
+            "Write-Output ('selected=' + $script:selected); Write-Output ('status=' + $status)"
+        )
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command],
+            capture_output=True, text=True, timeout=5, cwd=ROOT,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip().splitlines(), ["selected=first-docker.exe", "status=ready"])
+
+    @unittest.skipUnless(os.name == "nt", "PowerShell integration only runs on Windows")
     def test_task_guard_serializes_different_scheduled_runners(self):
         runtime = str(ROOT / "scripts" / "selfhost_task_runtime.ps1")
         mutex = "Local\\J2M-Synthetic-" + os.urandom(8).hex()
