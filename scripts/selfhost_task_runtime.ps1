@@ -37,12 +37,53 @@ function Write-J2MTaskRuntimeEvent {
     Add-Content -LiteralPath $LogPath -Value $entry -Encoding utf8
 }
 
-function Test-J2MDockerEngine {
+function Invoke-J2MProcessWithTimeout {
+    param(
+        [Parameter(Mandatory = $true)][string]$FileName,
+        [Parameter(Mandatory = $true)][string]$Arguments,
+        [Parameter(Mandatory = $true)][double]$TimeoutSeconds
+    )
+
+    $process = [System.Diagnostics.Process]::new()
     try {
-        & docker info --format '{{.ServerVersion}}' *> $null
-        return ($LASTEXITCODE -eq 0)
+        $process.StartInfo = [System.Diagnostics.ProcessStartInfo]::new()
+        $process.StartInfo.FileName = $FileName
+        $process.StartInfo.Arguments = $Arguments
+        $process.StartInfo.UseShellExecute = $false
+        $process.StartInfo.CreateNoWindow = $true
+        $process.StartInfo.RedirectStandardOutput = $true
+        $process.StartInfo.RedirectStandardError = $true
+        if (-not $process.Start()) { return "unavailable" }
+        $outputTask = $process.StandardOutput.ReadToEndAsync()
+        $errorTask = $process.StandardError.ReadToEndAsync()
+        $timeoutMilliseconds = [Math]::Max(1, [int]($TimeoutSeconds * 1000))
+        if (-not $process.WaitForExit($timeoutMilliseconds)) {
+            # Kill only this disposable CLI probe. Never target Docker Desktop,
+            # its backend, the engine, or any running container.
+            $process.Kill()
+            $process.WaitForExit()
+            $outputTask.GetAwaiter().GetResult() | Out-Null
+            $errorTask.GetAwaiter().GetResult() | Out-Null
+            return "timeout"
+        }
+        $outputTask.GetAwaiter().GetResult() | Out-Null
+        $errorTask.GetAwaiter().GetResult() | Out-Null
+        if ($process.ExitCode -eq 0) { return "ready" }
+        return "unavailable"
     } catch {
-        return $false
+        return "unavailable"
+    } finally {
+        $process.Dispose()
+    }
+}
+
+function Test-J2MDockerEngine {
+    param([double]$TimeoutSeconds = 10)
+    try {
+        $command = Get-Command docker -CommandType Application -ErrorAction Stop
+        return Invoke-J2MProcessWithTimeout -FileName $command.Source -Arguments "info --format `"{{.ServerVersion}}`"" -TimeoutSeconds $TimeoutSeconds
+    } catch {
+        return "unavailable"
     }
 }
 
@@ -50,10 +91,11 @@ function Wait-J2MDockerReady {
     param(
         [Parameter(Mandatory = $true)][string]$LogPath,
         [double]$MaxWaitSeconds = 300,
-        [double]$RetryIntervalSeconds = 30
+        [double]$RetryIntervalSeconds = 30,
+        [double]$ProbeTimeoutSeconds = 10
     )
 
-    if ($MaxWaitSeconds -le 0 -or $RetryIntervalSeconds -le 0) {
+    if ($MaxWaitSeconds -le 0 -or $RetryIntervalSeconds -le 0 -or $ProbeTimeoutSeconds -le 0) {
         throw "Los plazos de espera de Docker deben ser positivos."
     }
 
@@ -65,19 +107,23 @@ function Wait-J2MDockerReady {
             throw "Docker no estuvo disponible dentro del plazo permitido."
         }
         $attempt += 1
+        $attemptStartedSeconds = $stopwatch.Elapsed.TotalSeconds
+        $remainingSeconds = [Math]::Max(0.001, $MaxWaitSeconds - $attemptStartedSeconds)
         $previousExitCode = $global:LASTEXITCODE
-        $ready = Test-J2MDockerEngine
+        $probeStatus = Test-J2MDockerEngine -TimeoutSeconds ([Math]::Min($ProbeTimeoutSeconds, $remainingSeconds))
         $global:LASTEXITCODE = $previousExitCode
-        if ($ready) {
+        if ($probeStatus -eq "ready") {
             if ($attempt -gt 1) {
                 Write-J2MTaskRuntimeEvent -LogPath $LogPath -Event "docker_recovered" -Status "ok" -Attempt $attempt
             }
             return
         }
 
-        Write-J2MTaskRuntimeEvent -LogPath $LogPath -Event "docker_unavailable" -Status "retry" -Attempt $attempt
+        $event = if ($probeStatus -eq "timeout") { "docker_probe_timeout" } else { "docker_unavailable" }
+        Write-J2MTaskRuntimeEvent -LogPath $LogPath -Event $event -Status "retry" -Attempt $attempt
         $remainingMilliseconds = [Math]::Max(1, [int](($MaxWaitSeconds - $stopwatch.Elapsed.TotalSeconds) * 1000))
-        $intervalMilliseconds = [Math]::Max(1, [int]($RetryIntervalSeconds * 1000))
+        $nextAttemptSeconds = $attemptStartedSeconds + $RetryIntervalSeconds
+        $intervalMilliseconds = [Math]::Max(1, [int](($nextAttemptSeconds - $stopwatch.Elapsed.TotalSeconds) * 1000))
         Start-Sleep -Milliseconds ([Math]::Min($remainingMilliseconds, $intervalMilliseconds))
     }
 }
