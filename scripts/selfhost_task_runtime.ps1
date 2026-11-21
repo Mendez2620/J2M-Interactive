@@ -100,7 +100,15 @@ function Invoke-J2MProcessWithTimeout {
 function Test-J2MDockerEngine {
     param([double]$TimeoutSeconds = 10)
     try {
-        $command = Get-Command docker -CommandType Application -ErrorAction Stop
+        # Some Windows Docker Desktop installations expose both `docker.exe`
+        # and an extensionless `docker` application. Always select exactly one
+        # executable so PowerShell cannot coerce multiple paths into FileName.
+        $command = Get-Command docker.exe -CommandType Application -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($null -eq $command) {
+            $command = Get-Command docker -CommandType Application -ErrorAction Stop |
+                Select-Object -First 1
+        }
         return Invoke-J2MProcessWithTimeout -FileName $command.Source -Arguments "info --format `"{{.ServerVersion}}`"" -TimeoutSeconds $TimeoutSeconds
     } catch {
         return "unavailable"
