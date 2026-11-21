@@ -37,6 +37,27 @@ function Write-J2MTaskRuntimeEvent {
     Add-Content -LiteralPath $LogPath -Value $entry -Encoding utf8
 }
 
+function Stop-J2MProbeProcess {
+    param(
+        [Parameter(Mandatory = $true)]$Process,
+        [Parameter(Mandatory = $true)][int]$TimeoutMilliseconds
+    )
+
+    try {
+        $Process.Kill()
+    } catch {
+        return $false
+    }
+    if ($TimeoutMilliseconds -le 0) { return $false }
+    try {
+        # Always use the bounded overload. Cleanup must never extend the
+        # probe's remaining budget or wait indefinitely during host startup.
+        return $Process.WaitForExit($TimeoutMilliseconds)
+    } catch {
+        return $false
+    }
+}
+
 function Invoke-J2MProcessWithTimeout {
     param(
         [Parameter(Mandatory = $true)][string]$FileName,
@@ -56,18 +77,17 @@ function Invoke-J2MProcessWithTimeout {
         if (-not $process.Start()) { return "unavailable" }
         $outputTask = $process.StandardOutput.ReadToEndAsync()
         $errorTask = $process.StandardError.ReadToEndAsync()
-        $timeoutMilliseconds = [Math]::Max(1, [int]($TimeoutSeconds * 1000))
-        if (-not $process.WaitForExit($timeoutMilliseconds)) {
+        $totalMilliseconds = [Math]::Max(2, [int]($TimeoutSeconds * 1000))
+        $cleanupReserveMilliseconds = [Math]::Min(2000, [Math]::Max(1, [int]($totalMilliseconds / 5)))
+        $executionMilliseconds = [Math]::Max(1, $totalMilliseconds - $cleanupReserveMilliseconds)
+        $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+        if (-not $process.WaitForExit($executionMilliseconds)) {
             # Kill only this disposable CLI probe. Never target Docker Desktop,
             # its backend, the engine, or any running container.
-            $process.Kill()
-            $process.WaitForExit()
-            $outputTask.GetAwaiter().GetResult() | Out-Null
-            $errorTask.GetAwaiter().GetResult() | Out-Null
+            $cleanupMilliseconds = [Math]::Max(1, $totalMilliseconds - [int]$stopwatch.ElapsedMilliseconds)
+            Stop-J2MProbeProcess -Process $process -TimeoutMilliseconds $cleanupMilliseconds | Out-Null
             return "timeout"
         }
-        $outputTask.GetAwaiter().GetResult() | Out-Null
-        $errorTask.GetAwaiter().GetResult() | Out-Null
         if ($process.ExitCode -eq 0) { return "ready" }
         return "unavailable"
     } catch {

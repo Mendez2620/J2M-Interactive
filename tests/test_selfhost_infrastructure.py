@@ -728,7 +728,9 @@ class SelfHostInfrastructureTestCase(unittest.TestCase):
         self.assertIn("docker_probe_timeout", runtime)
         self.assertIn("docker_recovered", runtime)
         self.assertIn("docker_timeout", runtime)
-        self.assertIn("$process.Kill()", runtime)
+        self.assertIn("$Process.Kill()", runtime)
+        self.assertNotIn("$process.WaitForExit()", runtime)
+        self.assertNotIn("GetAwaiter().GetResult()", runtime)
         self.assertIn("Never target Docker Desktop", runtime)
         self.assertIn("Local\\J2M-SelfHost-Backup-Operations", runtime)
         self.assertIn("$global:LASTEXITCODE = $previousExitCode", runtime)
@@ -867,6 +869,28 @@ class SelfHostInfrastructureTestCase(unittest.TestCase):
                 capture_output=True, text=True, timeout=5,
             )
             self.assertNotEqual(alive.returncode, 0, alive.stdout + alive.stderr)
+
+    @unittest.skipUnless(os.name == "nt", "PowerShell integration only runs on Windows")
+    def test_probe_cleanup_uses_only_a_bounded_wait(self):
+        runtime = str(ROOT / "scripts" / "selfhost_task_runtime.ps1")
+        command = (
+            f". '{runtime}'; "
+            "$fake=[pscustomobject]@{ Killed=$false; WaitMilliseconds=0 }; "
+            "$fake | Add-Member ScriptMethod Kill { $this.Killed=$true }; "
+            "$fake | Add-Member ScriptMethod WaitForExit { param($milliseconds) "
+            "$this.WaitMilliseconds=$milliseconds; Start-Sleep -Milliseconds 50; return $false }; "
+            "$result=Stop-J2MProbeProcess -Process $fake -TimeoutMilliseconds 75; "
+            "Write-Output ('killed=' + $fake.Killed + ';wait=' + $fake.WaitMilliseconds + ';result=' + $result)"
+        )
+        started = time.monotonic()
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command],
+            capture_output=True, text=True, timeout=5, cwd=ROOT,
+        )
+        elapsed = time.monotonic() - started
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), "killed=True;wait=75;result=False")
+        self.assertLess(elapsed, 2)
 
     @unittest.skipUnless(os.name == "nt", "PowerShell integration only runs on Windows")
     def test_task_guard_serializes_different_scheduled_runners(self):
