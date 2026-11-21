@@ -125,10 +125,12 @@ class Config:
     # Two 5 MB images plus multipart form overhead.
     MAX_CONTENT_LENGTH = int(os.getenv("MAX_CONTENT_LENGTH", 12 * 1024 * 1024))
     UPLOAD_STORAGE_BACKEND = os.getenv("UPLOAD_STORAGE_BACKEND", "local").lower()
+    MEDIA_STORAGE_BACKEND = os.getenv("MEDIA_STORAGE_BACKEND", "local").lower()
     MEDIA_STORAGE_ROOT = os.getenv("MEDIA_STORAGE_ROOT", str(BASE_DIR / "instance" / "media"))
     MAX_IMAGE_WIDTH = int(os.getenv("MAX_IMAGE_WIDTH", 4096))
     MAX_IMAGE_HEIGHT = int(os.getenv("MAX_IMAGE_HEIGHT", 4096))
     MAX_IMAGE_PIXELS = int(os.getenv("MAX_IMAGE_PIXELS", 16_000_000))
+    MAX_NORMALIZED_IMAGE_BYTES = int(os.getenv("MAX_NORMALIZED_IMAGE_BYTES", 5 * 1024 * 1024))
     PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
     GOOGLE_WALLET_MODE = os.getenv("GOOGLE_WALLET_MODE", "mock").lower()
     GOOGLE_ISSUER_ID = os.getenv("GOOGLE_ISSUER_ID", "")
@@ -184,6 +186,7 @@ class ProductionConfig(Config):
     # Uploads remain fail-closed until persistent storage, backup and a public
     # HTTPS origin are explicitly approved for the production host.
     UPLOAD_STORAGE_BACKEND = os.getenv("UPLOAD_STORAGE_BACKEND", "disabled").lower()
+    MEDIA_STORAGE_BACKEND = os.getenv("MEDIA_STORAGE_BACKEND", "disabled").lower()
     GOOGLE_WALLET_MODE = os.getenv("GOOGLE_WALLET_MODE", "disabled").lower()
     APPLE_WALLET_MODE = os.getenv("APPLE_WALLET_MODE", "disabled").lower()
 
@@ -195,6 +198,7 @@ class TestingConfig(Config):
     CSRF_ENABLED = False
     UPLOAD_FOLDER = os.path.join(os.getenv("TEMP", "."), "j2m-test-uploads")
     MEDIA_STORAGE_ROOT = UPLOAD_FOLDER
+    MEDIA_STORAGE_BACKEND = "local"
     JWT_SECRET_KEY = "testing-only-jwt-secret-key-longer-than-32-bytes"
     RECOVERY_MAIL_BACKEND = "memory"
     AUTH_RATE_LIMIT_ATTEMPTS = 10

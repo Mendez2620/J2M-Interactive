@@ -18,10 +18,13 @@ def public_media(asset_key):
     except (MediaStorageError, ValueError):
         abort(404)
     business = Business.query.filter_by(id=business_id).first()
-    if not business or asset_key not in {business.logo_path, business.cover_path}:
+    storage = get_media_storage()
+    current_asset = business and asset_key in {business.logo_path, business.cover_path}
+    retained_asset = business and storage.is_retained(asset_key, expected_business_id=business_id)
+    if not business or not (current_asset or retained_asset):
         abort(404)
     try:
-        content = get_media_storage().read_bytes(asset_key, expected_business_id=business_id)
+        content = storage.read_bytes(asset_key, expected_business_id=business_id)
     except (MediaStorageError, OSError):
         abort(404)
     response = make_response(send_file(

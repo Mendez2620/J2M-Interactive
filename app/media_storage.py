@@ -1,5 +1,7 @@
 """Persistent, tenant-scoped storage for business branding media."""
 from pathlib import Path, PurePosixPath
+from datetime import datetime, timezone
+import json
 import os
 import re
 import tempfile
@@ -32,6 +34,7 @@ def is_managed_media_key(key):
 
 class DisabledMediaStorage:
     enabled = False
+    read_enabled = False
 
     def save(self, *args, **kwargs):
         raise MediaStorageError("Las subidas están deshabilitadas.")
@@ -42,9 +45,19 @@ class DisabledMediaStorage:
     def delete(self, key):
         return False
 
+    def is_retained(self, *args, **kwargs):
+        return False
+
+    def retain(self, *args, **kwargs):
+        raise MediaStorageError("El almacenamiento está deshabilitado.")
+
+    def release_retention(self, *args, **kwargs):
+        return False
+
 
 class LocalMediaStorage:
     enabled = True
+    read_enabled = True
 
     def __init__(self, root):
         self.root = Path(root).resolve()
@@ -90,6 +103,84 @@ class LocalMediaStorage:
             raise
         return key
 
+    def _retention_path(self, key, expected_business_id=None):
+        media_path = self._path(key, expected_business_id)
+        return media_path.with_name(f".{media_path.name}.retained.json")
+
+    def retain(self, key, expected_business_id, superseded_by_design_version):
+        media_path = self._path(key, expected_business_id)
+        if not media_path.is_file():
+            raise MediaStorageError("No se encontró el recurso que debe conservarse.")
+        try:
+            design_version = int(superseded_by_design_version)
+        except (TypeError, ValueError) as exc:
+            raise MediaStorageError("Versión de branding no válida.") from exc
+        if design_version <= 0:
+            raise MediaStorageError("Versión de branding no válida.")
+        marker = self._retention_path(key, expected_business_id)
+        payload = json.dumps({
+            "schema": 1,
+            "storage_key": key,
+            "business_id": int(expected_business_id),
+            "superseded_by_design_version": design_version,
+            "retired_at": datetime.now(timezone.utc).isoformat(),
+        }, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="xb", dir=marker.parent, prefix=".retention-", delete=False,
+            ) as output:
+                temporary = Path(output.name)
+                output.write(payload)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, marker)
+            try:
+                marker.chmod(0o640)
+            except OSError:
+                pass
+        except Exception:
+            if temporary:
+                temporary.unlink(missing_ok=True)
+            raise
+        return payload
+
+    def retention_metadata(self, key, expected_business_id):
+        marker = self._retention_path(key, expected_business_id)
+        try:
+            raw = marker.read_bytes()
+            if len(raw) > 2048:
+                return None
+            data = json.loads(raw.decode("utf-8"))
+        except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        expected = parse_managed_media_key(key)
+        if (not isinstance(data, dict) or data.get("schema") != 1
+                or data.get("storage_key") != key
+                or data.get("business_id") != int(expected_business_id)
+                or int(expected["business_id"]) != int(expected_business_id)
+                or not isinstance(data.get("superseded_by_design_version"), int)
+                or data["superseded_by_design_version"] <= 0
+                or not isinstance(data.get("retired_at"), str)):
+            return None
+        return data
+
+    def is_retained(self, key, expected_business_id):
+        try:
+            return (
+                self._path(key, expected_business_id).is_file()
+                and self.retention_metadata(key, expected_business_id) is not None
+            )
+        except MediaStorageError:
+            return False
+
+    def release_retention(self, key, expected_business_id):
+        try:
+            self._retention_path(key, expected_business_id).unlink()
+        except FileNotFoundError:
+            return False
+        return True
+
     def read_bytes(self, key, expected_business_id=None):
         return self._path(key, expected_business_id).read_bytes()
 
@@ -97,6 +188,7 @@ class LocalMediaStorage:
         if not is_managed_media_key(key):
             return False
         path = self._path(key)
+        self._retention_path(key).unlink(missing_ok=True)
         try:
             path.unlink()
         except FileNotFoundError:
@@ -105,7 +197,7 @@ class LocalMediaStorage:
 
 
 def build_media_storage(config):
-    backend = str(config.get("UPLOAD_STORAGE_BACKEND", "disabled")).strip().lower()
+    backend = str(config.get("MEDIA_STORAGE_BACKEND", "disabled")).strip().lower()
     if backend == "disabled":
         return DisabledMediaStorage()
     if backend == "local":

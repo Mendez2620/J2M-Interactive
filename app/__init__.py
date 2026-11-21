@@ -126,6 +126,16 @@ def create_app(config_name=None):
         if upload_backend != "disabled":
             raise RuntimeError("Producción requiere UPLOAD_STORAGE_BACKEND=disabled hasta aprobar almacenamiento persistente.")
         app.config["UPLOAD_STORAGE_BACKEND"] = upload_backend
+        media_backend = os.getenv(
+            "MEDIA_STORAGE_BACKEND", app.config.get("MEDIA_STORAGE_BACKEND", "disabled")
+        ).strip().lower()
+        if media_backend not in {"disabled", "local"}:
+            raise RuntimeError("MEDIA_STORAGE_BACKEND no es compatible.")
+        media_root = os.getenv("MEDIA_STORAGE_ROOT", app.config.get("MEDIA_STORAGE_ROOT", ""))
+        if media_backend == "local" and (not media_root or not os.path.isabs(media_root)):
+            raise RuntimeError("MEDIA_STORAGE_ROOT debe ser una ruta absoluta para lectura persistente.")
+        app.config["MEDIA_STORAGE_BACKEND"] = media_backend
+        app.config["MEDIA_STORAGE_ROOT"] = media_root
         wallet_mode = os.getenv("GOOGLE_WALLET_MODE", app.config.get("GOOGLE_WALLET_MODE", "disabled")).lower()
         if wallet_mode not in {"disabled", "real"}:
             raise RuntimeError("Producción solo permite GOOGLE_WALLET_MODE=disabled o real.")

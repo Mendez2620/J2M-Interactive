@@ -89,6 +89,10 @@ def validate_image(upload):
                         or width * height > current_app.config["MAX_IMAGE_PIXELS"]):
                     raise ValueError
                 image.load()
+                preserve_alpha = (
+                    image.mode in {"RGBA", "LA"}
+                    or (image.mode == "P" and "transparency" in image.info)
+                )
                 safe_image = image.copy()
     except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError, Image.DecompressionBombWarning):
         raise ValueError("El contenido del archivo no corresponde a una imagen válida.")
@@ -96,15 +100,23 @@ def validate_image(upload):
     if detected_extension != extension:
         raise ValueError("La extensión no coincide con el formato real de la imagen.")
     normalized = BytesIO()
-    if extension == "jpg":
-        safe_image.convert("RGB").save(normalized, format="JPEG", quality=90, optimize=True)
-    elif extension == "png":
-        mode = "RGBA" if "A" in safe_image.getbands() else "RGB"
-        safe_image.convert(mode).save(normalized, format="PNG", optimize=True)
-    else:
-        mode = "RGBA" if "A" in safe_image.getbands() else "RGB"
-        safe_image.convert(mode).save(normalized, format="WEBP", quality=90, method=6)
-    return normalized.getvalue(), extension
+    try:
+        if extension == "jpg":
+            safe_image.convert("RGB").save(normalized, format="JPEG", quality=90, optimize=True)
+        elif extension == "png":
+            safe_image.convert("RGBA" if preserve_alpha else "RGB").save(
+                normalized, format="PNG", optimize=True,
+            )
+        else:
+            safe_image.convert("RGBA" if preserve_alpha else "RGB").save(
+                normalized, format="WEBP", quality=90, method=6,
+            )
+    except (OSError, ValueError):
+        raise ValueError("No fue posible normalizar la imagen de forma segura.") from None
+    normalized_content = normalized.getvalue()
+    if len(normalized_content) > current_app.config["MAX_NORMALIZED_IMAGE_BYTES"]:
+        raise ValueError("La imagen normalizada debe pesar 5 MB o menos.")
+    return normalized_content, extension
 
 
 def prepare_images(files):
@@ -147,6 +159,14 @@ def cleanup_created_files(paths):
             storage.delete(key)
         except (MediaStorageError, OSError):
             current_app.logger.warning("No se pudo limpiar un recurso de branding huérfano.")
+
+
+def release_retained_media(keys, business_id):
+    for key in keys:
+        try:
+            get_media_storage().release_retention(key, business_id)
+        except (MediaStorageError, OSError):
+            current_app.logger.warning("No se pudo revertir un marcador de retención.")
 
 
 def parse_loyalty(data, current=None):
@@ -721,24 +741,32 @@ def update_business(business_id: int):
     if _wallet_design_state(business) != wallet_state_before:
         business.wallet_design_version = (business.wallet_design_version or 1) + 1
 
+    retained_media = []
     try:
+        for old_key in replaced_media:
+            if is_managed_media_key(old_key):
+                get_media_storage().retain(
+                    old_key, expected_business_id=business.id,
+                    superseded_by_design_version=business.wallet_design_version,
+                )
+                retained_media.append(old_key)
         db.session.commit()
     except IntegrityError:
         db.session.rollback()
         cleanup_created_files(locals().get("created_files", []))
+        release_retained_media(retained_media, business.id)
         return jsonify({"status": "error", "message": "El nombre o slug del negocio entra en conflicto con un registro existente."}), 409
+    except (MediaStorageError, OSError):
+        db.session.rollback()
+        cleanup_created_files(locals().get("created_files", []))
+        release_retained_media(retained_media, business.id)
+        return jsonify({"status": "error", "message": "No fue posible conservar la versión anterior de las imágenes."}), 503
     except Exception as exc:
         db.session.rollback()
         cleanup_created_files(locals().get("created_files", []))
+        release_retained_media(retained_media, business.id)
         current_app.logger.error("No se pudo actualizar el negocio (%s).", type(exc).__name__)
         return jsonify({"status": "error", "message": "No fue posible actualizar el negocio."}), 500
-
-    for old_key in replaced_media:
-        if is_managed_media_key(old_key):
-            try:
-                get_media_storage().delete(old_key)
-            except (MediaStorageError, OSError):
-                current_app.logger.warning("No se pudo retirar un recurso de branding sustituido.")
 
     if request.is_json or request.headers.get("Accept") == "application/json":
         return jsonify({

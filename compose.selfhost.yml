@@ -1,4 +1,4 @@
-name: j2m-selfhost
+name: ${J2M_COMPOSE_PROJECT_NAME:-j2m-cutover-ready}
 
 x-j2m-app: &j2m-app
   image: ${J2M_IMAGE:?J2M_IMAGE must be an exact approved image tag}
@@ -15,8 +15,6 @@ x-j2m-app: &j2m-app
     - no-new-privileges:true
   cap_drop:
     - ALL
-  volumes:
-    - j2m-media:/app/instance/media
   networks:
     - j2m-private
   logging:
@@ -28,6 +26,8 @@ x-j2m-app: &j2m-app
 services:
   web:
     <<: *j2m-app
+    volumes:
+      - j2m-media:/app/instance/media
     environment:
       J2M_PROCESS_TYPE: web
       PORT: "8000"
@@ -91,4 +91,3 @@ networks:
 
 volumes:
   j2m-media:
-    name: ${J2M_MEDIA_VOLUME:-j2m-selfhost-media}

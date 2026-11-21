@@ -47,6 +47,7 @@ class PersistentMediaTestCase(unittest.TestCase):
         self.app = create_app("testing")
         self.app.config.update(
             MEDIA_STORAGE_ROOT=self.temp_dir.name,
+            MEDIA_STORAGE_BACKEND="local",
             UPLOAD_STORAGE_BACKEND="local",
             PUBLIC_BASE_URL="https://media.example.test",
         )
@@ -116,6 +117,8 @@ class PersistentMediaTestCase(unittest.TestCase):
         with self.assertRaises(MediaStorageError):
             self.storage.read_bytes(key, expected_business_id=self.other.id)
         self.assertEqual(self.client.get(f"/media/{key}").status_code, 404)
+        self.storage._retention_path(key, self.business.id).write_text("{}", encoding="utf-8")
+        self.assertEqual(self.client.get(f"/media/{key}").status_code, 404)
         self.assertEqual(self.client.get("/media/businesses/1/logo/../../secret.png").status_code, 404)
 
     def test_binary_validation_dimensions_and_partial_failure(self):
@@ -156,7 +159,28 @@ class PersistentMediaTestCase(unittest.TestCase):
         ]
         self.assertEqual(remaining_files, [])
 
-    def test_replacement_removes_only_previous_managed_asset(self):
+    def test_update_rollback_removes_new_asset_and_retention_marker(self):
+        response = self._create(logo_file=(io.BytesIO(image_bytes()), "brand.png"))
+        business = response.get_json()["business"]
+        old_key = business["logo_path"]
+        with patch("app.routes.admin.db.session.commit", side_effect=RuntimeError("synthetic commit failure")):
+            update = self.client.post(
+                f"/admin/business/{business['id']}/update",
+                data={"logo_file": (io.BytesIO(image_bytes(size=(2, 2))), "brand.png")},
+                content_type="multipart/form-data", headers={"Accept": "application/json"},
+            )
+        self.assertEqual(update.status_code, 500)
+        db.session.expire_all()
+        self.assertEqual(db.session.get(Business, business["id"]).logo_path, old_key)
+        self.assertIsNone(self.storage.retention_metadata(old_key, business["id"]))
+        files = [
+            path for root, _dirs, names in os.walk(self.temp_dir.name)
+            for name in names if not name.endswith(".json")
+            for path in [os.path.join(root, name)]
+        ]
+        self.assertEqual(len(files), 1)
+
+    def test_replacement_retains_previous_managed_asset_for_wallet(self):
         response = self._create(logo_file=(io.BytesIO(image_bytes()), "brand.png"))
         business = response.get_json()["business"]
         old_key = business["logo_path"]
@@ -168,9 +192,75 @@ class PersistentMediaTestCase(unittest.TestCase):
         self.assertEqual(update.status_code, 200)
         new_key = update.get_json()["business"]["logo_path"]
         self.assertNotEqual(old_key, new_key)
-        with self.assertRaises(FileNotFoundError):
-            self.storage.read_bytes(old_key, expected_business_id=business["id"])
+        self.assertTrue(self.storage.read_bytes(old_key, expected_business_id=business["id"]))
         self.assertTrue(self.storage.read_bytes(new_key, expected_business_id=business["id"]))
+        metadata = self.storage.retention_metadata(old_key, business["id"])
+        self.assertEqual(
+            metadata["superseded_by_design_version"],
+            update.get_json()["business"]["wallet_design_version"],
+        )
+        self.assertEqual(self.client.get(f"/media/{old_key}").status_code, 200)
+
+    def test_existing_google_wallet_image_survives_save_before_publication(self):
+        response = self._create(logo_file=(io.BytesIO(image_bytes()), "brand.png"))
+        business_id = response.get_json()["business"]["id"]
+        business = db.session.get(Business, business_id)
+        old_key = business.logo_path
+        old_uri = GoogleWalletService()._logo_uri(business)
+        update = self.client.post(
+            f"/admin/business/{business_id}/update",
+            data={"logo_file": (io.BytesIO(image_bytes(size=(2, 2))), "brand.png")},
+            content_type="multipart/form-data", headers={"Accept": "application/json"},
+        )
+        self.assertEqual(update.status_code, 200)
+        db.session.expire_all()
+        business = db.session.get(Business, business_id)
+        self.assertNotEqual(GoogleWalletService()._logo_uri(business), old_uri)
+        self.assertTrue(old_uri.endswith(f"/media/{old_key}"))
+        self.assertEqual(self.client.get(old_uri.removeprefix("https://media.example.test")).status_code, 200)
+
+    def test_disabled_uploads_do_not_disable_existing_media_reads(self):
+        key = self.storage.save(self.business.id, "logo", image_bytes(), "png")
+        self.business.logo_path = key
+        db.session.commit()
+        self.app.config["UPLOAD_STORAGE_BACKEND"] = "disabled"
+        self.assertEqual(self.client.get(f"/media/{key}").status_code, 200)
+        blocked = self._create(
+            slug="blocked-write", logo_file=(io.BytesIO(image_bytes()), "brand.png"),
+        )
+        self.assertEqual(blocked.status_code, 503)
+
+    def test_metadata_is_removed_transparency_preserved_and_final_size_limited(self):
+        source = io.BytesIO()
+        exif = Image.Exif()
+        exif[0x010E] = "private-description"
+        Image.new("RGB", (8, 8), "red").save(
+            source, format="JPEG", exif=exif, icc_profile=b"private-icc-profile",
+        )
+        response = self._create(
+            slug="metadata", logo_file=(io.BytesIO(source.getvalue()), "brand.jpg"),
+        )
+        self.assertEqual(response.status_code, 201)
+        key = response.get_json()["business"]["logo_path"]
+        with Image.open(io.BytesIO(self.storage.read_bytes(key))) as normalized:
+            self.assertEqual(len(normalized.getexif()), 0)
+            self.assertNotIn("icc_profile", normalized.info)
+
+        transparent = io.BytesIO()
+        Image.new("RGBA", (2, 2), (1, 2, 3, 17)).save(transparent, format="PNG")
+        alpha_response = self._create(
+            slug="alpha", logo_file=(io.BytesIO(transparent.getvalue()), "brand.png"),
+        )
+        alpha_key = alpha_response.get_json()["business"]["logo_path"]
+        with Image.open(io.BytesIO(self.storage.read_bytes(alpha_key))) as normalized:
+            self.assertEqual(normalized.convert("RGBA").getpixel((0, 0))[3], 17)
+
+        self.app.config["MAX_NORMALIZED_IMAGE_BYTES"] = 32
+        final_too_large = self._create(
+            slug="normalized-too-large",
+            logo_file=(io.BytesIO(image_bytes()), "brand.png"),
+        )
+        self.assertEqual(final_too_large.status_code, 400)
 
     def test_storage_survives_adapter_recreation_and_wallet_consumers(self):
         key = self.storage.save(self.business.id, "logo", image_bytes(), "png")
@@ -189,6 +279,14 @@ class PersistentMediaTestCase(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         self.assertIn("instance/", (root / ".gitignore").read_text(encoding="utf-8"))
         self.assertIn("instance/", (root / ".dockerignore").read_text(encoding="utf-8"))
+
+    def test_compose_scopes_media_volume_to_explicit_project_and_writer(self):
+        root = Path(__file__).resolve().parents[1]
+        compose = (root / "compose.selfhost.yml").read_text(encoding="utf-8")
+        self.assertIn("name: ${J2M_COMPOSE_PROJECT_NAME:-j2m-cutover-ready}", compose)
+        self.assertIn("- j2m-media:/app/instance/media", compose)
+        self.assertNotIn("name: ${J2M_MEDIA_VOLUME", compose)
+        self.assertEqual(compose.count("j2m-media:/app/instance/media"), 1)
 
 
 if __name__ == "__main__":
