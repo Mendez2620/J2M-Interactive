@@ -11,7 +11,7 @@
         <p class="mt-3 text-sm leading-6 text-slate-600">El enlace no es válido o ya no está disponible. Solicita una invitación nueva a quien te la compartió.</p>
       {% else %}
         {% if business.logo_url %}<img src="{{ business.logo_url }}" alt="Logo de {{ business.name }}" class="mx-auto mb-4 h-16 max-w-48 object-contain" referrerpolicy="no-referrer">
-        {% elif business.logo_path %}<img src="{{ url_for('static', filename=business.logo_path) }}" alt="Logo de {{ business.name }}" class="mx-auto mb-4 h-16 max-w-48 object-contain">
+        {% elif business.logo_path %}<img src="{{ branding_asset_url(business.logo_path) }}" alt="Logo de {{ business.name }}" class="mx-auto mb-4 h-16 max-w-48 object-contain">
         {% else %}<div class="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-slate-900 text-2xl font-black text-white" aria-hidden="true">{{ business.name[:1]|upper }}</div>{% endif %}
         <p class="text-sm font-semibold uppercase tracking-wider text-slate-500">{{ business.name }}</p>
         <h1 id="invite-title" class="mt-2 text-3xl font-extrabold text-slate-900">Invita a tus amigos</h1>

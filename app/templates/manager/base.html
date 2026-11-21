@@ -22,7 +22,7 @@
   <div class="portal-main min-h-screen">
     <header class="safe-top sticky top-0 z-30 flex items-center justify-between gap-3 border-b bg-white/95 px-4 py-3 backdrop-blur lg:px-8">
       <button type="button" data-open-manager-drawer aria-controls="managerDrawer" aria-expanded="false" aria-label="Abrir menú" class="grid h-11 w-11 place-items-center rounded-xl border text-slate-700 lg:hidden">{{ icon('menu') }}</button>
-      <div class="flex min-w-0 items-center gap-3">{% if business.logo_path %}<img src="{{ url_for('static', filename=business.logo_path) }}" alt="Logo de {{ business.name }}" class="h-10 w-10 rounded-xl object-cover">{% endif %}<div class="min-w-0"><strong class="block truncate">{{ business.name }}</strong><small class="text-slate-500">{% block section_label %}{{ self.portal_title() }}{% endblock %}</small></div></div>
+      <div class="flex min-w-0 items-center gap-3">{% if business.logo_path %}<img src="{{ branding_asset_url(business.logo_path) }}" alt="Logo de {{ business.name }}" class="h-10 w-10 rounded-xl object-cover">{% endif %}<div class="min-w-0"><strong class="block truncate">{{ business.name }}</strong><small class="text-slate-500">{% block section_label %}{{ self.portal_title() }}{% endblock %}</small></div></div>
       <a href="{{ url_for('manager.manager_account') }}" class="grid h-11 w-11 place-items-center rounded-full bg-indigo-50 text-indigo-700" aria-label="Mi cuenta">{{ icon('user') }}</a>
     </header>
     <main class="portal-main-area mx-auto max-w-[90rem] p-4 sm:p-7 lg:p-8">

@@ -163,10 +163,10 @@ class AdminSecurityTestCase(unittest.TestCase):
         valid = self.client.post("/admin/business/create", data={"name": "Con Logo", "slug": "con-logo", "loyalty_type": "stamps", "stamps_reward_limit": "5", "logo_file": (io.BytesIO(PNG_1PX), "logo.png")}, content_type="multipart/form-data")
         self.assertEqual(valid.status_code, 201)
         created = valid.get_json()["business"]
-        self.assertTrue(created["logo_path"].startswith("uploads/"))
+        self.assertTrue(created["logo_path"].startswith(f"businesses/{created['id']}/logo/"))
         updated = self.client.post(f"/admin/business/{created['id']}/update", data={"cover_file": (io.BytesIO(PNG_1PX), "cover.png")}, content_type="multipart/form-data", headers={"Accept": "application/json"})
         self.assertEqual(updated.status_code, 200)
-        self.assertTrue(updated.get_json()["business"]["cover_path"].startswith("uploads/"))
+        self.assertTrue(updated.get_json()["business"]["cover_path"].startswith(f"businesses/{created['id']}/cover/"))
         public_page = self.client.get("/join/con-logo").get_data(as_text=True)
         self.assertIn(created["logo_path"], public_page)
         self.assertIn(updated.get_json()["business"]["cover_path"], public_page)
@@ -183,15 +183,19 @@ class AdminSecurityTestCase(unittest.TestCase):
         self.login()
         upload_dir = self.app.config["UPLOAD_FOLDER"]
         os.makedirs(upload_dir, exist_ok=True)
-        before = set(os.listdir(upload_dir))
+        list_files = lambda: {
+            os.path.relpath(os.path.join(root, name), upload_dir)
+            for root, _dirs, names in os.walk(upload_dir) for name in names
+        }
+        before = list_files()
         large_png = PNG_1PX + (b"0" * (5 * 1024 * 1024 - len(PNG_1PX)))
         accepted = self.client.post("/admin/business/create", data={"name": "Dos imágenes", "slug": "dos-imagenes", "logo_file": (io.BytesIO(large_png), "logo.png"), "cover_file": (io.BytesIO(large_png), "cover.png")}, content_type="multipart/form-data")
         self.assertEqual(accepted.status_code, 201)
-        after_success = set(os.listdir(upload_dir))
+        after_success = list_files()
         self.assertEqual(len(after_success - before), 2)
         rejected = self.client.post("/admin/business/create", data={"name": "Parcial", "slug": "parcial", "logo_file": (io.BytesIO(PNG_1PX), "logo.png"), "cover_file": (io.BytesIO(b"not an image"), "cover.png")}, content_type="multipart/form-data")
         self.assertEqual(rejected.status_code, 400)
-        self.assertEqual(set(os.listdir(upload_dir)), after_success)
+        self.assertEqual(list_files(), after_success)
 
     def test_loyalty_validation_for_create_and_update(self):
         self.login()

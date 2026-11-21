@@ -15,6 +15,8 @@ x-j2m-app: &j2m-app
     - no-new-privileges:true
   cap_drop:
     - ALL
+  volumes:
+    - j2m-media:/app/instance/media
   networks:
     - j2m-private
   logging:
@@ -86,3 +88,7 @@ services:
 networks:
   j2m-private:
     driver: bridge
+
+volumes:
+  j2m-media:
+    name: ${J2M_MEDIA_VOLUME:-j2m-selfhost-media}

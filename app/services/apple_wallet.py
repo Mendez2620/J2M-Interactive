@@ -20,6 +20,7 @@ from cryptography.hazmat.primitives.serialization import pkcs7
 import httpx
 
 from app.extensions import db
+from app.media_storage import MediaStorageError, get_media_storage, is_managed_media_key
 
 logger = logging.getLogger(__name__)
 
@@ -408,8 +409,8 @@ class AppleWalletService:
         pass_json_bytes = json.dumps(pass_dict, indent=2, ensure_ascii=False).encode("utf-8")
 
         business = customer.business
-        logo_asset = self._business_asset(business.logo_path, (320, 100), fit=False)
-        strip_asset = self._business_asset(business.cover_path, (750, 294), fit=True)
+        logo_asset = self._business_asset(business, business.logo_path, (320, 100), fit=False)
+        strip_asset = self._business_asset(business, business.cover_path, (750, 294), fit=True)
 
         # Required pass assets. Uploaded branding is converted to safe PNG data.
         assets = {
@@ -444,19 +445,26 @@ class AppleWalletService:
         return pkpass_buffer
 
     @staticmethod
-    def _business_asset(relative_path, size, fit):
+    def _business_asset(business, relative_path, size, fit):
         if not relative_path or not has_app_context():
             return None
-        configured_upload = current_app.config.get("UPLOAD_FOLDER")
-        if configured_upload and relative_path.startswith("uploads/"):
-            static_root = Path(configured_upload).resolve()
-            image_path = (static_root / Path(relative_path).name).resolve()
-        else:
-            static_root = Path(current_app.static_folder).resolve()
-            image_path = (static_root / relative_path).resolve()
         try:
-            image_path.relative_to(static_root)
-            with Image.open(image_path) as source:
+            if is_managed_media_key(relative_path):
+                source_data = io.BytesIO(get_media_storage().read_bytes(
+                    relative_path, expected_business_id=business.id,
+                ))
+                source_context = Image.open(source_data)
+            else:
+                configured_upload = current_app.config.get("UPLOAD_FOLDER")
+                if configured_upload and relative_path.startswith("uploads/"):
+                    static_root = Path(configured_upload).resolve()
+                    image_path = (static_root / Path(relative_path).name).resolve()
+                else:
+                    static_root = Path(current_app.static_folder).resolve()
+                    image_path = (static_root / relative_path).resolve()
+                image_path.relative_to(static_root)
+                source_context = Image.open(image_path)
+            with source_context as source:
                 image = source.convert("RGBA")
                 if fit:
                     image = ImageOps.fit(image, size, method=Image.Resampling.LANCZOS)
@@ -465,7 +473,7 @@ class AppleWalletService:
                 output = io.BytesIO()
                 image.save(output, format="PNG", optimize=True)
                 return output.getvalue()
-        except (FileNotFoundError, OSError, UnidentifiedImageError, ValueError):
+        except (FileNotFoundError, OSError, UnidentifiedImageError, ValueError, MediaStorageError):
             logger.warning("Could not load business branding asset: %s", relative_path)
             return None
 

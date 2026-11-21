@@ -9,7 +9,7 @@ import unittest
 from werkzeug.datastructures import FileStorage
 
 from app import create_app
-from app.routes.admin import persist_images
+from app.routes.admin import prepare_images
 from scripts.container_healthcheck import check_health
 
 
@@ -39,7 +39,7 @@ class StagingDeploymentTestCase(unittest.TestCase):
         app.config["UPLOAD_STORAGE_BACKEND"] = "disabled"
         upload = FileStorage(stream=io.BytesIO(b"not-written"), filename="logo.png")
         with app.app_context(), self.assertRaisesRegex(RuntimeError, "almacenamiento persistente"):
-            persist_images({"logo_file": upload, "cover_file": None})
+            prepare_images({"logo_file": upload, "cover_file": None})
 
     def test_railway_build_uses_gunicorn_port_and_readiness(self):
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")

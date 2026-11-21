@@ -15,6 +15,7 @@ from app.config import (
 )
 from app.extensions import db, migrate, cors
 from app.routes import register_routes
+from app.media_storage import branding_asset_url, build_media_storage
 
 
 def create_app(config_name=None):
@@ -123,7 +124,7 @@ def create_app(config_name=None):
             "UPLOAD_STORAGE_BACKEND", app.config.get("UPLOAD_STORAGE_BACKEND", "disabled")
         ).strip().lower()
         if upload_backend != "disabled":
-            raise RuntimeError("Producción requiere UPLOAD_STORAGE_BACKEND=disabled hasta disponer de almacenamiento persistente.")
+            raise RuntimeError("Producción requiere UPLOAD_STORAGE_BACKEND=disabled hasta aprobar almacenamiento persistente.")
         app.config["UPLOAD_STORAGE_BACKEND"] = upload_backend
         wallet_mode = os.getenv("GOOGLE_WALLET_MODE", app.config.get("GOOGLE_WALLET_MODE", "disabled")).lower()
         if wallet_mode not in {"disabled", "real"}:
@@ -151,6 +152,7 @@ def create_app(config_name=None):
                 raise RuntimeError("APPLE_PASS_AUTH_KEYS requiere claves independientes de al menos 32 caracteres.")
 
     # Initialize extensions
+    app.extensions["media_storage"] = build_media_storage(app.config)
     db.init_app(app)
     migrate.init_app(app, db)
     cors.init_app(app, resources={r"/api/*": {"origins": app.config.get("CORS_ORIGINS", "*")}})
@@ -169,6 +171,7 @@ def create_app(config_name=None):
     app.jinja_env.globals["csp_nonce"] = lambda: getattr(g, "csp_nonce", "")
     app.jinja_env.globals["icon"] = icon
     app.jinja_env.globals["contrast_text_color"] = contrast_text_color
+    app.jinja_env.globals["branding_asset_url"] = branding_asset_url
     app.jinja_env.globals["public_join_url"] = lambda slug: (
         f"{app.config.get('PUBLIC_BASE_URL') or request.url_root.rstrip('/')}"
         f"/join/{slug}"

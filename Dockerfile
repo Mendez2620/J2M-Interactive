@@ -22,6 +22,7 @@ COPY --from=assets /build/app/static/css/tailwind.min.css /app/app/static/css/ta
 
 RUN addgroup --system j2m \
     && adduser --system --ingroup j2m j2m \
+    && mkdir -p /app/instance/media \
     && chown -R j2m:j2m /app
 
 USER j2m

@@ -21,6 +21,7 @@ __pycache__
 *.py[cod]
 *.db
 *.sqlite*
+instance/
 tests
 docs
 certs

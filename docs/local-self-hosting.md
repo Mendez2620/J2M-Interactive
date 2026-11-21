@@ -10,14 +10,14 @@ La migración operativa desde Railway al host Windows quedó completada el 2026-
 - `APPLE_WALLET_MODE=disabled` y `GOOGLE_WALLET_MODE=disabled`. La operación local no emite ni sincroniza pases.
 - Railway web se conserva intacto mientras termina el periodo de prueba. El servicio del worker se conserva como configuración, pero no tiene un despliegue activo; no volver a iniciarlo mientras el worker local esté operativo.
 - Las tareas de respaldo horario, copia cifrada a Google Drive cada cuatro horas y restauración aislada semanal están habilitadas y sus ejecuciones reales verificadas terminaron con código `0`. Healthchecks.io observa las tareas, pero no decide su resultado.
-- Docker Desktop está configurado para iniciar con la sesión. La recuperación de contenedores está preparada, pero todavía falta validar un reinicio físico completo del host.
+- Docker Desktop está configurado para iniciar con la sesión. La recuperación automática de Docker, web, worker y Nginx fue validada tras reinicios completos del host; las tareas esperan de forma acotada a que Docker esté disponible.
 - La imagen que mantiene el stack local en ejecución está fijada como `j2m-interactive:e18f073bf479458fb03065810d1421d5cffe8373`. El pin se conserva en `.env.selfhost`; no depende de una variable temporal de PowerShell. Un despliegue posterior debe reemplazarlo únicamente por el SHA exacto de `origin/main` que se construya y apruebe.
 
 ## Estado y bloqueos del host
 
 La reinspección del 2026-11-17 confirmó Windows, WSL 3.0.5 con Ubuntu como distribución WSL2, 32 GB de RAM, hipervisor activo y más de 116 GB libres en C:. Docker Desktop 4.99.0, Engine/CLI 29.9.3 y Compose v5.7.0 funcionan con el contexto `desktop-linux`. El named pipe está fuera del sandbox de Codex, por lo que los comandos automatizados requieren la autorización normal para ejecutarse en el contexto del usuario; no se reinició Codex ni Windows.
 
-Windows Firewall y Microsoft Defender estaban habilitados, incluida la protección en tiempo real. La comprobación elevada indicó que C: no tiene un volumen BitLocker asociado; el disco no debe considerarse cifrado. El plan `Turbo` se ajustó para no suspender el equipo conectado a corriente; la suspensión en batería permanece en 240 segundos. El cambio debe confirmarse después de actualizaciones del fabricante y todavía falta probar un reinicio completo.
+Windows Firewall y Microsoft Defender están habilitados, incluida la protección en tiempo real. C: quedó cifrada al 100 % con protección BitLocker activa y la recuperación posterior al reinicio fue validada el 2026-11-21; el propietario confirmó la custodia externa de la clave de recuperación. El plan `Turbo` evita suspender el equipo conectado a corriente; la suspensión en batería permanece en 240 segundos. Estos estados deben volver a comprobarse después de actualizaciones de Windows, firmware o fabricante.
 
 `j2minteractive.com` no tenía registros DNS y el RDAP autoritativo de `.com` devolvió 404 durante la revisión. Esto indica que parecía no registrado en ese instante, pero **no reserva ni garantiza disponibilidad**: el propietario debe comprobarlo y registrarlo con un registrador antes de configurar Cloudflare. No se modificó DNS.
 
@@ -226,7 +226,7 @@ Si Railway suspende sus servicios, la operación local y Supabase continúan fun
 
 ## Límites pendientes
 
-- C: no usa BitLocker. La suspensión en corriente quedó deshabilitada; falta probar recuperación automática tras un reinicio real.
+- BitLocker y la recuperación automática tras reinicio están verificados. Sigue pendiente probar el comportamiento ante un apagón real y añadir continuidad eléctrica mediante UPS antes de considerar el host tolerante a cortes físicos.
 - No hay disco externo. Google Drive personal conserva copias cifradas y verificadas con una clave recuperable de forma portable, pero sigue siendo recomendable una copia física independiente.
 - Falta adquirir/controlar el dominio y crear el túnel; no existe token Cloudflare respaldado todavía.
 - La conectividad TLS, el respaldo real cifrado, la descarga externa y la restauración aislada fueron comprobados. No se ejecutaron migraciones remotas durante esas verificaciones.
