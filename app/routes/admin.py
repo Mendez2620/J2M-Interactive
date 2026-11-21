@@ -93,7 +93,13 @@ def validate_image(upload):
                     image.mode in {"RGBA", "LA"}
                     or (image.mode == "P" and "transparency" in image.info)
                 )
-                safe_image = image.copy()
+                target_mode = "RGBA" if preserve_alpha else "RGB"
+                decoded = image.convert(target_mode)
+                # Rebuild only from decoded pixels. Pillow image copies and
+                # conversions may retain ICC/EXIF in ``info``; a new image
+                # created from raw pixels has no ancillary metadata.
+                safe_image = Image.frombytes(target_mode, decoded.size, decoded.tobytes())
+                safe_image.info.clear()
     except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError, Image.DecompressionBombWarning):
         raise ValueError("El contenido del archivo no corresponde a una imagen válida.")
     detected_extension = ALLOWED_IMAGE_FORMATS.get(detected_format)
@@ -431,9 +437,10 @@ def create_business():
     created_files = []
     try:
         prepared_images = prepare_images(files) if files else {}
-    except (ValueError, MediaStorageError) as exc:
-        status = 503 if isinstance(exc, MediaStorageError) else 400
-        return jsonify({"status": "error", "message": str(exc)}), status
+    except ValueError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 400
+    except MediaStorageError:
+        return jsonify({"status": "error", "message": "No fue posible guardar las imágenes."}), 503
 
     business = Business(
         name=name,
@@ -649,7 +656,15 @@ def configure_business_referral_program(business_id):
 @platform_admin_required
 def update_business(business_id: int):
     """Updates general, wallet, or loyalty rules for a business."""
-    business = db.session.get(Business, business_id)
+    # PostgreSQL turns this into SELECT ... FOR UPDATE. The row lock is held
+    # until commit/rollback and serializes branding version changes across
+    # app instances before any current media path is read.
+    business = (
+        Business.query.filter_by(id=business_id)
+        .populate_existing()
+        .with_for_update()
+        .one_or_none()
+    )
     if not business:
         return jsonify({"status": "error", "message": "Negocio no encontrado"}), 404
 
@@ -727,10 +742,12 @@ def update_business(business_id: int):
             image_paths, created_files = persist_images(business.id, prepared_images)
             logo_path = image_paths.get("logo_file")
             cover_path = image_paths.get("cover_file")
-        except (ValueError, MediaStorageError, OSError) as exc:
+        except ValueError as exc:
             db.session.rollback()
-            status = 400 if isinstance(exc, ValueError) else 503
-            return jsonify({"status": "error", "message": str(exc)}), status
+            return jsonify({"status": "error", "message": str(exc)}), 400
+        except (MediaStorageError, OSError):
+            db.session.rollback()
+            return jsonify({"status": "error", "message": "No fue posible guardar las imágenes."}), 503
         if logo_path:
             business.logo_path = logo_path
             replaced_media.append(old_media["logo_file"])

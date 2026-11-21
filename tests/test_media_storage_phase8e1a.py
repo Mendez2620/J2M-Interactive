@@ -1,6 +1,8 @@
 import io
 import os
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import patch
 from pathlib import Path
@@ -13,6 +15,7 @@ from app.media_storage import LocalMediaStorage, MediaStorageError
 from app.models import Business, PlatformAdmin
 from app.services.apple_wallet import AppleWalletService
 from app.services.google_wallet import GoogleWalletService
+from app.config import TestingConfig
 
 
 def image_bytes(format_name="PNG", size=(4, 3)):
@@ -39,6 +42,29 @@ class FailingStorage:
 
     def read_bytes(self, *args, **kwargs):
         return self.delegate.read_bytes(*args, **kwargs)
+
+
+class BlockingFailRetainStorage:
+    """Fail one replacement while a competing request waits on the DB row."""
+
+    enabled = True
+    read_enabled = True
+
+    def __init__(self, delegate, entered, release):
+        self.delegate = delegate
+        self.entered = entered
+        self.release = release
+
+    def retain(self, *args, **kwargs):
+        if threading.current_thread().name == "failing-branding":
+            self.entered.set()
+            if not self.release.wait(5):
+                raise MediaStorageError("Tiempo de espera sintético.")
+            raise MediaStorageError(r"C:\private\host\media\must-not-leak.png")
+        return self.delegate.retain(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self.delegate, name)
 
 
 class PersistentMediaTestCase(unittest.TestCase):
@@ -201,6 +227,23 @@ class PersistentMediaTestCase(unittest.TestCase):
         )
         self.assertEqual(self.client.get(f"/media/{old_key}").status_code, 200)
 
+    def test_storage_error_never_discloses_internal_host_path(self):
+        response = self._create(logo_file=(io.BytesIO(image_bytes()), "brand.png"))
+        business = response.get_json()["business"]
+        with patch.object(
+            self.storage, "retain",
+            side_effect=MediaStorageError(r"C:\private\host\media\secret.png"),
+        ):
+            update = self.client.post(
+                f"/admin/business/{business['id']}/update",
+                data={"logo_file": (io.BytesIO(image_bytes(size=(2, 2))), "brand.png")},
+                content_type="multipart/form-data", headers={"Accept": "application/json"},
+            )
+        self.assertEqual(update.status_code, 503)
+        body = update.get_data(as_text=True).lower()
+        self.assertNotIn("private", body)
+        self.assertNotIn("secret.png", body)
+
     def test_existing_google_wallet_image_survives_save_before_publication(self):
         response = self._create(logo_file=(io.BytesIO(image_bytes()), "brand.png"))
         business_id = response.get_json()["business"]["id"]
@@ -231,29 +274,31 @@ class PersistentMediaTestCase(unittest.TestCase):
         self.assertEqual(blocked.status_code, 503)
 
     def test_metadata_is_removed_transparency_preserved_and_final_size_limited(self):
-        source = io.BytesIO()
-        exif = Image.Exif()
-        exif[0x010E] = "private-description"
-        Image.new("RGB", (8, 8), "red").save(
-            source, format="JPEG", exif=exif, icc_profile=b"private-icc-profile",
-        )
-        response = self._create(
-            slug="metadata", logo_file=(io.BytesIO(source.getvalue()), "brand.jpg"),
-        )
-        self.assertEqual(response.status_code, 201)
-        key = response.get_json()["business"]["logo_path"]
-        with Image.open(io.BytesIO(self.storage.read_bytes(key))) as normalized:
-            self.assertEqual(len(normalized.getexif()), 0)
-            self.assertNotIn("icc_profile", normalized.info)
-
-        transparent = io.BytesIO()
-        Image.new("RGBA", (2, 2), (1, 2, 3, 17)).save(transparent, format="PNG")
-        alpha_response = self._create(
-            slug="alpha", logo_file=(io.BytesIO(transparent.getvalue()), "brand.png"),
-        )
-        alpha_key = alpha_response.get_json()["business"]["logo_path"]
-        with Image.open(io.BytesIO(self.storage.read_bytes(alpha_key))) as normalized:
-            self.assertEqual(normalized.convert("RGBA").getpixel((0, 0))[3], 17)
+        for index, (format_name, extension, has_alpha) in enumerate((
+            ("JPEG", "jpg", False), ("PNG", "png", True), ("WEBP", "webp", True),
+        )):
+            with self.subTest(format=format_name):
+                source = io.BytesIO()
+                exif = Image.Exif()
+                exif[0x010E] = "private-description"
+                mode = "RGBA" if has_alpha else "RGB"
+                color = (1, 2, 3, 17) if has_alpha else (1, 2, 3)
+                Image.new(mode, (8, 8), color).save(
+                    source, format=format_name, exif=exif,
+                    icc_profile=b"private-icc-profile",
+                )
+                response = self._create(
+                    slug=f"metadata-{index}",
+                    logo_file=(io.BytesIO(source.getvalue()), f"brand.{extension}"),
+                )
+                self.assertEqual(response.status_code, 201)
+                key = response.get_json()["business"]["logo_path"]
+                with Image.open(io.BytesIO(self.storage.read_bytes(key))) as normalized:
+                    self.assertEqual(len(normalized.getexif()), 0)
+                    self.assertNotIn("exif", normalized.info)
+                    self.assertNotIn("icc_profile", normalized.info)
+                    if has_alpha:
+                        self.assertEqual(normalized.convert("RGBA").getpixel((0, 0))[3], 17)
 
         self.app.config["MAX_NORMALIZED_IMAGE_BYTES"] = 32
         final_too_large = self._create(
@@ -261,6 +306,82 @@ class PersistentMediaTestCase(unittest.TestCase):
             logo_file=(io.BytesIO(image_bytes()), "brand.png"),
         )
         self.assertEqual(final_too_large.status_code, 400)
+
+    @unittest.skipUnless(os.getenv("TEST_POSTGRES_URL"), "PostgreSQL efímero no disponible")
+    def test_concurrent_replacements_serialize_and_failed_request_cannot_remove_retention(self):
+        postgres_url = os.environ["TEST_POSTGRES_URL"]
+        with tempfile.TemporaryDirectory() as media_root, \
+             patch.object(TestingConfig, "SQLALCHEMY_DATABASE_URI", postgres_url):
+            app = create_app("testing")
+            app.config.update(
+                MEDIA_STORAGE_ROOT=media_root, MEDIA_STORAGE_BACKEND="local",
+                UPLOAD_STORAGE_BACKEND="local", PUBLIC_BASE_URL="https://media.example.test",
+            )
+            storage = LocalMediaStorage(media_root)
+            entered = threading.Event()
+            release = threading.Event()
+            app.extensions["media_storage"] = BlockingFailRetainStorage(storage, entered, release)
+            with app.app_context():
+                db.session.remove()
+                db.drop_all()
+                db.create_all()
+                business = Business(name="Concurrent Media", slug="concurrent-media")
+                admin = PlatformAdmin(name="Admin", email="concurrent-media@example.test", is_active=True)
+                admin.set_password("AdminSeguro123")
+                db.session.add_all([business, admin])
+                db.session.flush()
+                old_key = storage.save(business.id, "logo", image_bytes(), "png")
+                business.logo_path = old_key
+                db.session.commit()
+                business_id, admin_id = business.id, admin.id
+
+            results = {}
+            completed_success = threading.Event()
+
+            def replace(name, size):
+                client = app.test_client()
+                with client.session_transaction() as session:
+                    session["platform_admin_id"] = admin_id
+                response = client.post(
+                    f"/admin/business/{business_id}/update",
+                    data={"logo_file": (io.BytesIO(image_bytes(size=size)), "brand.png")},
+                    content_type="multipart/form-data", headers={"Accept": "application/json"},
+                )
+                results[name] = (response.status_code, response.get_data(as_text=True))
+                if name == "success":
+                    completed_success.set()
+
+            failing = threading.Thread(
+                target=replace, args=("failure", (2, 2)), name="failing-branding",
+            )
+            succeeding = threading.Thread(
+                target=replace, args=("success", (3, 3)), name="successful-branding",
+            )
+            failing.start()
+            self.assertTrue(entered.wait(5))
+            succeeding.start()
+            time.sleep(0.2)
+            self.assertFalse(completed_success.is_set(), "La segunda solicitud no esperó el lock PostgreSQL")
+            release.set()
+            failing.join(10)
+            succeeding.join(10)
+            self.assertFalse(failing.is_alive())
+            self.assertFalse(succeeding.is_alive())
+            self.assertEqual(results["failure"][0], 503)
+            self.assertNotIn("private", results["failure"][1].lower())
+            self.assertEqual(results["success"][0], 200)
+
+            with app.app_context():
+                db.session.remove()
+                current = db.session.get(Business, business_id)
+                current_key = current.logo_path
+                self.assertNotEqual(current_key, old_key)
+                self.assertEqual(current.wallet_design_version, 2)
+                self.assertTrue(storage.is_retained(old_key, business_id))
+                self.assertTrue(storage.read_bytes(old_key, business_id))
+                self.assertTrue(storage.read_bytes(current_key, business_id))
+                db.session.remove()
+                db.drop_all()
 
     def test_storage_survives_adapter_recreation_and_wallet_consumers(self):
         key = self.storage.save(self.business.id, "logo", image_bytes(), "png")

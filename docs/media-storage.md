@@ -36,6 +36,8 @@ Las rutas históricas `uploads/<archivo>` continúan resolviéndose desde `/stat
 - La escritura usa un temporal en el mismo directorio, `fsync` y reemplazo atómico.
 - Un lote se valida por completo antes de escribir. Si falla una escritura o la transacción, se retiran solo los objetos nuevos administrados.
 - Al sustituir una imagen administrada, la anterior recibe dentro de la misma operación un marcador privado de retención ligado al negocio y a la versión de diseño que la sustituyó. Guardar branding no encola ni confirma una publicación Wallet y, por ello, no elimina la URL anterior.
+- La actualización bloquea transaccionalmente la fila del negocio (`SELECT ... FOR UPDATE` en PostgreSQL) antes de leer las rutas vigentes. Dos sustituciones del mismo tenant se serializan; el rollback de una no puede retirar el marcador creado por otra ni perder incrementos de versión.
+- Los errores públicos de almacenamiento son genéricos; las rutas internas del host nunca forman parte de la respuesta.
 
 Google Wallet recibe una URL absoluta `https://<origen>/media/<clave>`. Apple Wallet lee el mismo objeto desde el adapter al generar el pase. Ambos conservan sus identificadores, barcode, saldos y módulos existentes. El origen público debe ser HTTPS estable antes de activar este backend; el HTTPS local no es consumible por Wallet.
 
