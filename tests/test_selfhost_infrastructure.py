@@ -722,6 +722,16 @@ class SelfHostInfrastructureTestCase(unittest.TestCase):
         runtime = (ROOT / "scripts" / "selfhost_task_runtime.ps1").read_text(encoding="utf-8")
         self.assertIn("Send-J2MHealthcheck", runtime)
         self.assertIn("Enter-J2MSelfHostTaskGuard", runtime)
+        self.assertIn("Wait-J2MDockerReady", runtime)
+        self.assertIn('info --format', runtime)
+        self.assertIn("docker_unavailable", runtime)
+        self.assertIn("docker_probe_timeout", runtime)
+        self.assertIn("docker_recovered", runtime)
+        self.assertIn("docker_timeout", runtime)
+        self.assertIn("$Process.Kill()", runtime)
+        self.assertNotIn("$process.WaitForExit()", runtime)
+        self.assertNotIn("GetAwaiter().GetResult()", runtime)
+        self.assertIn("Never target Docker Desktop", runtime)
         self.assertIn("Local\\J2M-SelfHost-Backup-Operations", runtime)
         self.assertIn("$global:LASTEXITCODE = $previousExitCode", runtime)
         self.assertIn("Send-J2MHealthcheck database_hourly start", runner)
@@ -729,6 +739,14 @@ class SelfHostInfrastructureTestCase(unittest.TestCase):
         self.assertIn("Send-J2MHealthcheck database_hourly fail", runner)
         self.assertIn("Send-J2MHealthcheck cloud_four_hour success", cloud)
         self.assertIn("Send-J2MHealthcheck restore_weekly success", restore)
+        self.assertIn("Wait-J2MDockerReady -LogPath $runtimeLog", runner)
+        self.assertIn("Wait-J2MDockerReady -LogPath $runtimeLog", restore)
+        self.assertNotIn("Wait-J2MDockerReady", cloud)
+        self.assertLess(runner.index("Enter-J2MSelfHostTaskGuard"), runner.index("Wait-J2MDockerReady"))
+        self.assertLess(runner.index("Send-J2MHealthcheck database_hourly start"), runner.index("Wait-J2MDockerReady"))
+        self.assertLess(runner.index("Wait-J2MDockerReady"), runner.index("database --env-file"))
+        self.assertLess(restore.index("Enter-J2MSelfHostTaskGuard"), restore.index("Wait-J2MDockerReady"))
+        self.assertLess(restore.index("Wait-J2MDockerReady"), restore.index("restore-isolated"))
         for task_runner in (runner, cloud, restore):
             self.assertIn("Enter-J2MSelfHostTaskGuard", task_runner)
             self.assertIn("Exit-J2MSelfHostTaskGuard", task_runner)
@@ -777,6 +795,102 @@ class SelfHostInfrastructureTestCase(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.strip(), "continued")
         self.assertNotIn("synthetic monitor failure", result.stderr)
+
+    @unittest.skipUnless(os.name == "nt", "PowerShell integration only runs on Windows")
+    def test_docker_readiness_retries_then_records_recovery(self):
+        runtime = str(ROOT / "scripts" / "selfhost_task_runtime.ps1")
+        with tempfile.TemporaryDirectory() as temporary:
+            log = str(Path(temporary) / "runtime.jsonl")
+            command = (
+                f". '{runtime}'; $script:checks=0; "
+                "function Test-J2MDockerEngine { param($TimeoutSeconds); $script:checks += 1; "
+                "if ($script:checks -ge 3) { return 'ready' }; return 'unavailable' }; "
+                f"Wait-J2MDockerReady -LogPath '{log}' -MaxWaitSeconds 2 -RetryIntervalSeconds 0.05; "
+                "Write-Output ('checks=' + $script:checks)"
+            )
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command],
+                capture_output=True, text=True, timeout=10, cwd=ROOT,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("checks=3", result.stdout)
+            events = [json.loads(line) for line in Path(log).read_text(encoding="utf-8-sig").splitlines()]
+            self.assertEqual([event["event"] for event in events], [
+                "docker_unavailable", "docker_unavailable", "docker_recovered",
+            ])
+            self.assertEqual([event["status"] for event in events], ["retry", "retry", "ok"])
+            self.assertEqual(events[-1]["attempt"], 3)
+
+    @unittest.skipUnless(os.name == "nt", "PowerShell integration only runs on Windows")
+    def test_docker_readiness_times_out_with_a_sanitized_event(self):
+        runtime = str(ROOT / "scripts" / "selfhost_task_runtime.ps1")
+        with tempfile.TemporaryDirectory() as temporary:
+            log = str(Path(temporary) / "runtime.jsonl")
+            command = (
+                f". '{runtime}'; function Test-J2MDockerEngine {{ param($TimeoutSeconds); return 'unavailable' }}; "
+                f"try {{ Wait-J2MDockerReady -LogPath '{log}' -MaxWaitSeconds 0.15 "
+                "-RetryIntervalSeconds 0.04; exit 7 } catch { Write-Output timeout }"
+            )
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command],
+                capture_output=True, text=True, timeout=10, cwd=ROOT,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(result.stdout.strip(), "timeout")
+            events = [json.loads(line) for line in Path(log).read_text(encoding="utf-8-sig").splitlines()]
+            self.assertEqual(events[-1]["event"], "docker_timeout")
+            self.assertEqual(events[-1]["status"], "error")
+            self.assertTrue(all(set(event) == {"timestamp", "event", "status", "attempt"} for event in events))
+
+    @unittest.skipUnless(os.name == "nt", "PowerShell integration only runs on Windows")
+    def test_blocked_docker_probe_kills_only_the_probe_process(self):
+        runtime = str(ROOT / "scripts" / "selfhost_task_runtime.ps1")
+        with tempfile.TemporaryDirectory() as temporary:
+            pid_file = Path(temporary) / "probe.pid"
+            child_command = f"$PID | Set-Content -LiteralPath '{pid_file}' -Encoding ascii; Start-Sleep -Seconds 30"
+            encoded = __import__("base64").b64encode(child_command.encode("utf-16-le")).decode("ascii")
+            command = (
+                f". '{runtime}'; $status=Invoke-J2MProcessWithTimeout -FileName 'powershell.exe' "
+                f"-Arguments '-NoProfile -NonInteractive -EncodedCommand {encoded}' -TimeoutSeconds 2; "
+                "Write-Output ('status=' + $status)"
+            )
+            started = time.monotonic()
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command],
+                capture_output=True, text=True, timeout=10, cwd=ROOT,
+            )
+            elapsed = time.monotonic() - started
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(result.stdout.strip(), "status=timeout")
+            self.assertLess(elapsed, 8)
+            probe_pid = int(pid_file.read_text(encoding="ascii").strip())
+            alive = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", f"Get-Process -Id {probe_pid}"],
+                capture_output=True, text=True, timeout=5,
+            )
+            self.assertNotEqual(alive.returncode, 0, alive.stdout + alive.stderr)
+
+    @unittest.skipUnless(os.name == "nt", "PowerShell integration only runs on Windows")
+    def test_probe_cleanup_uses_only_a_bounded_wait(self):
+        runtime = str(ROOT / "scripts" / "selfhost_task_runtime.ps1")
+        command = (
+            f". '{runtime}'; "
+            "$fake=[pscustomobject]@{ Killed=$false; WaitMilliseconds=0 }; "
+            "$fake | Add-Member ScriptMethod Kill { $this.Killed=$true }; "
+            "$fake | Add-Member ScriptMethod WaitForExit { param($milliseconds) "
+            "$this.WaitMilliseconds=$milliseconds; Start-Sleep -Milliseconds 50; return $false }; "
+            "$result=Stop-J2MProbeProcess -Process $fake -TimeoutMilliseconds 75; "
+            "Write-Output ('killed=' + $fake.Killed + ';wait=' + $fake.WaitMilliseconds + ';result=' + $result)"
+        )
+        started = time.monotonic()
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command],
+            capture_output=True, text=True, timeout=5, cwd=ROOT,
+        )
+        elapsed = time.monotonic() - started
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), "killed=True;wait=75;result=False")
+        self.assertLess(elapsed, 2)
 
     @unittest.skipUnless(os.name == "nt", "PowerShell integration only runs on Windows")
     def test_task_guard_serializes_different_scheduled_runners(self):
