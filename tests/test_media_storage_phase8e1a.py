@@ -44,24 +44,32 @@ class FailingStorage:
         return self.delegate.read_bytes(*args, **kwargs)
 
 
-class BlockingFailRetainStorage:
-    """Fail one replacement while a competing request waits on the DB row."""
+class ConcurrentRetentionStorage:
+    """Coordinate a post-retention commit failure with a competing request."""
 
     enabled = True
     read_enabled = True
 
-    def __init__(self, delegate, entered, release):
+    def __init__(self, delegate, retained, allow_failure, success_completed, release_called):
         self.delegate = delegate
-        self.entered = entered
-        self.release = release
+        self.retained = retained
+        self.allow_failure = allow_failure
+        self.success_completed = success_completed
+        self.release_called = release_called
 
     def retain(self, *args, **kwargs):
+        result = self.delegate.retain(*args, **kwargs)
         if threading.current_thread().name == "failing-branding":
-            self.entered.set()
-            if not self.release.wait(5):
+            self.retained.set()
+            if not self.allow_failure.wait(5):
                 raise MediaStorageError("Tiempo de espera sintético.")
-            raise MediaStorageError(r"C:\private\host\media\must-not-leak.png")
-        return self.delegate.retain(*args, **kwargs)
+        return result
+
+    def release_retention(self, *args, **kwargs):
+        self.release_called.set()
+        if threading.current_thread().name == "failing-branding":
+            self.success_completed.wait(5)
+        return self.delegate.release_retention(*args, **kwargs)
 
     def __getattr__(self, name):
         return getattr(self.delegate, name)
@@ -185,7 +193,7 @@ class PersistentMediaTestCase(unittest.TestCase):
         ]
         self.assertEqual(remaining_files, [])
 
-    def test_update_rollback_removes_new_asset_and_retention_marker(self):
+    def test_update_rollback_removes_new_asset_but_conserves_safe_retention(self):
         response = self._create(logo_file=(io.BytesIO(image_bytes()), "brand.png"))
         business = response.get_json()["business"]
         old_key = business["logo_path"]
@@ -198,7 +206,9 @@ class PersistentMediaTestCase(unittest.TestCase):
         self.assertEqual(update.status_code, 500)
         db.session.expire_all()
         self.assertEqual(db.session.get(Business, business["id"]).logo_path, old_key)
-        self.assertIsNone(self.storage.retention_metadata(old_key, business["id"]))
+        marker = self.storage.retention_metadata(old_key, business["id"])
+        self.assertEqual(marker["business_id"], business["id"])
+        self.assertEqual(self.client.get(f"/media/{old_key}").status_code, 200)
         files = [
             path for root, _dirs, names in os.walk(self.temp_dir.name)
             for name in names if not name.endswith(".json")
@@ -320,9 +330,13 @@ class PersistentMediaTestCase(unittest.TestCase):
                 UPLOAD_STORAGE_BACKEND="local", PUBLIC_BASE_URL="https://media.example.test",
             )
             storage = LocalMediaStorage(media_root)
-            entered = threading.Event()
-            release = threading.Event()
-            app.extensions["media_storage"] = BlockingFailRetainStorage(storage, entered, release)
+            retained = threading.Event()
+            allow_failure = threading.Event()
+            completed_success = threading.Event()
+            release_called = threading.Event()
+            app.extensions["media_storage"] = ConcurrentRetentionStorage(
+                storage, retained, allow_failure, completed_success, release_called,
+            )
             with app.app_context():
                 db.session.remove()
                 db.drop_all()
@@ -338,8 +352,6 @@ class PersistentMediaTestCase(unittest.TestCase):
                 business_id, admin_id = business.id, admin.id
 
             results = {}
-            completed_success = threading.Event()
-
             def replace(name, size):
                 client = app.test_client()
                 with client.session_transaction() as session:
@@ -353,25 +365,29 @@ class PersistentMediaTestCase(unittest.TestCase):
                 if name == "success":
                     completed_success.set()
 
-            failing = threading.Thread(
-                target=replace, args=("failure", (2, 2)), name="failing-branding",
-            )
-            succeeding = threading.Thread(
-                target=replace, args=("success", (3, 3)), name="successful-branding",
-            )
-            failing.start()
-            self.assertTrue(entered.wait(5))
-            succeeding.start()
-            time.sleep(0.2)
-            self.assertFalse(completed_success.is_set(), "La segunda solicitud no esperó el lock PostgreSQL")
-            release.set()
-            failing.join(10)
-            succeeding.join(10)
+            real_commit = db.session.commit
+
+            def controlled_commit():
+                if threading.current_thread().name == "failing-branding":
+                    raise RuntimeError("synthetic post-retention commit failure")
+                return real_commit()
+
+            failing = threading.Thread(target=replace, args=("failure", (2, 2)), name="failing-branding")
+            succeeding = threading.Thread(target=replace, args=("success", (3, 3)), name="successful-branding")
+            with patch.object(db.session, "commit", side_effect=controlled_commit):
+                failing.start()
+                self.assertTrue(retained.wait(5))
+                succeeding.start()
+                time.sleep(0.2)
+                self.assertFalse(completed_success.is_set(), "La segunda solicitud no esperó el lock PostgreSQL")
+                allow_failure.set()
+                failing.join(10)
+                succeeding.join(10)
             self.assertFalse(failing.is_alive())
             self.assertFalse(succeeding.is_alive())
-            self.assertEqual(results["failure"][0], 503)
-            self.assertNotIn("private", results["failure"][1].lower())
+            self.assertEqual(results["failure"][0], 500)
             self.assertEqual(results["success"][0], 200)
+            self.assertFalse(release_called.is_set(), "Un rollback no debe eliminar retenciones")
 
             with app.app_context():
                 db.session.remove()
@@ -382,6 +398,9 @@ class PersistentMediaTestCase(unittest.TestCase):
                 self.assertTrue(storage.is_retained(old_key, business_id))
                 self.assertTrue(storage.read_bytes(old_key, business_id))
                 self.assertTrue(storage.read_bytes(current_key, business_id))
+                client = app.test_client()
+                self.assertEqual(client.get(f"/media/{old_key}").status_code, 200)
+                self.assertEqual(client.get(f"/media/{current_key}").status_code, 200)
                 db.session.remove()
                 db.drop_all()
 

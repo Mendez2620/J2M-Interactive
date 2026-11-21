@@ -167,14 +167,6 @@ def cleanup_created_files(paths):
             current_app.logger.warning("No se pudo limpiar un recurso de branding huérfano.")
 
 
-def release_retained_media(keys, business_id):
-    for key in keys:
-        try:
-            get_media_storage().release_retention(key, business_id)
-        except (MediaStorageError, OSError):
-            current_app.logger.warning("No se pudo revertir un marcador de retención.")
-
-
 def parse_loyalty(data, current=None):
     loyalty_type = (data.get("loyalty_type") or (current.loyalty_type if current else "stamps")).strip().lower()
     if loyalty_type not in {"stamps", "points"}:
@@ -758,7 +750,6 @@ def update_business(business_id: int):
     if _wallet_design_state(business) != wallet_state_before:
         business.wallet_design_version = (business.wallet_design_version or 1) + 1
 
-    retained_media = []
     try:
         for old_key in replaced_media:
             if is_managed_media_key(old_key):
@@ -766,22 +757,18 @@ def update_business(business_id: int):
                     old_key, expected_business_id=business.id,
                     superseded_by_design_version=business.wallet_design_version,
                 )
-                retained_media.append(old_key)
         db.session.commit()
     except IntegrityError:
         db.session.rollback()
         cleanup_created_files(locals().get("created_files", []))
-        release_retained_media(retained_media, business.id)
         return jsonify({"status": "error", "message": "El nombre o slug del negocio entra en conflicto con un registro existente."}), 409
     except (MediaStorageError, OSError):
         db.session.rollback()
         cleanup_created_files(locals().get("created_files", []))
-        release_retained_media(retained_media, business.id)
         return jsonify({"status": "error", "message": "No fue posible conservar la versión anterior de las imágenes."}), 503
     except Exception as exc:
         db.session.rollback()
         cleanup_created_files(locals().get("created_files", []))
-        release_retained_media(retained_media, business.id)
         current_app.logger.error("No se pudo actualizar el negocio (%s).", type(exc).__name__)
         return jsonify({"status": "error", "message": "No fue posible actualizar el negocio."}), 500
 
