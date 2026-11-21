@@ -5,7 +5,7 @@
 <main class="min-h-screen grid place-items-center px-4 py-8" style="background:linear-gradient(135deg,{{ business.primary_color }}18,#fff)">
   <section class="w-full max-w-md rounded-3xl bg-white border border-slate-100 shadow-xl p-6 sm:p-8" aria-live="polite">
     <header class="text-center mb-6">
-      {% if business.logo_path or business.logo_url %}<img class="mx-auto h-20 w-auto rounded-2xl object-contain" src="{{ url_for('static', filename=business.logo_path) if business.logo_path else business.logo_url }}" alt="Logo de {{ business.name }}">{% else %}<div class="mx-auto h-16 w-16 rounded-2xl grid place-items-center text-white text-xl font-bold" style="background:{{ business.primary_color }}">{{ business.name[:2].upper() }}</div>{% endif %}
+      {% if business.logo_path or business.logo_url %}<img class="mx-auto h-20 w-auto rounded-2xl object-contain" src="{{ branding_asset_url(business.logo_path) if business.logo_path else business.logo_url }}" alt="Logo de {{ business.name }}">{% else %}<div class="mx-auto h-16 w-16 rounded-2xl grid place-items-center text-white text-xl font-bold" style="background:{{ business.primary_color }}">{{ business.name[:2].upper() }}</div>{% endif %}
       <h1 class="mt-4 text-2xl font-extrabold">Recupera tu tarjeta</h1>
       <p class="text-sm text-slate-500 mt-1">{{ business.name }}</p>
     </header>

@@ -2,9 +2,7 @@ from datetime import date, datetime
 from flask import Blueprint, jsonify, render_template, request, send_file, redirect, current_app
 from io import BytesIO
 import math
-import os
 import re
-import uuid
 import unicodedata
 import warnings
 from urllib.parse import urlparse
@@ -12,8 +10,8 @@ from PIL import Image, UnidentifiedImageError
 from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import joinedload
-from werkzeug.utils import secure_filename
 from app.extensions import db
+from app.media_storage import MediaStorageError, get_media_storage, is_managed_media_key
 from app.models import (
     Business, BusinessCategory, Customer, PlatformAdmin, ReferralAttribution,
     ReferralEligibility, ReferralParticipant,
@@ -65,11 +63,11 @@ def _wallet_design_state(business):
 
 
 def validate_image(upload):
-    """Fully decode an uploaded image with Pillow and return safe in-memory data."""
+    """Decode and re-encode an upload, stripping metadata and trailing payloads."""
     if not upload or not upload.filename:
         return None
-    safe_name = secure_filename(upload.filename)
-    extension = safe_name.rsplit(".", 1)[-1].lower() if "." in safe_name else ""
+    filename = str(upload.filename)
+    extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     if extension == "jpeg":
         extension = "jpg"
     if extension not in set(ALLOWED_IMAGE_FORMATS.values()):
@@ -82,56 +80,91 @@ def validate_image(upload):
             warnings.simplefilter("error", Image.DecompressionBombWarning)
             with Image.open(BytesIO(content)) as image:
                 detected_format = image.format
-                image.verify()
-            with Image.open(BytesIO(content)) as image:
+                if getattr(image, "n_frames", 1) != 1:
+                    raise ValueError
+                width, height = image.size
+                if (width <= 0 or height <= 0
+                        or width > current_app.config["MAX_IMAGE_WIDTH"]
+                        or height > current_app.config["MAX_IMAGE_HEIGHT"]
+                        or width * height > current_app.config["MAX_IMAGE_PIXELS"]):
+                    raise ValueError
                 image.load()
+                preserve_alpha = (
+                    image.mode in {"RGBA", "LA"}
+                    or (image.mode == "P" and "transparency" in image.info)
+                )
+                target_mode = "RGBA" if preserve_alpha else "RGB"
+                decoded = image.convert(target_mode)
+                # Rebuild only from decoded pixels. Pillow image copies and
+                # conversions may retain ICC/EXIF in ``info``; a new image
+                # created from raw pixels has no ancillary metadata.
+                safe_image = Image.frombytes(target_mode, decoded.size, decoded.tobytes())
+                safe_image.info.clear()
     except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError, Image.DecompressionBombWarning):
         raise ValueError("El contenido del archivo no corresponde a una imagen válida.")
     detected_extension = ALLOWED_IMAGE_FORMATS.get(detected_format)
     if detected_extension != extension:
         raise ValueError("La extensión no coincide con el formato real de la imagen.")
-    return content, extension
+    normalized = BytesIO()
+    try:
+        if extension == "jpg":
+            safe_image.convert("RGB").save(normalized, format="JPEG", quality=90, optimize=True)
+        elif extension == "png":
+            safe_image.convert("RGBA" if preserve_alpha else "RGB").save(
+                normalized, format="PNG", optimize=True,
+            )
+        else:
+            safe_image.convert("RGBA" if preserve_alpha else "RGB").save(
+                normalized, format="WEBP", quality=90, method=6,
+            )
+    except (OSError, ValueError):
+        raise ValueError("No fue posible normalizar la imagen de forma segura.") from None
+    normalized_content = normalized.getvalue()
+    if len(normalized_content) > current_app.config["MAX_NORMALIZED_IMAGE_BYTES"]:
+        raise ValueError("La imagen normalizada debe pesar 5 MB o menos.")
+    return normalized_content, extension
 
 
-def persist_images(files):
-    """Validate the whole batch before writing, preventing partial orphan files."""
+def prepare_images(files):
+    """Validate the complete batch before any persistent write."""
     has_uploads = any(files.get(field) and files.get(field).filename for field in ("logo_file", "cover_file"))
-    if has_uploads and current_app.config.get("UPLOAD_STORAGE_BACKEND", "local") != "local":
-        raise RuntimeError("Las subidas están deshabilitadas hasta configurar almacenamiento persistente.")
-    prepared = {
+    configured = current_app.config.get("UPLOAD_STORAGE_BACKEND", "disabled") == "local"
+    if has_uploads and (not configured or not get_media_storage().enabled):
+        raise MediaStorageError("Las subidas están deshabilitadas hasta configurar almacenamiento persistente.")
+    return {
         field: validate_image(files.get(field))
         for field in ("logo_file", "cover_file")
     }
-    upload_dir = current_app.config.get("UPLOAD_FOLDER")
-    if not upload_dir:
-        upload_dir = os.path.join(current_app.root_path, "static", "uploads")
-    os.makedirs(upload_dir, exist_ok=True)
+
+
+def persist_images(business_id, prepared):
+    """Persist a validated batch atomically per file and clean partial results."""
+    storage = get_media_storage()
     paths = {}
-    created_files = []
+    created_keys = []
     try:
         for field, prepared_image in prepared.items():
             if not prepared_image:
                 paths[field] = None
                 continue
             content, extension = prepared_image
-            filename = f"{uuid.uuid4().hex}.{extension}"
-            absolute_path = os.path.join(upload_dir, filename)
-            with open(absolute_path, "xb") as image_file:
-                image_file.write(content)
-            created_files.append(absolute_path)
-            paths[field] = f"uploads/{filename}"
+            kind = "logo" if field == "logo_file" else "cover"
+            key = storage.save(business_id, kind, content, extension)
+            created_keys.append(key)
+            paths[field] = key
     except Exception:
-        cleanup_created_files(created_files)
+        cleanup_created_files(created_keys)
         raise
-    return paths, created_files
+    return paths, created_keys
 
 
 def cleanup_created_files(paths):
-    for path in paths:
+    storage = get_media_storage()
+    for key in paths:
         try:
-            os.remove(path)
-        except FileNotFoundError:
-            pass
+            storage.delete(key)
+        except (MediaStorageError, OSError):
+            current_app.logger.warning("No se pudo limpiar un recurso de branding huérfano.")
 
 
 def parse_loyalty(data, current=None):
@@ -350,7 +383,7 @@ def dashboard():
         current_search=search,
         current_category=category_id,
         platform_admins=PlatformAdmin.query.order_by(PlatformAdmin.name).all(),
-        uploads_enabled=current_app.config.get("UPLOAD_STORAGE_BACKEND", "local") == "local",
+        uploads_enabled=(current_app.config.get("UPLOAD_STORAGE_BACKEND") == "local" and get_media_storage().enabled),
         wallet_sync=wallet_sync,
     )
 
@@ -395,20 +428,19 @@ def create_business():
 
     created_files = []
     try:
-        image_paths, created_files = persist_images(files) if files else ({}, [])
-        logo_path = image_paths.get("logo_file")
-        cover_path = image_paths.get("cover_file")
-    except (ValueError, RuntimeError) as exc:
-        status = 503 if isinstance(exc, RuntimeError) else 400
-        return jsonify({"status": "error", "message": str(exc)}), status
+        prepared_images = prepare_images(files) if files else {}
+    except ValueError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 400
+    except MediaStorageError:
+        return jsonify({"status": "error", "message": "No fue posible guardar las imágenes."}), 503
 
     business = Business(
         name=name,
         slug=slug,
         category_id=category_id,
         logo_url=logo_url,
-        logo_path=logo_path,
-        cover_path=cover_path,
+        logo_path=None,
+        cover_path=None,
         primary_color=visual["primary_color"],
         secondary_color=visual["secondary_color"],
         visual_theme=visual["visual_theme"],
@@ -426,12 +458,20 @@ def create_business():
     )
     try:
         db.session.add(business)
+        db.session.flush()
+        image_paths, created_files = persist_images(business.id, prepared_images)
+        business.logo_path = image_paths.get("logo_file")
+        business.cover_path = image_paths.get("cover_file")
         db.session.commit()
     except IntegrityError:
         db.session.rollback()
         cleanup_created_files(created_files)
         current_app.logger.warning("No se pudo crear el negocio por un conflicto de integridad.")
         return jsonify({"status": "error", "message": "El nombre o slug del negocio entra en conflicto con un registro existente."}), 409
+    except (MediaStorageError, OSError):
+        db.session.rollback()
+        cleanup_created_files(created_files)
+        return jsonify({"status": "error", "message": "No fue posible guardar las imágenes."}), 503
     except Exception as exc:
         db.session.rollback()
         cleanup_created_files(created_files)
@@ -564,7 +604,7 @@ def get_business_details(business_id: int):
         transactions=transactions,
         staff_members=staff_members,
         total_volume=total_volume,
-        uploads_enabled=current_app.config.get("UPLOAD_STORAGE_BACKEND", "local") == "local",
+        uploads_enabled=(current_app.config.get("UPLOAD_STORAGE_BACKEND") == "local" and get_media_storage().enabled),
         referral_participants=participant_rows,
         referral_attributions=[{
             "attribution": item, "eligibility": eligibility_by_attribution.get(item.id),
@@ -608,7 +648,15 @@ def configure_business_referral_program(business_id):
 @platform_admin_required
 def update_business(business_id: int):
     """Updates general, wallet, or loyalty rules for a business."""
-    business = db.session.get(Business, business_id)
+    # PostgreSQL turns this into SELECT ... FOR UPDATE. The row lock is held
+    # until commit/rollback and serializes branding version changes across
+    # app instances before any current media path is read.
+    business = (
+        Business.query.filter_by(id=business_id)
+        .populate_existing()
+        .with_for_update()
+        .one_or_none()
+    )
     if not business:
         return jsonify({"status": "error", "message": "Negocio no encontrado"}), 404
 
@@ -677,30 +725,47 @@ def update_business(business_id: int):
     if "is_active" in data:
         business.is_active = True if str(data["is_active"]).lower() in ("true", "1", "t", "on") else False
     # File upload handling for logo and cover (if multipart/form-data)
+    old_media = {"logo_file": business.logo_path, "cover_file": business.cover_path}
+    replaced_media = []
     if request.content_type and request.content_type.startswith('multipart/form-data'):
         created_files = []
         try:
-            image_paths, created_files = persist_images(request.files)
+            prepared_images = prepare_images(request.files)
+            image_paths, created_files = persist_images(business.id, prepared_images)
             logo_path = image_paths.get("logo_file")
             cover_path = image_paths.get("cover_file")
-        except (ValueError, RuntimeError) as exc:
+        except ValueError as exc:
             db.session.rollback()
-            status = 503 if isinstance(exc, RuntimeError) else 400
-            return jsonify({"status": "error", "message": str(exc)}), status
+            return jsonify({"status": "error", "message": str(exc)}), 400
+        except (MediaStorageError, OSError):
+            db.session.rollback()
+            return jsonify({"status": "error", "message": "No fue posible guardar las imágenes."}), 503
         if logo_path:
             business.logo_path = logo_path
+            replaced_media.append(old_media["logo_file"])
         if cover_path:
             business.cover_path = cover_path
+            replaced_media.append(old_media["cover_file"])
 
     if _wallet_design_state(business) != wallet_state_before:
         business.wallet_design_version = (business.wallet_design_version or 1) + 1
 
     try:
+        for old_key in replaced_media:
+            if is_managed_media_key(old_key):
+                get_media_storage().retain(
+                    old_key, expected_business_id=business.id,
+                    superseded_by_design_version=business.wallet_design_version,
+                )
         db.session.commit()
     except IntegrityError:
         db.session.rollback()
         cleanup_created_files(locals().get("created_files", []))
         return jsonify({"status": "error", "message": "El nombre o slug del negocio entra en conflicto con un registro existente."}), 409
+    except (MediaStorageError, OSError):
+        db.session.rollback()
+        cleanup_created_files(locals().get("created_files", []))
+        return jsonify({"status": "error", "message": "No fue posible conservar la versión anterior de las imágenes."}), 503
     except Exception as exc:
         db.session.rollback()
         cleanup_created_files(locals().get("created_files", []))

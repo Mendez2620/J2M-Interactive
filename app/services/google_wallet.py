@@ -12,6 +12,7 @@ import requests
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from flask import current_app, has_app_context
+from app.media_storage import absolute_branding_url
 from google.auth.exceptions import RefreshError, TransportError
 from google.auth.transport.requests import AuthorizedSession
 from google.oauth2 import service_account
@@ -119,7 +120,7 @@ class GoogleWalletService:
         if not uri and path and has_app_context():
             base = current_app.config.get("PUBLIC_BASE_URL", "")
             if base.startswith("https://"):
-                uri = f"{base.rstrip('/')}/static/{path.lstrip('/')}"
+                uri = absolute_branding_url(path, base)
         parsed = urlparse(uri or "")
         return uri if parsed.scheme == "https" and parsed.netloc else None
 

@@ -1,4 +1,5 @@
 import os
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -156,6 +157,30 @@ class ProductionConfigTestCase(unittest.TestCase):
              patch.object(ProductionConfig, "PUBLIC_BASE_URL", "https://app.example.com"), \
              self.assertRaisesRegex(RuntimeError, "UPLOAD_STORAGE_BACKEND=disabled"):
             create_app("production")
+
+    def test_production_can_disable_writes_while_serving_existing_media(self):
+        with tempfile.TemporaryDirectory() as media_root, \
+             patch.dict(os.environ, self.valid_environment(
+                 UPLOAD_STORAGE_BACKEND="disabled",
+                 MEDIA_STORAGE_BACKEND="local",
+                 MEDIA_STORAGE_ROOT=media_root,
+             ), clear=True), \
+             patch.object(ProductionConfig, "PUBLIC_BASE_URL", "https://app.example.com"):
+            app = create_app("production")
+        self.assertEqual(app.config["UPLOAD_STORAGE_BACKEND"], "disabled")
+        self.assertEqual(app.config["MEDIA_STORAGE_BACKEND"], "local")
+
+    def test_production_rejects_invalid_media_read_configuration(self):
+        cases = (
+            ({"MEDIA_STORAGE_BACKEND": "unknown"}, "MEDIA_STORAGE_BACKEND"),
+            ({"MEDIA_STORAGE_BACKEND": "local", "MEDIA_STORAGE_ROOT": "relative/media"}, "MEDIA_STORAGE_ROOT"),
+        )
+        for overrides, message in cases:
+            with self.subTest(overrides=overrides), \
+                 patch.dict(os.environ, self.valid_environment(**overrides), clear=True), \
+                 patch.object(ProductionConfig, "PUBLIC_BASE_URL", "https://app.example.com"), \
+                 self.assertRaisesRegex(RuntimeError, message):
+                create_app("production")
 
     def test_production_validates_webauthn_origin_and_rp_id(self):
         invalid = (

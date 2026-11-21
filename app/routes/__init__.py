@@ -13,6 +13,7 @@ from app.routes.apple_webservice import apple_ws_bp
 from app.routes.customer_recovery import recovery_bp
 from app.routes.promoter import promoter_bp
 from app.routes.customer_auth import customer_auth_bp
+from app.routes.media import media_bp
 from app.services.unified_staff_access_service import unified_staff_access
 
 # Health Check Blueprint or root API routes
@@ -67,3 +68,4 @@ def register_routes(app):
     app.register_blueprint(recovery_bp)
     app.register_blueprint(promoter_bp)
     app.register_blueprint(customer_auth_bp)
+    app.register_blueprint(media_bp)

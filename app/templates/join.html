@@ -10,13 +10,13 @@
   <div class="mx-auto max-w-2xl overflow-hidden bg-white {{ theme_class }} shadow-xl border border-slate-200">
     <div class="relative h-40 sm:h-52 overflow-hidden" style="background: linear-gradient(135deg, {{ business.primary_color }} 0%, {{ business.secondary_color }} 150%);">
       {% if business.cover_path %}
-        <img src="{{ url_for('static', filename=business.cover_path) }}" alt="Portada de {{ business.name }}" class="absolute inset-0 h-full w-full object-cover">
+        <img src="{{ branding_asset_url(business.cover_path) }}" alt="Portada de {{ business.name }}" class="absolute inset-0 h-full w-full object-cover">
         <div class="absolute inset-0 bg-slate-950/30"></div>
       {% endif %}
       <div class="absolute inset-x-0 bottom-0 flex items-end gap-4 p-5" style="color: {{ '#FFFFFF' if business.cover_path else contrast_text_color(business.primary_color) }};">
         {% if business.logo_path or business.logo_url %}
           <img class="h-20 w-20 rounded-2xl object-contain p-2 bg-white border border-white/80 shadow-lg"
-               src="{{ url_for('static', filename=business.logo_path) if business.logo_path else business.logo_url }}" alt="Logotipo de {{ business.name }}">
+               src="{{ branding_asset_url(business.logo_path) if business.logo_path else business.logo_url }}" alt="Logotipo de {{ business.name }}">
         {% else %}
           <div class="h-16 w-16 shrink-0 rounded-2xl flex items-center justify-center bg-white/95 text-xl font-bold shadow-lg" style="color: {{ business.primary_color }};">
             {{ business.name[:2].upper() }}
