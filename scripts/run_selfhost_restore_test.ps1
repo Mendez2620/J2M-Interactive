@@ -14,24 +14,22 @@ try {
     $taskGuard = Enter-J2MSelfHostTaskGuard
     Send-J2MHealthcheck restore_weekly start
     Wait-J2MDockerReady -LogPath $runtimeLog
-    $latest = Get-ChildItem -LiteralPath "selfhost-backups\hourly" -Filter "j2m-set-*.j2mbackup.complete.json" | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
-    if ($null -eq $latest) {
-        $latest = Get-ChildItem -LiteralPath "selfhost-backups\hourly" -Filter "j2m-postgres-*.j2mbackup.complete.json" | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+    $privateConfig = @{}
+    foreach ($line in Get-Content -LiteralPath ".env.selfhost") {
+        if ($line -match '^([A-Z0-9_]+)=(.*)$') { $privateConfig[$matches[1]] = $matches[2].Trim('"', "'") }
     }
-    if ($null -eq $latest) { throw "encrypted backup unavailable" }
-    $backup = $latest.FullName.Substring(0, $latest.FullName.Length - ".complete.json".Length)
+    $mediaEnabled = $privateConfig.ContainsKey("J2M_MEDIA_BACKUP_ENABLED") -and $privateConfig["J2M_MEDIA_BACKUP_ENABLED"] -eq "true"
+    $backupMode = if ($mediaEnabled) { "integral" } else { "legacy" }
+    $selectedName = (& python -m scripts.selfhost_backup select-backup --source-dir "selfhost-backups\hourly" --key-file $KeyFile --mode $backupMode --max-age-seconds 90000 | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($selectedName) -or $selectedName.Contains("\") -or $selectedName.Contains("/")) {
+        throw "recent authenticated backup unavailable for configured mode"
+    }
+    $backup = Join-Path "selfhost-backups\hourly" $selectedName
     if ((Split-Path -Leaf $backup) -match '^j2m-set-([0-9a-f]{32})\.j2mbackup$') {
-        $backupId = $matches[1]
-        python -m scripts.selfhost_backup verify-set $backup --key-file $KeyFile
-        if ($LASTEXITCODE -ne 0) { throw "integral set verification failed" }
-        $database = Join-Path (Split-Path $backup) ("j2m-postgres-" + $backupId + ".dump.j2mbackup")
-        $media = Join-Path (Split-Path $backup) ("j2m-media-" + $backupId + ".j2mbackup")
-        python -m scripts.selfhost_backup restore-isolated $database --media-backup $media --backup-id $backupId --key-file $KeyFile --lock-file "selfhost-backups\.operations.lock" --timeout 900
-        if ($LASTEXITCODE -ne 0) { throw "isolated database restore failed" }
         $pin = Get-Content -LiteralPath ".env.selfhost" | Where-Object { $_ -match '^J2M_IMAGE=j2m-interactive:[0-9a-f]{40}$' } | Select-Object -First 1
         if ($null -eq $pin) { throw "approved image pin unavailable" }
-        python -m scripts.selfhost_backup restore-media-docker $media --backup-id $backupId --image $pin.Substring("J2M_IMAGE=".Length) --key-file $KeyFile --timeout 900
-        if ($LASTEXITCODE -ne 0) { throw "isolated media restore failed" }
+        python -m scripts.selfhost_backup restore-integral $backup --image $pin.Substring("J2M_IMAGE=".Length) --key-file $KeyFile --lock-file "selfhost-backups\.operations.lock" --timeout 900
+        if ($LASTEXITCODE -ne 0) { throw "isolated integral restore failed" }
     } else {
         python -m scripts.selfhost_backup restore-isolated $backup --key-file $KeyFile --lock-file "selfhost-backups\.operations.lock" --timeout 900
         if ($LASTEXITCODE -ne 0) { throw "isolated restore failed" }

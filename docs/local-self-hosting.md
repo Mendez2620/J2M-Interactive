@@ -211,8 +211,10 @@ Los tres runners adquieren el mismo mutex nombrado antes de iniciar cualquier tr
 La Fase 8E.1B conserva las frecuencias instaladas y no reinstala tareas. El interruptor privado
 `J2M_MEDIA_BACKUP_ENABLED` permanece ausente o `false` hasta una activación posterior. Cuando
 sea aprobado, el respaldo horario cambia de un componente PostgreSQL legado a un conjunto
-integral DB+medios; la copia de cuatro horas, la retención de 7/30 días y la restauración semanal
-reconocen ambos formatos. Los respaldos anteriores siguen siendo verificables y restaurables.
+integral DB+medios. Copia y restauración seleccionan estrictamente el modo configurado y exigen
+un conjunto autenticado reciente; nunca hacen fallback silencioso a componentes o dumps
+legados. La retención protege por separado los últimos conjuntos integrales, dumps legados y
+configuraciones, de modo que cambiar el interruptor no destruye respaldos anteriores.
 
 El respaldo horario y la restauración semanal comprueban el Docker Engine después de adquirir el mutex y de notificar `start` a Healthchecks. Si Docker Desktop todavía está arrancando después del inicio de sesión, inician una comprobación cada 30 segundos durante un máximo global de cinco minutos. Cada `docker info` se ejecuta en un proceso CLI desechable con un presupuesto total de 10 segundos, que reserva hasta dos segundos para terminar y recoger el propio proceso de comprobación mediante una espera acotada. Si se bloquea, se termina únicamente ese proceso, nunca Docker Desktop, su backend, el engine ni los contenedores; ni la consulta ni su limpieza pueden extender el presupuesto global. La espera conserva el mismo bloqueo global, por lo que otra tarea no puede iniciar un respaldo, copia o restauración concurrente; `MultipleInstances IgnoreNew` evita además duplicar la misma tarea. Los eventos `docker_unavailable`, `docker_probe_timeout`, `docker_recovered` y `docker_timeout` se escriben sin secretos en `selfhost-backups/logs/task-runtime.jsonl`. Una recuperación continúa con la operación normal y solo entonces puede emitir `success`; un timeout global pasa por el manejo de errores existente, conserva el marcador de fallo y emite `fail`. La copia de Google Drive no requiere Docker y no realiza esta espera.
 

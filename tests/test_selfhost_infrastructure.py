@@ -45,7 +45,8 @@ class SelfHostInfrastructureTestCase(unittest.TestCase):
         partial = final.with_name(final.name + ".partial")
         with partial.open("wb") as destination:
             encrypt_stream(io.BytesIO(cleartext), destination, key)
-        _publish_bundle(partial, final, "test")
+        kind = "configuration" if "configuration" in name else "postgresql"
+        _publish_bundle(partial, final, kind)
         return final
     def test_compose_separates_runtime_migration_and_tunnel(self):
         compose = (ROOT / "compose.selfhost.yml").read_text(encoding="utf-8")

@@ -30,12 +30,15 @@ function Invoke-ExactRetention([string]$Category, [int]$Days) {
     @($plan.protected_files) | Set-Content -LiteralPath $protectedList -Encoding ascii
     rclone copy "$Remote/$Category" $categoryVerify --files-from $protectedList --retries 3 --contimeout 15s --timeout 5m
     if ($LASTEXITCODE -ne 0) { throw "$Category protected-set download failed" }
-    if ($plan.protected.StartsWith("j2m-set-")) {
-        python -m scripts.selfhost_backup verify-set (Join-Path $categoryVerify $plan.protected) --key-file $KeyFile
-    } else {
-        python -m scripts.selfhost_backup verify (Join-Path $categoryVerify $plan.protected) --key-file $KeyFile
+    $protectedBackups = if ($null -ne $plan.protected_backups) { @($plan.protected_backups) } else { @($plan.protected) }
+    foreach ($protectedBackup in $protectedBackups) {
+        if ($protectedBackup.StartsWith("j2m-set-")) {
+            python -m scripts.selfhost_backup verify-set (Join-Path $categoryVerify $protectedBackup) --key-file $KeyFile
+        } else {
+            python -m scripts.selfhost_backup verify (Join-Path $categoryVerify $protectedBackup) --key-file $KeyFile
+        }
+        if ($LASTEXITCODE -ne 0) { throw "$Category protected-set verification failed" }
     }
-    if ($LASTEXITCODE -ne 0) { throw "$Category protected-set verification failed" }
     foreach ($relativePath in @($plan.delete)) {
         if ([string]::IsNullOrWhiteSpace($relativePath) -or $relativePath.Contains("/") -or $relativePath.Contains("\")) {
             throw "$Category retention produced an unsafe path"
@@ -53,7 +56,13 @@ try {
     $source = Join-Path $root "hourly"
     $outbound = Join-Path $root "outbound\four-hour"
     $verifyDir = Join-Path $root ("remote-verify-" + [guid]::NewGuid().ToString("N"))
-    python -m scripts.selfhost_backup stage-offsite --source-dir $source --destination-dir $outbound --key-file $KeyFile --lock-file (Join-Path $root ".operations.lock")
+    $privateConfig = @{}
+    foreach ($line in Get-Content -LiteralPath ".env.selfhost") {
+        if ($line -match '^([A-Z0-9_]+)=(.*)$') { $privateConfig[$matches[1]] = $matches[2].Trim('"', "'") }
+    }
+    $mediaEnabled = $privateConfig.ContainsKey("J2M_MEDIA_BACKUP_ENABLED") -and $privateConfig["J2M_MEDIA_BACKUP_ENABLED"] -eq "true"
+    $backupMode = if ($mediaEnabled) { "integral" } else { "legacy" }
+    python -m scripts.selfhost_backup stage-offsite --source-dir $source --destination-dir $outbound --key-file $KeyFile --lock-file (Join-Path $root ".operations.lock") --mode $backupMode --max-age-seconds 7200
     if ($LASTEXITCODE -ne 0) { throw "offsite staging failed" }
     $selectedItems = @(Get-ChildItem -LiteralPath $outbound -Filter "j2m-set-*.j2mbackup")
     if ($selectedItems.Count -gt 1) { throw "offsite staging produced multiple set indexes" }
@@ -86,7 +95,7 @@ try {
     $configSelected = $null
     if (Test-Path -LiteralPath $configuration) {
         $configOutbound = Join-Path $root "outbound\configuration"
-        python -m scripts.selfhost_backup stage-offsite --source-dir $configuration --destination-dir $configOutbound --key-file $KeyFile --lock-file (Join-Path $root ".operations.lock")
+        python -m scripts.selfhost_backup stage-offsite --source-dir $configuration --destination-dir $configOutbound --key-file $KeyFile --lock-file (Join-Path $root ".operations.lock") --mode configuration
         if ($LASTEXITCODE -ne 0) { throw "configuration staging failed" }
         $configItems = @(Get-ChildItem -LiteralPath $configOutbound -Filter "*.j2mbackup")
         if ($configItems.Count -ne 1) { throw "configuration staging did not produce exactly one backup" }

@@ -1,10 +1,11 @@
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from app import create_app
 from app.extensions import db
@@ -12,9 +13,13 @@ from app.media_storage import LocalMediaStorage
 from app.models import Business
 from scripts.selfhost_backup import (
     _MediaArchiveReader,
+    _MediaArchiveExtractor,
+    _complete_backups,
     _encrypted_json_bundle,
     _media_inventory,
     _publish_bundle,
+    _restored_media_references,
+    _select_backup,
     _hash_file,
     encrypt_stream,
     media_backup,
@@ -117,6 +122,11 @@ class MediaBackupPhase8E1BTestCase(unittest.TestCase):
             (media / "secret.txt").write_text("no", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "no administrada"):
                 _media_inventory(media)
+            (media / "secret.txt").unlink()
+            linked = self._asset(media, 1, "cover", "d" * 32, b"linked")
+            os.link(linked, linked.with_name("e" * 32 + ".png"))
+            with self.assertRaisesRegex(ValueError, "enlaces"):
+                _media_inventory(media)
 
     def test_corruption_wrong_set_and_incomplete_copy_are_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -183,6 +193,88 @@ class MediaBackupPhase8E1BTestCase(unittest.TestCase):
         self.assertEqual(plan["protected"], f"j2m-set-{'2' * 32}.j2mbackup")
         self.assertEqual(len(plan["protected_files"]), 9)
         self.assertEqual(len(plan["delete"]), 9)
+
+    def test_missing_or_wrong_operational_volume_fails_before_export(self):
+        missing = MagicMock(returncode=1, stdout="")
+        with patch("scripts.selfhost_backup.subprocess.run", return_value=missing):
+            with self.assertRaisesRegex(RuntimeError, "no existe"):
+                media_backup_from_docker("j2m-cutover-ready_j2m-media",
+                    "j2m-interactive:" + "f" * 40, Path("unused"), Path("unused"),
+                    self.BACKUP_ID)
+        wrong = MagicMock(returncode=0, stdout=json.dumps([{
+            "Name": "j2m-cutover-ready_j2m-media", "Driver": "local", "Scope": "local",
+            "Mountpoint": "C:/safe", "Labels": {"com.docker.compose.project": "other",
+                                                   "com.docker.compose.volume": "j2m-media"}}]))
+        with patch("scripts.selfhost_backup.subprocess.run", return_value=wrong):
+            with self.assertRaisesRegex(RuntimeError, "identidad.*Compose"):
+                media_backup_from_docker("j2m-cutover-ready_j2m-media",
+                    "j2m-interactive:" + "f" * 40, Path("unused"), Path("unused"),
+                    self.BACKUP_ID)
+
+    def test_integral_mode_never_falls_back_and_legacy_excludes_components(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            partial = root / "j2m-postgres-20261121T000000Z-abc.dump.j2mbackup.partial"
+            with partial.open("wb") as output:
+                encrypt_stream(io.BytesIO(b"legacy"), output, self.KEY)
+            legacy = partial.with_suffix("")
+            _publish_bundle(partial, legacy, "postgresql")
+            component_partial = root / f"j2m-postgres-{self.BACKUP_ID}.dump.j2mbackup.partial"
+            with component_partial.open("wb") as output:
+                encrypt_stream(io.BytesIO(b"component"), output, self.KEY)
+            component = component_partial.with_suffix("")
+            _publish_bundle(component_partial, component, "postgresql", self.BACKUP_ID)
+            with patch("scripts.selfhost_backup.load_dpapi_key", return_value=self.KEY):
+                self.assertEqual(_complete_backups(root, self.KEY), [legacy])
+                self.assertEqual(_select_backup(root, root / "key", "legacy"), legacy)
+                with self.assertRaisesRegex(RuntimeError, "integral"):
+                    _select_backup(root, root / "key", "integral")
+
+    def test_remote_retention_protects_integral_and_legacy_independently(self):
+        now = "2026-11-21T12:00:00Z"
+        inventory = []
+        for kind, suffix in (("set", ""), ("media", ""), ("postgres", ".dump")):
+            base = f"j2m-{kind}-{'9' * 32}{suffix}.j2mbackup"
+            inventory.extend({"Path": base + ending, "ModTime": now}
+                             for ending in ("", ".sha256", ".complete.json"))
+        legacy = "j2m-postgres-20261121T120000Z-abc.dump.j2mbackup"
+        inventory.extend({"Path": legacy + ending, "ModTime": now}
+                         for ending in ("", ".sha256", ".complete.json"))
+        plan = remote_retention_plan(inventory, 7)
+        self.assertCountEqual(plan["protected_backups"],
+                              [f"j2m-set-{'9' * 32}.j2mbackup", legacy])
+        self.assertEqual(plan["delete"], [])
+
+    def test_restored_references_fail_for_missing_or_cross_tenant_media(self):
+        valid = "businesses/1/logo/" + "a" * 32 + ".png"
+        with patch("scripts.selfhost_backup._psql", return_value="1\tlogo\t" + valid):
+            with self.assertRaisesRegex(RuntimeError, "omite"):
+                _restored_media_references("pg", set())
+        cross = "businesses/2/logo/" + "b" * 32 + ".png"
+        with patch("scripts.selfhost_backup._psql", return_value="1\tlogo\t" + cross):
+            with self.assertRaisesRegex(RuntimeError, "cruzada"):
+                _restored_media_references("pg", {cross})
+
+    def test_media_extractor_rejects_duplicate_paths_and_aggregate_limit(self):
+        path = "businesses/1/logo/" + "a" * 32 + ".png"
+        header = {"schema": 1, "backup_id": self.BACKUP_ID, "files": [
+            {"path": path, "size": 0, "sha256": __import__("hashlib").sha256(b"").hexdigest()},
+            {"path": path, "size": 0, "sha256": __import__("hashlib").sha256(b"").hexdigest()}]}
+        raw = json.dumps(header).encode()
+        from scripts.selfhost_backup import MEDIA_MAGIC
+        import struct
+        extractor = _MediaArchiveExtractor(None, self.BACKUP_ID)
+        with self.assertRaisesRegex(ValueError, "duplicadas"):
+            extractor.write(MEDIA_MAGIC + struct.pack(">I", len(raw)) + raw)
+        second = "businesses/1/logo/" + "b" * 32 + ".png"
+        aggregate = {"schema": 1, "backup_id": self.BACKUP_ID, "files": [
+            {"path": path, "size": 1, "sha256": __import__("hashlib").sha256(b"a").hexdigest()},
+            {"path": second, "size": 1, "sha256": __import__("hashlib").sha256(b"b").hexdigest()}]}
+        raw = json.dumps(aggregate).encode()
+        with patch("scripts.selfhost_backup.MEDIA_MAX_TOTAL_BYTES", 1):
+            extractor = _MediaArchiveExtractor(None, self.BACKUP_ID)
+            with self.assertRaisesRegex(ValueError, "acumulado"):
+                extractor.write(MEDIA_MAGIC + struct.pack(">I", len(raw)) + raw + b"ab")
 
 
 if __name__ == "__main__":

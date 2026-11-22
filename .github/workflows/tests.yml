@@ -61,4 +61,9 @@ jobs:
       - run: docker compose -p j2m-pr70-production-ci --env-file .env.selfhost.production-test.example -f compose.selfhost.yml -f compose.selfhost.test.yml -f compose.selfhost.production-test.yml config --quiet
       - run: docker compose -p j2m-pr70-loopback-ci --env-file .env.selfhost.production-test.example -f compose.selfhost.yml -f compose.selfhost.test.yml -f compose.selfhost.production-test.yml -f compose.selfhost.loopback-test.yml config --quiet
       - run: docker build --tag j2m-staging:test .
+      - name: Verify joint PostgreSQL and media restoration in isolated Docker resources
+        run: |
+          DATABASE_URL="$TEST_POSTGRES_URL" DATABASE_SSLMODE=disable flask --app run.py db upgrade
+          docker tag j2m-staging:test j2m-interactive:0000000000000000000000000000000000000001
+          python tests/integral_restore_ci.py
       - run: docker build --file Dockerfile.postgres-test --tag j2m-postgres:production-test .
