@@ -14,11 +14,28 @@ try {
     $taskGuard = Enter-J2MSelfHostTaskGuard
     Send-J2MHealthcheck restore_weekly start
     Wait-J2MDockerReady -LogPath $runtimeLog
-    $latest = Get-ChildItem -LiteralPath "selfhost-backups\hourly" -Filter "*.complete.json" | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+    $latest = Get-ChildItem -LiteralPath "selfhost-backups\hourly" -Filter "j2m-set-*.j2mbackup.complete.json" | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+    if ($null -eq $latest) {
+        $latest = Get-ChildItem -LiteralPath "selfhost-backups\hourly" -Filter "j2m-postgres-*.j2mbackup.complete.json" | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+    }
     if ($null -eq $latest) { throw "encrypted backup unavailable" }
     $backup = $latest.FullName.Substring(0, $latest.FullName.Length - ".complete.json".Length)
-    python -m scripts.selfhost_backup restore-isolated $backup --key-file $KeyFile --lock-file "selfhost-backups\.operations.lock" --timeout 900
-    if ($LASTEXITCODE -ne 0) { throw "isolated restore failed" }
+    if ((Split-Path -Leaf $backup) -match '^j2m-set-([0-9a-f]{32})\.j2mbackup$') {
+        $backupId = $matches[1]
+        python -m scripts.selfhost_backup verify-set $backup --key-file $KeyFile
+        if ($LASTEXITCODE -ne 0) { throw "integral set verification failed" }
+        $database = Join-Path (Split-Path $backup) ("j2m-postgres-" + $backupId + ".dump.j2mbackup")
+        $media = Join-Path (Split-Path $backup) ("j2m-media-" + $backupId + ".j2mbackup")
+        python -m scripts.selfhost_backup restore-isolated $database --media-backup $media --backup-id $backupId --key-file $KeyFile --lock-file "selfhost-backups\.operations.lock" --timeout 900
+        if ($LASTEXITCODE -ne 0) { throw "isolated database restore failed" }
+        $pin = Get-Content -LiteralPath ".env.selfhost" | Where-Object { $_ -match '^J2M_IMAGE=j2m-interactive:[0-9a-f]{40}$' } | Select-Object -First 1
+        if ($null -eq $pin) { throw "approved image pin unavailable" }
+        python -m scripts.selfhost_backup restore-media-docker $media --backup-id $backupId --image $pin.Substring("J2M_IMAGE=".Length) --key-file $KeyFile --timeout 900
+        if ($LASTEXITCODE -ne 0) { throw "isolated media restore failed" }
+    } else {
+        python -m scripts.selfhost_backup restore-isolated $backup --key-file $KeyFile --lock-file "selfhost-backups\.operations.lock" --timeout 900
+        if ($LASTEXITCODE -ne 0) { throw "isolated restore failed" }
+    }
     Remove-Item -LiteralPath $failure -Force -ErrorAction SilentlyContinue
     Send-J2MHealthcheck restore_weekly success
     $exitCode = 0
