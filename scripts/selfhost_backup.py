@@ -3,19 +3,20 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
 import io
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import secrets
 import shutil
 import struct
 import subprocess
+import sys
 import threading
 import time
 from typing import BinaryIO, Iterator
@@ -38,11 +39,24 @@ DATA = b"D"
 END = b"E"
 MAX_FRAME_BYTES = CHUNK_SIZE + TAG_BYTES
 END_CIPHERTEXT_BYTES = 16 + TAG_BYTES
+MEDIA_MAGIC = b"J2MMEDIA1"
+MEDIA_MAX_FILES = 10000
+MEDIA_MAX_FILE_BYTES = 25 * 1024 * 1024
+MEDIA_MAX_TOTAL_BYTES = 5 * 1024 * 1024 * 1024
+MEDIA_KEY_RE = re.compile(
+    r"businesses/[1-9]\d*/(?:logo|cover)/[0-9a-f]{32}\.(?:png|jpg|webp)"
+)
+MEDIA_MARKER_RE = re.compile(
+    r"businesses/[1-9]\d*/(?:logo|cover)/\.[0-9a-f]{32}\.(?:png|jpg|webp)\.retained\.json"
+)
 
 
 class _NullWriter:
     def write(self, value: bytes) -> int:
         return len(value)
+
+    def close(self) -> None:
+        return None
 
 
 def _nonce(prefix: bytes, index: int) -> bytes:
@@ -314,25 +328,426 @@ def _read_database_url(env_file: Path, allow_insecure_synthetic: bool = False,
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment))
 
 
-def _publish_bundle(partial: Path, final: Path, kind: str) -> None:
+def _publish_bundle(partial: Path, final: Path, kind: str,
+                    backup_id: str | None = None) -> None:
     digest = _hash_file(partial)
     size = partial.stat().st_size
     partial.replace(final)
     _atomic_write(_sidecar(final), f"{digest}  {final.name}\n".encode("ascii"))
     manifest = {"created_at": datetime.now(timezone.utc).isoformat(), "filename": final.name,
                 "kind": kind, "sha256": digest, "size": size}
+    if backup_id is not None:
+        manifest["backup_id"] = backup_id
     _atomic_write(_manifest(final), json.dumps(manifest, sort_keys=True).encode("utf-8"))
     if not _verify_manifest(final):
         raise RuntimeError("La publicación atómica no superó la verificación.")
 
 
-def _complete_backups(directory: Path, key: bytes) -> list[Path]:
-    return sorted((p for p in directory.glob("*.j2mbackup") if verify_backup(p, key)),
-                  key=lambda item: item.stat().st_mtime, reverse=True)
+def _safe_backup_id(value: str) -> str:
+    if not re.fullmatch(r"[0-9a-f]{32}", str(value or "")):
+        raise ValueError("Identificador de conjunto de respaldo inválido.")
+    return value
 
 
-def _retain_local_locked(directory: Path, keep: int, key: bytes) -> int:
-    backups = _complete_backups(directory, key)
+def _media_relative(path: Path, root: Path) -> str:
+    relative = path.relative_to(root).as_posix()
+    if not (MEDIA_KEY_RE.fullmatch(relative) or MEDIA_MARKER_RE.fullmatch(relative)):
+        raise ValueError("El almacenamiento contiene una ruta no administrada.")
+    return relative
+
+
+def _media_inventory(root: Path) -> list[dict]:
+    root = root.resolve(strict=True)
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError("La raíz de medios debe ser un directorio regular.")
+    inventory: list[dict] = []
+    total = 0
+    for path in sorted(root.rglob("*")):
+        if path.is_dir():
+            if path.is_symlink():
+                raise ValueError("No se admiten enlaces en el almacenamiento de medios.")
+            continue
+        stat = path.lstat()
+        if path.is_symlink() or not path.is_file() or stat.st_nlink != 1:
+            raise ValueError("No se admiten enlaces ni archivos especiales en medios.")
+        relative = _media_relative(path, root)
+        if stat.st_size > MEDIA_MAX_FILE_BYTES:
+            raise ValueError("Un recurso de medios excede el límite permitido.")
+        total += stat.st_size
+        if total > MEDIA_MAX_TOTAL_BYTES or len(inventory) >= MEDIA_MAX_FILES:
+            raise ValueError("El conjunto de medios excede los límites permitidos.")
+        digest = _hash_file(path)
+        # Detect a concurrent rewrite. New files are harmless; mutations of an
+        # inventoried object make this attempt fail closed and retry later.
+        after = path.stat()
+        if (after.st_size, after.st_mtime_ns) != (stat.st_size, stat.st_mtime_ns):
+            raise RuntimeError("Un recurso cambió durante el inventario de respaldo.")
+        inventory.append({"path": relative, "size": stat.st_size, "sha256": digest})
+    known = {item["path"] for item in inventory}
+    for item in inventory:
+        if MEDIA_MARKER_RE.fullmatch(item["path"]):
+            asset = re.sub(r"/\.(?=[^/]+\.retained\.json$)", "/", item["path"])
+            asset = asset.removesuffix(".retained.json")
+            if asset not in known:
+                raise ValueError("Existe un marcador de retención sin su imagen.")
+            try:
+                marker = json.loads((root / Path(*PurePosixPath(item["path"]).parts))
+                                    .read_text(encoding="utf-8"))
+                business_id = int(asset.split("/", 2)[1])
+                if (marker.get("schema") != 1 or marker.get("storage_key") != asset
+                        or marker.get("business_id") != business_id
+                        or not isinstance(marker.get("superseded_by_design_version"), int)
+                        or marker["superseded_by_design_version"] <= 0):
+                    raise ValueError
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError, AttributeError,
+                    TypeError, ValueError) as exc:
+                raise ValueError("Un marcador de retención no es válido para su tenant.") from exc
+    return inventory
+
+
+class _MediaArchiveReader:
+    """Bounded streaming source; clear media is never materialized on disk."""
+    def __init__(self, root: Path, backup_id: str, inventory: list[dict]):
+        self.root = root.resolve(strict=True)
+        header = json.dumps({"schema": 1, "backup_id": _safe_backup_id(backup_id),
+                             "files": inventory}, sort_keys=True,
+                            separators=(",", ":")).encode("utf-8")
+        if len(header) > 4 * 1024 * 1024:
+            raise ValueError("El manifiesto de medios excede el límite permitido.")
+        self.prefix = io.BytesIO(MEDIA_MAGIC + struct.pack(">I", len(header)) + header)
+        self.inventory = iter(inventory)
+        self.current = None
+        self.current_info = None
+
+    def read(self, size: int = -1) -> bytes:
+        if size < 0:
+            size = CHUNK_SIZE
+        output = bytearray()
+        while len(output) < size:
+            if self.prefix is not None:
+                chunk = self.prefix.read(size - len(output))
+                output.extend(chunk)
+                if chunk:
+                    continue
+                self.prefix = None
+            if self.current is None:
+                try:
+                    self.current_info = next(self.inventory)
+                except StopIteration:
+                    break
+                path = (self.root / Path(*PurePosixPath(self.current_info["path"]).parts)).resolve()
+                if path.is_symlink() or not path.is_file() or path.stat().st_nlink != 1:
+                    raise RuntimeError("Un recurso dejó de ser regular durante el respaldo.")
+                if path.stat().st_size != self.current_info["size"]:
+                    raise RuntimeError("Un recurso cambió después del inventario de respaldo.")
+                self.current = path.open("rb")
+            chunk = self.current.read(size - len(output))
+            output.extend(chunk)
+            if not chunk:
+                self.current.close()
+                self.current = None
+                self.current_info = None
+        return bytes(output)
+
+
+def media_backup(source_root: Path, output_dir: Path, key_file: Path,
+                 backup_id: str) -> Path:
+    """Create an encrypted media component without cleartext host artifacts."""
+    backup_id = _safe_backup_id(backup_id)
+    inventory = _media_inventory(source_root)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    final = output_dir / f"j2m-media-{backup_id}.j2mbackup"
+    partial = final.with_name(final.name + ".partial")
+    try:
+        with partial.open("xb") as destination:
+            encrypt_stream(_MediaArchiveReader(source_root, backup_id, inventory),
+                           destination, load_dpapi_key(key_file))
+            destination.flush()
+            os.fsync(destination.fileno())
+        _publish_bundle(partial, final, "media", backup_id)
+        if not verify_backup(final, load_dpapi_key(key_file)):
+            raise RuntimeError("El respaldo de medios no superó la autenticación.")
+        inspect_media_backup(final, key_file, backup_id)
+        return final
+    except Exception:
+        partial.unlink(missing_ok=True)
+        _manifest(final).unlink(missing_ok=True)
+        _sidecar(final).unlink(missing_ok=True)
+        final.unlink(missing_ok=True)
+        raise
+
+
+def export_media_archive(source_root: Path, backup_id: str, destination: BinaryIO) -> None:
+    reader = _MediaArchiveReader(source_root, _safe_backup_id(backup_id),
+                                 _media_inventory(source_root))
+    for chunk in iter(lambda: reader.read(CHUNK_SIZE), b""):
+        destination.write(chunk)
+
+
+def media_backup_from_docker(volume: str, image: str, output_dir: Path,
+                             key_file: Path, backup_id: str,
+                             timeout: int = 900,
+                             allow_synthetic_volume: bool = False) -> Path:
+    if (volume != "j2m-cutover-ready_j2m-media"
+            and not (allow_synthetic_volume
+                     and re.fullmatch(r"j2m-8e1b-synthetic-[a-z0-9-]+", volume))):
+        raise ValueError("El volumen operativo debe declararse explícitamente.")
+    if not re.fullmatch(r"j2m-interactive:[0-9a-f]{40}", image):
+        raise ValueError("La imagen debe estar fijada a un SHA aprobado exacto.")
+    inspection = subprocess.run(["docker", "volume", "inspect", volume], check=False,
+                                capture_output=True, text=True, timeout=30)
+    if inspection.returncode != 0:
+        raise RuntimeError("El volumen de medios autorizado no existe.")
+    try:
+        details = json.loads(inspection.stdout)
+        item = details[0]
+        labels = item.get("Labels") or {}
+        if (item.get("Name") != volume or item.get("Driver") != "local"
+                or item.get("Scope") != "local" or not item.get("Mountpoint")):
+            raise ValueError
+        if not allow_synthetic_volume and (
+                labels.get("com.docker.compose.project") != "j2m-cutover-ready"
+                or labels.get("com.docker.compose.volume") != "j2m-media"):
+            raise ValueError
+    except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError("La identidad del volumen de medios no coincide con Compose.") from exc
+    backup_id = _safe_backup_id(backup_id)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    final = output_dir / f"j2m-media-{backup_id}.j2mbackup"
+    partial = final.with_name(final.name + ".partial")
+    mountpoint = item["Mountpoint"]
+    command = ["docker", "run", "--rm", "--network", "none", "--read-only",
+               "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
+               "--mount", f"type=bind,src={mountpoint},dst=/media,readonly",
+               image, "python", "-m", "scripts.selfhost_backup", "export-media",
+               "--source-root", "/media", "--backup-id", backup_id]
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert process.stdout is not None
+    timer = threading.Timer(timeout, process.kill)
+    timer.start()
+    try:
+        with partial.open("xb") as destination:
+            encrypt_stream(process.stdout, destination, load_dpapi_key(key_file))
+            destination.flush()
+            os.fsync(destination.fileno())
+        if process.wait(timeout=10) != 0:
+            raise RuntimeError("El exportador aislado de medios no pudo completar.")
+        _publish_bundle(partial, final, "media", backup_id)
+        inspect_media_backup(final, key_file, backup_id)
+        return final
+    except Exception:
+        _manifest(final).unlink(missing_ok=True)
+        _sidecar(final).unlink(missing_ok=True)
+        final.unlink(missing_ok=True)
+        raise
+    finally:
+        timer.cancel()
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=10)
+        partial.unlink(missing_ok=True)
+
+
+class _MediaArchiveExtractor:
+    def __init__(self, destination: Path | None, expected_backup_id: str):
+        self.destination = destination
+        self.expected_backup_id = _safe_backup_id(expected_backup_id)
+        self.buffer = bytearray()
+        self.header = None
+        self.index = 0
+        self.remaining = 0
+        self.output = None
+        self.digest = None
+        self.seen_paths: set[str] = set()
+        self.total_size = 0
+
+    def write(self, data: bytes) -> int:
+        self.buffer.extend(data)
+        if self.header is None and len(self.buffer) >= len(MEDIA_MAGIC) + 4:
+            if bytes(self.buffer[:len(MEDIA_MAGIC)]) != MEDIA_MAGIC:
+                raise ValueError("Formato de archivo de medios no reconocido.")
+            length = struct.unpack(">I", self.buffer[len(MEDIA_MAGIC):len(MEDIA_MAGIC) + 4])[0]
+            if length <= 0 or length > 4 * 1024 * 1024:
+                raise ValueError("Manifiesto de medios inválido.")
+            if len(self.buffer) < len(MEDIA_MAGIC) + 4 + length:
+                return len(data)
+            raw = bytes(self.buffer[len(MEDIA_MAGIC) + 4:len(MEDIA_MAGIC) + 4 + length])
+            del self.buffer[:len(MEDIA_MAGIC) + 4 + length]
+            self.header = json.loads(raw.decode("utf-8"))
+            if (self.header.get("schema") != 1
+                    or self.header.get("backup_id") != self.expected_backup_id
+                    or not isinstance(self.header.get("files"), list)
+                    or len(self.header["files"]) > MEDIA_MAX_FILES):
+                raise ValueError("El manifiesto no pertenece al conjunto esperado.")
+        if self.header is not None:
+            self._consume()
+        return len(data)
+
+    def _consume(self) -> None:
+        files = self.header["files"]
+        while self.index < len(files):
+            item = files[self.index]
+            if self.output is None:
+                relative = str(item.get("path", ""))
+                if not (MEDIA_KEY_RE.fullmatch(relative) or MEDIA_MARKER_RE.fullmatch(relative)):
+                    raise ValueError("Ruta de medios inválida en el respaldo.")
+                if relative in self.seen_paths:
+                    raise ValueError("El respaldo contiene rutas de medios duplicadas.")
+                self.seen_paths.add(relative)
+                size = item.get("size")
+                if not isinstance(size, int) or size < 0 or size > MEDIA_MAX_FILE_BYTES:
+                    raise ValueError("Tamaño de medios inválido en el respaldo.")
+                self.total_size += size
+                if self.total_size > MEDIA_MAX_TOTAL_BYTES:
+                    raise ValueError("El respaldo excede el límite acumulado de medios.")
+                if self.destination is None:
+                    self.output = _NullWriter()
+                else:
+                    target = self.destination / Path(*PurePosixPath(relative).parts)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    self.output = target.open("xb")
+                self.digest = hashlib.sha256()
+                self.remaining = size
+            take = min(self.remaining, len(self.buffer))
+            if take:
+                chunk = bytes(self.buffer[:take])
+                del self.buffer[:take]
+                self.output.write(chunk)
+                self.digest.update(chunk)
+                self.remaining -= take
+            if self.remaining:
+                return
+            self.output.close()
+            self.output = None
+            if not secrets.compare_digest(self.digest.hexdigest(), str(item.get("sha256", ""))):
+                raise ValueError("Un recurso restaurado no coincide con su hash autenticado.")
+            self.index += 1
+
+    def finalize(self) -> list[str]:
+        if self.header is None or self.output is not None or self.buffer \
+                or self.index != len(self.header["files"]):
+            count = len(self.header["files"]) if self.header is not None else 0
+            raise ValueError("El archivo de medios está incompleto "
+                             f"(entradas={self.index}/{count}, bytes_pendientes={len(self.buffer)}).")
+        return [item["path"] for item in self.header["files"]]
+
+
+def restore_media(backup: Path, destination: Path, key_file: Path,
+                  backup_id: str) -> list[str]:
+    if destination.exists():
+        raise ValueError("El destino de medios ya existe; no se sobrescribirá.")
+    key = load_dpapi_key(key_file)
+    if not verify_backup(backup, key):
+        raise ValueError("El componente de medios no superó la autenticación completa.")
+    staging = destination.with_name(destination.name + ".partial-" + secrets.token_hex(4))
+    extractor = _MediaArchiveExtractor(staging, backup_id)
+    try:
+        staging.mkdir(parents=True)
+        with backup.open("rb") as source:
+            decrypt_stream(source, extractor, key)
+        restored = extractor.finalize()
+        staging.replace(destination)
+        return restored
+    finally:
+        if extractor.output is not None:
+            extractor.output.close()
+        if staging.exists():
+            shutil.rmtree(staging)
+
+
+def inspect_media_backup(backup: Path, key_file: Path, backup_id: str) -> list[str]:
+    key = load_dpapi_key(key_file)
+    if not verify_backup(backup, key):
+        raise ValueError("El componente de medios no superó la autenticación completa.")
+    verifier = _MediaArchiveExtractor(None, backup_id)
+    with backup.open("rb") as source:
+        decrypt_stream(source, verifier, key)
+    return verifier.finalize()
+
+
+def import_media_archive(source: BinaryIO, destination: Path, backup_id: str) -> list[str]:
+    if any(destination.iterdir()):
+        raise ValueError("El volumen aislado de restauración no está vacío.")
+    extractor = _MediaArchiveExtractor(destination, backup_id)
+    for chunk in iter(lambda: source.read(CHUNK_SIZE), b""):
+        extractor.write(chunk)
+    return extractor.finalize()
+
+
+def restore_media_to_docker(backup: Path, key_file: Path, backup_id: str,
+                            image: str, timeout: int = 900) -> int:
+    if not re.fullmatch(r"j2m-interactive:[0-9a-f]{40}", image):
+        raise ValueError("La imagen debe estar fijada a un SHA aprobado exacto.")
+    key = load_dpapi_key(key_file)
+    if not verify_backup(backup, key):
+        raise ValueError("El componente de medios no superó la autenticación completa.")
+    volume = "j2m-restore-media-" + secrets.token_hex(6)
+    container = "j2m-restore-media-" + secrets.token_hex(6)
+    subprocess.run(["docker", "volume", "create", volume], check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+    try:
+        process = subprocess.Popen(
+            ["docker", "run", "--rm", "-i", "--name", container, "--network", "none",
+             "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
+             "--mount", f"type=volume,src={volume},dst=/restore",
+             image, "python", "-m", "scripts.selfhost_backup", "import-media",
+             "--destination", "/restore", "--backup-id", backup_id],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False,
+        )
+        assert process.stdin is not None
+        timer = threading.Timer(timeout, process.kill)
+        timer.start()
+        try:
+            with backup.open("rb") as source:
+                decrypt_stream(source, process.stdin, key)
+            process.stdin.close()
+            if process.wait(timeout=10) != 0:
+                raise RuntimeError("La restauración aislada de medios falló.")
+            assert process.stdout is not None
+            stdout = process.stdout.read()
+            payload = json.loads(stdout.decode("utf-8"))
+            count = int(payload["restored"])
+            if count < 0 or count > MEDIA_MAX_FILES:
+                raise RuntimeError("La restauración devolvió un recuento inválido.")
+            return count
+        finally:
+            timer.cancel()
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=10)
+    finally:
+        subprocess.run(["docker", "rm", "-f", container], stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=30)
+        subprocess.run(["docker", "volume", "rm", volume], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+
+
+def _bundle_metadata(path: Path) -> dict | None:
+    try:
+        payload = json.loads(_manifest(path).read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else None
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _complete_backups(directory: Path, key: bytes, category: str = "legacy") -> list[Path]:
+    """Return only standalone bundles from one explicit retention category."""
+    allowed = {"legacy", "configuration"}
+    if category not in allowed:
+        raise ValueError("Categoría de respaldo local no válida.")
+    expected_kind = "postgresql" if category == "legacy" else "configuration"
+    selected = []
+    for path in directory.glob("*.j2mbackup"):
+        metadata = _bundle_metadata(path)
+        if (metadata and metadata.get("kind") == expected_kind
+                and not metadata.get("backup_id") and verify_backup(path, key)):
+            selected.append(path)
+    return sorted(selected, key=lambda item: item.stat().st_mtime, reverse=True)
+
+
+def _retain_local_locked(directory: Path, keep: int, key: bytes,
+                         category: str = "legacy") -> int:
+    backups = _complete_backups(directory, key, category)
     removed = 0
     for item in backups[max(1, keep):]:
         _manifest(item).unlink(missing_ok=True)
@@ -343,9 +758,9 @@ def _retain_local_locked(directory: Path, keep: int, key: bytes) -> int:
 
 
 def retain_local(directory: Path, key: bytes, keep: int = 48,
-                 lock_file: Path | None = None) -> int:
+                 lock_file: Path | None = None, category: str = "legacy") -> int:
     with exclusive_lock(lock_file or directory.parent / ".operations.lock"):
-        return _retain_local_locked(directory, keep, key)
+        return _retain_local_locked(directory, keep, key, category)
 
 
 def _run_streaming_dump(command: list[str], child_env: dict[str, str], output: Path,
@@ -376,7 +791,9 @@ def _run_streaming_dump(command: list[str], child_env: dict[str, str], output: P
 
 def database_backup(env_file: Path, output_dir: Path, key_file: Path, retries: int = 3,
                     network: str = "bridge", timeout: int = 900,
-                    allow_insecure_synthetic: bool = False) -> Path:
+                    allow_insecure_synthetic: bool = False,
+                    backup_id: str | None = None, retain: bool = True,
+                    acquire_lock: bool = True) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     key = load_dpapi_key(key_file)
     root_cert = None
@@ -393,13 +810,19 @@ def database_backup(env_file: Path, output_dir: Path, key_file: Path, retries: i
     database_url = _read_database_url(env_file, allow_insecure_synthetic, container_root_cert)
     lock_file = output_dir.parent / ".operations.lock"
     log_path = output_dir.parent / "logs" / "backup.jsonl"
-    with exclusive_lock(lock_file):
+    with (exclusive_lock(lock_file) if acquire_lock else nullcontext()):
         for attempt in range(1, retries + 1):
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-            final = output_dir / f"j2m-postgres-{stamp}-{secrets.token_hex(3)}.dump.j2mbackup"
+            if backup_id is not None:
+                _safe_backup_id(backup_id)
+                final = output_dir / f"j2m-postgres-{backup_id}.dump.j2mbackup"
+            else:
+                final = output_dir / f"j2m-postgres-{stamp}-{secrets.token_hex(3)}.dump.j2mbackup"
             partial = final.with_name(final.name + ".partial")
             container = "j2m-pgdump-" + secrets.token_hex(6)
             command = ["docker", "run", "--rm", "--name", container, "--network", network]
+            if allow_insecure_synthetic:
+                command.extend(["--add-host", "j2m-backup-source:host-gateway"])
             if root_cert is not None:
                 command.extend(["--mount", f"type=bind,src={root_cert},dst={container_root_cert},readonly"])
             command.extend(["-e", "DATABASE_URL", "postgres:17-alpine", "sh", "-eu", "-c",
@@ -409,10 +832,11 @@ def database_backup(env_file: Path, output_dir: Path, key_file: Path, retries: i
             child_env["DATABASE_URL"] = database_url
             try:
                 _run_streaming_dump(command, child_env, partial, key, timeout)
-                _publish_bundle(partial, final, "postgresql")
+                _publish_bundle(partial, final, "postgresql", backup_id)
                 if not verify_backup(final, key):
                     raise RuntimeError("El respaldo publicado no superó autenticación completa.")
-                _retain_local_locked(output_dir, 48, key)
+                if retain:
+                    _retain_local_locked(output_dir, 48, key)
                 _safe_log(log_path, "database_backup", "ok", f"attempt={attempt}")
                 return final
             except Exception as exc:
@@ -424,6 +848,140 @@ def database_backup(env_file: Path, output_dir: Path, key_file: Path, retries: i
                 if attempt == retries:
                     raise
     raise RuntimeError("No fue posible completar el respaldo.")
+
+
+def _encrypted_json_bundle(payload: dict, final: Path, key: bytes,
+                           kind: str, backup_id: str) -> Path:
+    partial = final.with_name(final.name + ".partial")
+    try:
+        source = io.BytesIO(json.dumps(payload, sort_keys=True,
+                                       separators=(",", ":")).encode("utf-8"))
+        with partial.open("xb") as destination:
+            encrypt_stream(source, destination, key)
+            destination.flush()
+            os.fsync(destination.fileno())
+        _publish_bundle(partial, final, kind, backup_id)
+        return final
+    except Exception:
+        partial.unlink(missing_ok=True)
+        raise
+
+
+def _decrypt_json_bundle(path: Path, key: bytes, max_bytes: int = 1024 * 1024) -> dict:
+    if not verify_backup(path, key):
+        raise ValueError("El manifiesto del conjunto no superó la autenticación.")
+    output = io.BytesIO()
+    with path.open("rb") as source:
+        _, size = decrypt_stream(source, output, key)
+    if size > max_bytes:
+        raise ValueError("El manifiesto descifrado excede el límite permitido.")
+    try:
+        payload = json.loads(output.getvalue().decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("El manifiesto cifrado no es válido.") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("El manifiesto cifrado no es válido.")
+    return payload
+
+
+def integral_backup(env_file: Path, media_root: Path | None, output_dir: Path,
+                    key_file: Path, retries: int = 3, network: str = "bridge",
+                    timeout: int = 900,
+                    allow_insecure_synthetic: bool = False,
+                    media_volume: str | None = None,
+                    media_image: str | None = None) -> Path:
+    """Create a DB-first consistent set and publish its authenticated index last.
+
+    Media writes persist and fsync their new object before the database commit,
+    while superseded objects are retained. Therefore every managed key visible
+    to the completed database snapshot exists when the subsequent media scan
+    starts. A concurrent rewrite of an inventoried object fails closed.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with exclusive_lock(output_dir.parent / ".operations.lock"):
+        backup_id = secrets.token_hex(16)
+        database = database_backup(env_file, output_dir, key_file, retries, network,
+                                   timeout, allow_insecure_synthetic, backup_id,
+                                   retain=False, acquire_lock=False)
+        media = None
+        index = None
+        try:
+            if media_root is not None:
+                media = media_backup(media_root, output_dir, key_file, backup_id)
+            elif media_volume and media_image:
+                media = media_backup_from_docker(media_volume, media_image, output_dir,
+                                                 key_file, backup_id, timeout)
+            else:
+                raise ValueError("Debe configurarse una fuente de medios explícita.")
+            # Restore the exact dump and compare its managed references before
+            # publishing the common index. An incomplete/cross-tenant set is
+            # never selectable by retention, cloud copy or weekly restore.
+            validate_integral_snapshot(database, media, key_file, backup_id, timeout)
+            components = []
+            for kind, path in (("postgresql", database), ("media", media)):
+                components.append({"kind": kind, "filename": path.name,
+                                   "sha256": _hash_file(path), "size": path.stat().st_size})
+            payload = {"schema": 1, "backup_id": backup_id,
+                       "created_at": datetime.now(timezone.utc).isoformat(),
+                       "consistency": "database-first-append-only-media", "components": components}
+            index = output_dir / f"j2m-set-{backup_id}.j2mbackup"
+            _encrypted_json_bundle(payload, index, load_dpapi_key(key_file),
+                                   "integral-set", backup_id)
+            if not verify_integral_set(index, key_file):
+                raise RuntimeError("El conjunto integral publicado no superó la verificación.")
+            _retain_integral_sets(output_dir, key_file, 48)
+            return index
+        except Exception:
+            for component in (index, media, database):
+                if component is not None:
+                    _manifest(component).unlink(missing_ok=True)
+                    _sidecar(component).unlink(missing_ok=True)
+                    component.unlink(missing_ok=True)
+            raise
+
+
+def verify_integral_set(index: Path, key_file: Path) -> bool:
+    try:
+        key = load_dpapi_key(key_file)
+        payload = _decrypt_json_bundle(index, key)
+        backup_id = _safe_backup_id(payload["backup_id"])
+        if payload.get("schema") != 1 or len(payload.get("components", [])) != 2:
+            return False
+        expected = {"postgresql", "media"}
+        for component in payload["components"]:
+            kind = component["kind"]
+            filename = component["filename"]
+            if kind not in expected or Path(filename).name != filename:
+                return False
+            expected.remove(kind)
+            path = index.parent / filename
+            if (path.stat().st_size != component["size"]
+                    or not secrets.compare_digest(_hash_file(path), component["sha256"])
+                    or not verify_backup(path, key)):
+                return False
+            metadata = json.loads(_manifest(path).read_text(encoding="utf-8"))
+            if metadata.get("backup_id") != backup_id:
+                return False
+        return not expected
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        return False
+
+
+def _retain_integral_sets(directory: Path, key_file: Path, keep: int) -> int:
+    key = load_dpapi_key(key_file)
+    indexes = sorted((path for path in directory.glob("j2m-set-*.j2mbackup")
+                      if verify_integral_set(path, key_file)),
+                     key=lambda path: path.stat().st_mtime, reverse=True)
+    removed = 0
+    for index in indexes[max(1, keep):]:
+        payload = _decrypt_json_bundle(index, key)
+        members = [index] + [directory / item["filename"] for item in payload["components"]]
+        for member in members:
+            _manifest(member).unlink(missing_ok=True)
+            _sidecar(member).unlink(missing_ok=True)
+            member.unlink(missing_ok=True)
+        removed += 1
+    return removed
 
 
 def configuration_backup(paths: list[Path], output_dir: Path, key_file: Path,
@@ -440,7 +998,7 @@ def configuration_backup(paths: list[Path], output_dir: Path, key_file: Path,
         current = fingerprint.hexdigest()
         key = load_dpapi_key(key_file)
         if state_path.exists() and state_path.read_text(encoding="ascii").strip() == current:
-            complete = _complete_backups(output_dir, key)
+            complete = _complete_backups(output_dir, key, "configuration")
             if not complete:
                 raise RuntimeError("La configuración no cambió, pero falta un respaldo completo válido.")
             return None
@@ -459,25 +1017,51 @@ def configuration_backup(paths: list[Path], output_dir: Path, key_file: Path,
             os.fsync(destination.fileno())
         _publish_bundle(partial, final, "configuration")
         _atomic_write(state_path, current.encode("ascii"))
-        _retain_local_locked(output_dir, 30, key)
+        _retain_local_locked(output_dir, 30, key, "configuration")
         return final
 
 
+def _select_backup(source_dir: Path, key_file: Path, mode: str,
+                   max_age_seconds: int = 0) -> Path:
+    if mode not in {"legacy", "integral", "configuration"}:
+        raise ValueError("Modo de selección de respaldo inválido.")
+    key = load_dpapi_key(key_file)
+    if mode == "integral":
+        candidates = sorted(source_dir.glob("j2m-set-*.j2mbackup"),
+                            key=lambda item: item.stat().st_mtime, reverse=True)
+        selected = next((item for item in candidates if verify_integral_set(item, key_file)), None)
+    else:
+        selected = next(iter(_complete_backups(source_dir, key, mode)), None)
+    if selected is None:
+        raise RuntimeError(f"No existe un respaldo {mode} completo y autenticado.")
+    if max_age_seconds > 0:
+        age = time.time() - selected.stat().st_mtime
+        if age < 0 or age > max_age_seconds:
+            raise RuntimeError(f"El respaldo {mode} más reciente está obsoleto.")
+    return selected
+
+
 def stage_offsite(source_dir: Path, destination_dir: Path, key_file: Path,
-                  lock_file: Path | None = None) -> Path:
+                  lock_file: Path | None = None, mode: str = "legacy",
+                  max_age_seconds: int = 0) -> Path:
     """Stage exactly the newest complete, SHA and AEAD verified bundle."""
     with exclusive_lock(lock_file or source_dir.parent / ".operations.lock"):
         key = load_dpapi_key(key_file)
-        selected = next(iter(_complete_backups(source_dir, key)), None)
-        if selected is None:
-            raise RuntimeError("No existe un respaldo completo y autenticado para transferir.")
+        selected = _select_backup(source_dir, key_file, mode, max_age_seconds)
+        members = [selected] if selected else []
+        if mode == "integral":
+            payload = _decrypt_json_bundle(selected, key)
+            members.extend(source_dir / item["filename"] for item in payload["components"])
         staging = destination_dir.with_name(destination_dir.name + ".partial-" + secrets.token_hex(4))
         staging.mkdir(parents=True)
         try:
-            for item in (selected, _sidecar(selected), _manifest(selected)):
-                shutil.copy2(item, staging / item.name)
+            for member in members:
+                for item in (member, _sidecar(member), _manifest(member)):
+                    shutil.copy2(item, staging / item.name)
             copied = staging / selected.name
-            if not verify_backup(copied, key):
+            valid = (verify_integral_set(copied, key_file) if selected.name.startswith("j2m-set-")
+                     else verify_backup(copied, key))
+            if not valid:
                 raise RuntimeError("La copia preparada no superó la verificación completa.")
             old = destination_dir.with_name(destination_dir.name + ".old")
             if old.exists():
@@ -540,6 +1124,7 @@ def remote_retention_plan(inventory: list[dict], max_age_days: int,
     now = now or datetime.now(timezone.utc)
     cutoff = now - timedelta(days=max_age_days)
     groups: dict[str, dict[str, tuple[str, datetime]]] = {}
+    integral_groups: dict[str, dict[str, tuple[str, datetime]]] = {}
     suffixes = (".complete.json", ".sha256", "")
     for item in inventory:
         path = str(item.get("Path") or "")
@@ -554,30 +1139,55 @@ def remote_retention_plan(inventory: list[dict], max_age_days: int,
                 suffix = candidate
                 break
         if (not base or suffix is None
-                or not re.fullmatch(r"j2m-(?:postgres|configuration)-[A-Za-z0-9._-]+\.j2mbackup", base)):
+                or not re.fullmatch(
+                    r"j2m-(?:postgres|configuration|set|media)-[A-Za-z0-9._-]+\.j2mbackup",
+                    base,
+                )):
             continue
         try:
             modified = _parse_remote_time(str(item["ModTime"]))
         except (KeyError, TypeError, ValueError):
             continue
-        groups.setdefault(base, {})[suffix] = (path, modified)
+        integral_match = re.fullmatch(
+            r"j2m-(set|media|postgres)-([0-9a-f]{32})(?:\.dump)?\.j2mbackup", base
+        )
+        if integral_match:
+            kind, backup_id = integral_match.groups()
+            integral_groups.setdefault(backup_id, {})[kind + suffix] = (path, modified)
+        else:
+            groups.setdefault(base, {})[suffix] = (path, modified)
+    required_integral = {kind + suffix for kind in ("set", "media", "postgres")
+                         for suffix in suffixes}
+    complete_integral = {backup_id: members for backup_id, members in integral_groups.items()
+                         if required_integral.issubset(members)}
+    protected_backups: list[str] = []
+    protected_files: list[str] = []
+    deletions: list[str] = []
+    if complete_integral:
+        protected_id = max(complete_integral,
+                           key=lambda value: complete_integral[value]["set.complete.json"][1])
+        protected_backups.append(f"j2m-set-{protected_id}.j2mbackup")
+        protected_files.extend(path for path, _ in complete_integral[protected_id].values())
+        for backup_id, members in integral_groups.items():
+            if backup_id == protected_id:
+                continue
+            if members and all(modified < cutoff for _, modified in members.values()):
+                deletions.extend(path for path, _ in members.values())
     complete = {
         base: members for base, members in groups.items()
         if all(suffix in members for suffix in suffixes)
     }
-    if not complete:
-        return {"protected": None, "delete": []}
-    protected = max(
-        complete,
-        key=lambda base: complete[base][".complete.json"][1],
-    )
-    deletions: list[str] = []
-    for base, members in groups.items():
-        if base == protected:
-            continue
-        if members and all(modified < cutoff for _, modified in members.values()):
-            deletions.extend(path for path, _ in members.values())
-    return {"protected": protected, "delete": sorted(deletions)}
+    if complete:
+        protected = max(complete, key=lambda base: complete[base][".complete.json"][1])
+        protected_backups.append(protected)
+        protected_files.extend(path for path, _ in complete[protected].values())
+        for base, members in groups.items():
+            if base != protected and members and all(modified < cutoff
+                                                      for _, modified in members.values()):
+                deletions.extend(path for path, _ in members.values())
+    return {"protected": protected_backups[0] if protected_backups else None,
+            "protected_backups": protected_backups,
+            "protected_files": sorted(protected_files), "delete": sorted(deletions)}
 
 
 @dataclass(frozen=True)
@@ -596,9 +1206,84 @@ def _psql(name: str, sql: str, timeout: int = 30) -> str:
     return result.stdout.strip()
 
 
+def _wait_postgres(name: str) -> None:
+    for _ in range(30):
+        probe = subprocess.run(["docker", "exec", name, "pg_isready", "-U", "j2m_restore",
+                                "-d", "j2m_restore"], stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=10)
+        if probe.returncode == 0:
+            return
+        time.sleep(1)
+    raise RuntimeError("PostgreSQL aislado no quedó disponible.")
+
+
+def _restore_database_stream(backup: Path, key: bytes, name: str, timeout: int) -> None:
+    listing = subprocess.Popen(
+        ["docker", "exec", "-i", name, "sh", "-eu", "-c",
+         "pg_restore --list > /tmp/all.list; "
+         "grep -v supabase_vault /tmp/all.list > /tmp/j2m-restore.list; "
+         "test -s /tmp/j2m-restore.list"],
+        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+    )
+    assert listing.stdin is not None
+    with backup.open("rb") as encrypted:
+        decrypt_stream(encrypted, listing.stdin, key)
+    listing.stdin.close()
+    if listing.wait(timeout=30) != 0:
+        raise RuntimeError("No fue posible preparar la lista de restauración aislada.")
+    restore = subprocess.Popen(["docker", "exec", "-i", name, "pg_restore",
+                                "--exit-on-error", "--no-owner", "--no-acl",
+                                "--exclude-schema=vault", "--use-list=/tmp/j2m-restore.list",
+                                "-U", "j2m_restore", "-d", "j2m_restore"],
+                               stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.PIPE)
+    assert restore.stdin is not None
+    timer = threading.Timer(timeout, restore.kill)
+    timer.start()
+    try:
+        with backup.open("rb") as encrypted:
+            decrypt_stream(encrypted, restore.stdin, key)
+        restore.stdin.close()
+        if restore.wait(timeout=10) != 0:
+            raise RuntimeError("pg_restore falló en la base aislada.")
+    finally:
+        timer.cancel()
+        if restore.poll() is None:
+            restore.kill()
+            restore.wait()
+
+
+def _restored_media_references(name: str, archived: set[str]) -> set[str]:
+    rows = _psql(
+        name,
+        "SELECT id||E'\\t'||'logo'||E'\\t'||logo_path FROM businesses "
+        "WHERE logo_path LIKE 'businesses/%' UNION ALL "
+        "SELECT id||E'\\t'||'cover'||E'\\t'||cover_path FROM businesses "
+        "WHERE cover_path LIKE 'businesses/%'",
+    ).splitlines()
+    referenced = set()
+    for row in rows:
+        fields = row.split("\t")
+        if len(fields) != 3:
+            raise RuntimeError("PostgreSQL contiene una referencia de medios inválida.")
+        business_id, kind, storage_key = fields
+        if (not MEDIA_KEY_RE.fullmatch(storage_key)
+                or storage_key.split("/", 3)[1] != business_id
+                or storage_key.split("/", 3)[2] != kind):
+            raise RuntimeError("PostgreSQL contiene una referencia cruzada de medios.")
+        referenced.add(storage_key)
+    if referenced - archived:
+        raise RuntimeError("El conjunto integral omite medios referenciados por PostgreSQL.")
+    return referenced
+
+
 def restore_isolated(backup: Path, key_file: Path, lock_file: Path | None = None,
-                     timeout: int = 900) -> RestoreReport:
-    with exclusive_lock(lock_file or backup.parent / ".operations.lock"):
+                     timeout: int = 900, media_backup_path: Path | None = None,
+                     backup_id: str | None = None,
+                     acquire_lock: bool = True) -> RestoreReport:
+    lock = exclusive_lock(lock_file or backup.parent / ".operations.lock") \
+        if acquire_lock else nullcontext()
+    with lock:
         key = load_dpapi_key(key_file)
         if not verify_backup(backup, key):
             raise ValueError("El respaldo no superó SHA-256, manifiesto y autenticación AES-GCM.")
@@ -610,52 +1295,8 @@ def restore_isolated(backup: Path, key_file: Path, lock_file: Path | None = None
                         "-e", f"POSTGRES_PASSWORD={password}", "postgres:17-alpine"],
                        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
         try:
-            for _ in range(30):
-                probe = subprocess.run(["docker", "exec", name, "pg_isready", "-U", "j2m_restore",
-                                        "-d", "j2m_restore"], stdout=subprocess.DEVNULL,
-                                       stderr=subprocess.DEVNULL, timeout=10)
-                if probe.returncode == 0:
-                    break
-                time.sleep(1)
-            else:
-                raise RuntimeError("PostgreSQL aislado no quedó disponible.")
-            # Supabase Vault is a platform-managed extension unavailable in the
-            # stock PostgreSQL image. Build the pg_restore TOC only inside the
-            # isolated container, remove its extension entries, and exclude the
-            # managed vault schema. The decrypted dump is never persisted.
-            listing = subprocess.Popen(
-                ["docker", "exec", "-i", name, "sh", "-eu", "-c",
-                 "pg_restore --list > /tmp/all.list; "
-                 "grep -v supabase_vault /tmp/all.list > /tmp/j2m-restore.list; "
-                 "test -s /tmp/j2m-restore.list"],
-                stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-            )
-            assert listing.stdin is not None
-            with backup.open("rb") as encrypted:
-                decrypt_stream(encrypted, listing.stdin, key)
-            listing.stdin.close()
-            if listing.wait(timeout=30) != 0:
-                raise RuntimeError("No fue posible preparar la lista de restauración aislada.")
-            restore = subprocess.Popen(["docker", "exec", "-i", name, "pg_restore",
-                                        "--exit-on-error", "--no-owner", "--no-acl",
-                                        "--exclude-schema=vault",
-                                        "--use-list=/tmp/j2m-restore.list", "-U",
-                                        "j2m_restore", "-d", "j2m_restore"], stdin=subprocess.PIPE,
-                                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-            assert restore.stdin is not None
-            timer = threading.Timer(timeout, restore.kill)
-            timer.start()
-            try:
-                with backup.open("rb") as encrypted:
-                    decrypt_stream(encrypted, restore.stdin, key)
-                restore.stdin.close()
-                if restore.wait(timeout=10) != 0:
-                    raise RuntimeError("pg_restore falló en la base aislada.")
-            finally:
-                timer.cancel()
-                if restore.poll() is None:
-                    restore.kill()
-                    restore.wait()
+            _wait_postgres(name)
+            _restore_database_stream(backup, key, name, timeout)
             revision = _psql(name, "SELECT version_num FROM alembic_version")
             if revision != EXPECTED_ALEMBIC_HEAD:
                 raise RuntimeError("La restauración no coincide con el head Alembic esperado.")
@@ -676,9 +1317,135 @@ def restore_isolated(backup: Path, key_file: Path, lock_file: Path | None = None
             counts = [int(v) for v in _psql(name, "SELECT (SELECT count(*) FROM businesses)||','||"
                       "(SELECT count(*) FROM customers)||','||(SELECT count(*) FROM staff)||','||"
                       "(SELECT count(*) FROM transactions)").split(",")]
+            if media_backup_path is not None:
+                if backup_id is None:
+                    raise ValueError("Falta el identificador del conjunto de medios.")
+                archived = set(inspect_media_backup(media_backup_path, key_file, backup_id))
+                _restored_media_references(name, archived)
             return RestoreReport(revision, *counts)
         finally:
             subprocess.run(["docker", "rm", "-f", name], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=30)
+
+
+def validate_integral_snapshot(database_backup: Path, media_backup_path: Path,
+                               key_file: Path, backup_id: str,
+                               timeout: int = 900) -> RestoreReport:
+    return restore_isolated(database_backup, key_file, timeout=timeout,
+                            media_backup_path=media_backup_path,
+                            backup_id=backup_id, acquire_lock=False)
+
+
+def _integral_components(index: Path, key_file: Path) -> tuple[str, Path, Path]:
+    if not verify_integral_set(index, key_file):
+        raise ValueError("El conjunto integral no superó la autenticación completa.")
+    payload = _decrypt_json_bundle(index, load_dpapi_key(key_file))
+    backup_id = _safe_backup_id(payload["backup_id"])
+    components = {item["kind"]: index.parent / item["filename"]
+                  for item in payload["components"]}
+    return backup_id, components["postgresql"], components["media"]
+
+
+def restore_integral_isolated(index: Path, key_file: Path, image: str,
+                              lock_file: Path | None = None,
+                              timeout: int = 900) -> RestoreReport:
+    """Restore one authenticated DB/media set and probe its public media in isolation."""
+    if not re.fullmatch(r"j2m-interactive:[0-9a-f]{40}", image):
+        raise ValueError("La imagen debe estar fijada a un SHA aprobado exacto.")
+    with exclusive_lock(lock_file or index.parent / ".operations.lock"):
+        backup_id, database, media = _integral_components(index, key_file)
+        key = load_dpapi_key(key_file)
+        suffix = secrets.token_hex(6)
+        pg_name = "j2m-restore-pg-" + suffix
+        app_name = "j2m-restore-app-" + suffix
+        network = "j2m-restore-net-" + suffix
+        volume = "j2m-restore-media-" + suffix
+        password = secrets.token_urlsafe(24)
+        subprocess.run(["docker", "network", "create", "--internal", network], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+        subprocess.run(["docker", "volume", "create", volume], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+        try:
+            subprocess.run(["docker", "run", "-d", "--name", pg_name, "--network", network,
+                            "--network-alias", "postgres", "--tmpfs",
+                            "/var/lib/postgresql/data:rw,noexec,nosuid,size=2g",
+                            "-e", "POSTGRES_DB=j2m_restore", "-e", "POSTGRES_USER=j2m_restore",
+                            "-e", f"POSTGRES_PASSWORD={password}", "postgres:17-alpine"],
+                           check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=60)
+            _wait_postgres(pg_name)
+            _restore_database_stream(database, key, pg_name, timeout)
+            archived = set(inspect_media_backup(media, key_file, backup_id))
+            referenced = _restored_media_references(pg_name, archived)
+
+            subprocess.run(
+                ["docker", "run", "--rm", "--network", "none", "--user", "0",
+                 "--read-only", "--cap-drop", "ALL", "--cap-add", "CHOWN", "--security-opt",
+                 "no-new-privileges:true", "--mount", f"type=volume,src={volume},dst=/restore",
+                 image, "chown", "j2m:j2m", "/restore"], check=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+            importer = subprocess.Popen(
+                ["docker", "run", "--rm", "-i", "--network", "none", "--read-only",
+                 "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
+                 "--mount", f"type=volume,src={volume},dst=/restore", image, "python", "-m",
+                 "scripts.selfhost_backup", "import-media", "--destination", "/restore",
+                 "--backup-id", backup_id], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE)
+            assert importer.stdin is not None
+            with media.open("rb") as source:
+                decrypt_stream(source, importer.stdin, key)
+            importer.stdin.close()
+            if importer.wait(timeout=timeout) != 0:
+                raise RuntimeError("La restauración aislada de medios falló.")
+
+            env = ["-e", "FLASK_ENV=development", "-e",
+                   f"DATABASE_URL=postgresql://j2m_restore:{password}@postgres/j2m_restore",
+                   "-e", "DATABASE_SSLMODE=disable", "-e", "SECRET_KEY=restore-test-only",
+                   "-e", "JWT_SECRET_KEY=restore-test-jwt-only", "-e",
+                   "UPLOAD_STORAGE_BACKEND=disabled", "-e", "MEDIA_STORAGE_BACKEND=local",
+                   "-e", "MEDIA_STORAGE_ROOT=/app/instance/media", "-e",
+                   "GOOGLE_WALLET_MODE=disabled", "-e", "APPLE_WALLET_MODE=disabled"]
+            subprocess.run(["docker", "run", "-d", "--name", app_name, "--network", network,
+                            "--read-only", "--cap-drop", "ALL", "--security-opt",
+                            "no-new-privileges:true", "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
+                            "--mount", f"type=volume,src={volume},dst=/app/instance/media,readonly",
+                            *env, image, "gunicorn", "--bind", "0.0.0.0:8000", "run:app"],
+                           check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=60)
+            for _ in range(30):
+                probe = subprocess.run(["docker", "exec", app_name, "python", "-c",
+                    "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2)"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+                if probe.returncode == 0:
+                    break
+                time.sleep(1)
+            else:
+                raise RuntimeError("La aplicación aislada no quedó disponible.")
+            retained = set()
+            for path in archived:
+                if MEDIA_MARKER_RE.fullmatch(path):
+                    asset = re.sub(r"/\.(?=[^/]+\.retained\.json$)", "/", path)
+                    retained.add(asset.removesuffix(".retained.json"))
+            authorized = referenced | retained
+            for storage_key in sorted(authorized):
+                script = ("import urllib.request; r=urllib.request.urlopen(" +
+                          repr("http://127.0.0.1:8000/media/" + storage_key) +
+                          ", timeout=5); assert r.status == 200")
+                subprocess.run(["docker", "exec", app_name, "python", "-c", script],
+                               check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               timeout=10)
+            revision = _psql(pg_name, "SELECT version_num FROM alembic_version")
+            counts = [int(v) for v in _psql(pg_name,
+                "SELECT (SELECT count(*) FROM businesses)||','||(SELECT count(*) FROM customers)||','||"
+                "(SELECT count(*) FROM staff)||','||(SELECT count(*) FROM transactions)").split(",")]
+            return RestoreReport(revision, *counts)
+        finally:
+            for container in (app_name, pg_name):
+                subprocess.run(["docker", "rm", "-f", container], stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=30)
+            subprocess.run(["docker", "volume", "rm", volume], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=30)
+            subprocess.run(["docker", "network", "rm", network], stdout=subprocess.DEVNULL,
                            stderr=subprocess.DEVNULL, timeout=30)
 
 
@@ -693,14 +1460,52 @@ def main() -> int:
     backup.add_argument("--timeout", type=int, default=900)
     backup.add_argument("--network", default="bridge", help=argparse.SUPPRESS)
     backup.add_argument("--allow-insecure-synthetic", action="store_true", help=argparse.SUPPRESS)
+    integral = commands.add_parser("integral")
+    integral.add_argument("--env-file", type=Path, default=Path(".env.selfhost"))
+    integral_source = integral.add_mutually_exclusive_group(required=True)
+    integral_source.add_argument("--media-root", type=Path)
+    integral_source.add_argument("--media-volume")
+    integral.add_argument("--media-image")
+    integral.add_argument("--output-dir", type=Path, default=Path("selfhost-backups/hourly"))
+    integral.add_argument("--key-file", type=Path, required=True)
+    integral.add_argument("--retries", type=int, default=3)
+    integral.add_argument("--timeout", type=int, default=900)
+    integral.add_argument("--network", default="bridge", help=argparse.SUPPRESS)
+    integral.add_argument("--allow-insecure-synthetic", action="store_true", help=argparse.SUPPRESS)
     verify = commands.add_parser("verify")
     verify.add_argument("backup", type=Path)
     verify.add_argument("--key-file", type=Path, required=True)
+    verify_set = commands.add_parser("verify-set")
+    verify_set.add_argument("backup", type=Path)
+    verify_set.add_argument("--key-file", type=Path, required=True)
+    media = commands.add_parser("media")
+    media.add_argument("--source-root", type=Path, required=True)
+    media.add_argument("--output-dir", type=Path, required=True)
+    media.add_argument("--backup-id", required=True)
+    media.add_argument("--key-file", type=Path, required=True)
+    export_media = commands.add_parser("export-media", help=argparse.SUPPRESS)
+    export_media.add_argument("--source-root", type=Path, required=True)
+    export_media.add_argument("--backup-id", required=True)
+    import_media = commands.add_parser("import-media", help=argparse.SUPPRESS)
+    import_media.add_argument("--destination", type=Path, required=True)
+    import_media.add_argument("--backup-id", required=True)
+    restore_media_parser = commands.add_parser("restore-media")
+    restore_media_parser.add_argument("backup", type=Path)
+    restore_media_parser.add_argument("--destination", type=Path, required=True)
+    restore_media_parser.add_argument("--backup-id", required=True)
+    restore_media_parser.add_argument("--key-file", type=Path, required=True)
+    restore_media_docker_parser = commands.add_parser("restore-media-docker")
+    restore_media_docker_parser.add_argument("backup", type=Path)
+    restore_media_docker_parser.add_argument("--backup-id", required=True)
+    restore_media_docker_parser.add_argument("--image", required=True)
+    restore_media_docker_parser.add_argument("--key-file", type=Path, required=True)
+    restore_media_docker_parser.add_argument("--timeout", type=int, default=900)
     prune = commands.add_parser("retain-local")
     prune.add_argument("directory", type=Path)
     prune.add_argument("--keep", type=int, default=48)
     prune.add_argument("--lock-file", type=Path)
     prune.add_argument("--key-file", type=Path, required=True)
+    prune.add_argument("--category", choices=("legacy", "configuration"), default="legacy")
     initialize = commands.add_parser("init-key")
     initialize.add_argument("--key-file", type=Path, required=True)
     initialize.add_argument("--recovery-file", type=Path, required=True)
@@ -716,6 +1521,14 @@ def main() -> int:
     stage.add_argument("--destination-dir", type=Path, required=True)
     stage.add_argument("--key-file", type=Path, required=True)
     stage.add_argument("--lock-file", type=Path)
+    stage.add_argument("--mode", choices=("legacy", "integral", "configuration"),
+                       default="legacy")
+    stage.add_argument("--max-age-seconds", type=int, default=0)
+    select = commands.add_parser("select-backup")
+    select.add_argument("--source-dir", type=Path, required=True)
+    select.add_argument("--key-file", type=Path, required=True)
+    select.add_argument("--mode", choices=("legacy", "integral", "configuration"), required=True)
+    select.add_argument("--max-age-seconds", type=int, default=0)
     restore_config = commands.add_parser("restore-configuration")
     restore_config.add_argument("backup", type=Path)
     restore_config.add_argument("--destination", type=Path, required=True)
@@ -728,16 +1541,49 @@ def main() -> int:
     restore.add_argument("--key-file", type=Path, required=True)
     restore.add_argument("--lock-file", type=Path)
     restore.add_argument("--timeout", type=int, default=900)
+    restore.add_argument("--media-backup", type=Path)
+    restore.add_argument("--backup-id")
+    restore_integral = commands.add_parser("restore-integral")
+    restore_integral.add_argument("backup", type=Path)
+    restore_integral.add_argument("--key-file", type=Path, required=True)
+    restore_integral.add_argument("--image", required=True)
+    restore_integral.add_argument("--lock-file", type=Path)
+    restore_integral.add_argument("--timeout", type=int, default=900)
     args = parser.parse_args()
     if args.command == "database":
         path = database_backup(args.env_file, args.output_dir, args.key_file,
                                max(1, min(args.retries, 6)), args.network,
                                max(30, min(args.timeout, 7200)), args.allow_insecure_synthetic)
         print(f"Respaldo cifrado creado y verificado: {path.name}")
+    elif args.command == "integral":
+        path = integral_backup(args.env_file, args.media_root, args.output_dir, args.key_file,
+                               max(1, min(args.retries, 6)), args.network,
+                               max(30, min(args.timeout, 7200)), args.allow_insecure_synthetic,
+                               args.media_volume, args.media_image)
+        print(f"Conjunto integral cifrado y verificado: {path.name}")
     elif args.command == "verify":
         if not verify_backup(args.backup, load_dpapi_key(args.key_file)):
             raise ValueError("El respaldo no superó la verificación completa.")
         print("Integridad SHA-256, manifiesto y AES-GCM verificada.")
+    elif args.command == "verify-set":
+        if not verify_integral_set(args.backup, args.key_file):
+            raise ValueError("El conjunto integral no superó la verificación completa.")
+        print("Conjunto integral, componentes y vínculo autenticado verificados.")
+    elif args.command == "media":
+        path = media_backup(args.source_root, args.output_dir, args.key_file, args.backup_id)
+        print(f"Medios cifrados y verificados: {path.name}")
+    elif args.command == "export-media":
+        export_media_archive(args.source_root, args.backup_id, sys.stdout.buffer)
+    elif args.command == "import-media":
+        restored = import_media_archive(sys.stdin.buffer, args.destination, args.backup_id)
+        print(json.dumps({"restored": len(restored)}, sort_keys=True))
+    elif args.command == "restore-media":
+        restored = restore_media(args.backup, args.destination, args.key_file, args.backup_id)
+        print(f"Medios restaurados y verificados: {len(restored)} archivos.")
+    elif args.command == "restore-media-docker":
+        restored = restore_media_to_docker(args.backup, args.key_file, args.backup_id,
+                                           args.image, max(30, min(args.timeout, 7200)))
+        print(f"Volumen aislado de medios verificado: {restored} archivos.")
     elif args.command == "init-key":
         initialize_key(args.key_file, args.recovery_file)
         print("Clave DPAPI y recuperación portable cifrada creadas y verificadas.")
@@ -748,8 +1594,13 @@ def main() -> int:
         path = configuration_backup(args.path, args.output_dir, args.key_file)
         print("Configuración sin cambios." if path is None else f"Configuración cifrada: {path.name}")
     elif args.command == "stage-offsite":
-        path = stage_offsite(args.source_dir, args.destination_dir, args.key_file, args.lock_file)
+        path = stage_offsite(args.source_dir, args.destination_dir, args.key_file, args.lock_file,
+                             args.mode, max(0, args.max_age_seconds))
         print(f"Copia verificada preparada: {path.name}")
+    elif args.command == "select-backup":
+        path = _select_backup(args.source_dir, args.key_file, args.mode,
+                              max(0, args.max_age_seconds))
+        print(path.name)
     elif args.command == "restore-configuration":
         restored = restore_configuration(args.backup, args.destination, args.key_file)
         print(f"Configuración recuperada y verificada: {len(restored)} archivos.")
@@ -757,12 +1608,18 @@ def main() -> int:
         inventory = json.loads(args.inventory.read_text(encoding="utf-8-sig"))
         print(json.dumps(remote_retention_plan(inventory, max(1, args.max_age_days)), sort_keys=True))
     elif args.command == "restore-isolated":
-        report = restore_isolated(args.backup, args.key_file, args.lock_file, args.timeout)
+        report = restore_isolated(args.backup, args.key_file, args.lock_file, args.timeout,
+                                  args.media_backup, args.backup_id)
         print(f"Restauración aislada verificada; Alembic={report.alembic_revision}; "
               "tablas=4; recuentos comprobados")
+    elif args.command == "restore-integral":
+        report = restore_integral_isolated(args.backup, args.key_file, args.image,
+                                           args.lock_file, args.timeout)
+        print(f"Restauración integral aislada verificada; Alembic={report.alembic_revision}; "
+              "PostgreSQL, medios y HTTP comprobados")
     else:
         print(f"Respaldos eliminados por retención: "
-              f"{retain_local(args.directory, load_dpapi_key(args.key_file), args.keep, args.lock_file)}")
+              f"{retain_local(args.directory, load_dpapi_key(args.key_file), args.keep, args.lock_file, args.category)}")
     return 0
 
 

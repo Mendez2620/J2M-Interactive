@@ -75,3 +75,64 @@ MEDIA_STORAGE_ROOT=/app/instance/media
 ```
 
 La activación futura debe comprobar permisos del volumen, respaldo cifrado reciente, restauración aislada y disponibilidad de `/media/...` mediante el origen HTTPS definitivo.
+
+## Respaldo integral (8E.1B)
+
+El respaldo de medios está **deshabilitado por defecto**. Solo se habilita con
+`J2M_MEDIA_BACKUP_ENABLED=true` en la configuración privada, después de validar la imagen
+aprobada y el volumen operativo exacto `j2m-cutover-ready_j2m-media`. El runner monta ese
+volumen en un contenedor efímero como solo lectura, sin red, capacidades ni privilegios; el
+contenido claro viaja por una tubería hacia el cifrado AES-GCM existente y nunca se persiste
+sin cifrar en Windows.
+
+Cada ejecución integral crea tres componentes con un identificador aleatorio común:
+
+- snapshot PostgreSQL cifrado;
+- archivo cifrado de medios actuales, históricos y marcadores de retención;
+- índice cifrado y autenticado que fija nombres, tamaños y SHA-256 de ambos componentes.
+
+El índice se publica al final, mientras el mutex común permanece adquirido durante toda la
+captura, verificación, publicación y retención. Un fallo de Docker, espacio, lectura de medios o
+autenticación no puede anunciar un conjunto
+integral exitoso ni enviar `success` a Healthchecks. La copia externa y la retención tratan los
+nueve objetos (tres componentes con sidecar y manifiesto) como una unidad.
+
+Los respaldos PostgreSQL legados, configuración y conjuntos integrales son categorías
+independientes. Sus retenciones nunca consideran un componente integral como dump autónomo y
+protegen el conjunto válido más reciente de cada categoría. Cambiar el interruptor no destruye
+conjuntos anteriores. En modo integral, copia y restauración fallan cerrado si no existe un
+conjunto completo, autenticado y reciente; el modo legado solo selecciona respaldos legados.
+
+### Consistencia
+
+La captura sigue el orden **base de datos primero, medios después**. Las escrituras de 8E.1A
+persisten y sincronizan el archivo antes del commit de la referencia, y las sustituciones no
+eliminan versiones retenidas. Por ello, toda clave visible en el snapshot PostgreSQL ya existe
+al comenzar el inventario posterior. Si un archivo inventariado cambia mientras se lee, el
+intento falla cerrado. Archivos creados por una transacción todavía no confirmada pueden quedar
+incluidos, pero la restauración no los hace públicos: `/media` continúa exigiendo una referencia
+vigente o un marcador válido del mismo tenant.
+
+El inventario admite exclusivamente la gramática administrada por negocio. Rechaza traversal,
+temporales, enlaces simbólicos, hardlinks, archivos especiales, rutas duplicadas, marcadores sin
+imagen o con tenant discordante y límites individuales o acumulados excedidos. La restauración
+vuelve a comprobar rutas, tipos, tenant, tamaños, hashes y el identificador común. Antes de la
+captura, `docker volume inspect` exige que el volumen operativo exista, sea local y conserve las
+etiquetas Compose `j2m-cutover-ready`/`j2m-media`; se monta su mountpoint como bind read-only,
+por lo que Docker no puede crearlo implícitamente.
+
+### Recuperación total
+
+1. Recuperar la clave AES mediante la envoltura portable y volver a vincularla con DPAPI.
+2. Descargar juntos el índice y todos sus componentes/sidecars/manifiestos.
+3. Ejecutar `verify-set` antes de descifrar cualquier componente.
+4. Ejecutar `restore-integral` sobre el índice. Crea PostgreSQL 17 en `tmpfs`, red interna, un
+   volumen de medios nuevo y una aplicación efímera con Wallet deshabilitado.
+5. La prueba restaura base y medios del mismo conjunto, valida Alembic, invariantes y referencias
+   tenant/tipo, y exige HTTP 200 para imágenes actuales e históricas autorizadas.
+6. Elimina todos los recursos aislados al terminar. Nunca escribe ni sustituye el volumen
+   `j2m-cutover-ready_j2m-media`.
+
+No usar `docker compose down -v`, no restaurar sobre el volumen operativo y no limpiar una
+versión histórica hasta que la publicación Wallet correspondiente esté confirmada y haya
+vencido la política de retención aprobada.

@@ -26,10 +26,19 @@ function Invoke-ExactRetention([string]$Category, [int]$Days) {
     }
     $categoryVerify = Join-Path $verifyDir ("retention-" + $Category)
     New-Item -ItemType Directory -Force -Path $categoryVerify | Out-Null
-    rclone copy "$Remote/$Category" $categoryVerify --include ($plan.protected + "*") --retries 3 --contimeout 15s --timeout 5m
+    $protectedList = Join-Path $verifyDir ("protected-" + $Category + ".txt")
+    @($plan.protected_files) | Set-Content -LiteralPath $protectedList -Encoding ascii
+    rclone copy "$Remote/$Category" $categoryVerify --files-from $protectedList --retries 3 --contimeout 15s --timeout 5m
     if ($LASTEXITCODE -ne 0) { throw "$Category protected-set download failed" }
-    python -m scripts.selfhost_backup verify (Join-Path $categoryVerify $plan.protected) --key-file $KeyFile
-    if ($LASTEXITCODE -ne 0) { throw "$Category protected-set verification failed" }
+    $protectedBackups = if ($null -ne $plan.protected_backups) { @($plan.protected_backups) } else { @($plan.protected) }
+    foreach ($protectedBackup in $protectedBackups) {
+        if ($protectedBackup.StartsWith("j2m-set-")) {
+            python -m scripts.selfhost_backup verify-set (Join-Path $categoryVerify $protectedBackup) --key-file $KeyFile
+        } else {
+            python -m scripts.selfhost_backup verify (Join-Path $categoryVerify $protectedBackup) --key-file $KeyFile
+        }
+        if ($LASTEXITCODE -ne 0) { throw "$Category protected-set verification failed" }
+    }
     foreach ($relativePath in @($plan.delete)) {
         if ([string]::IsNullOrWhiteSpace($relativePath) -or $relativePath.Contains("/") -or $relativePath.Contains("\")) {
             throw "$Category retention produced an unsafe path"
@@ -47,19 +56,35 @@ try {
     $source = Join-Path $root "hourly"
     $outbound = Join-Path $root "outbound\four-hour"
     $verifyDir = Join-Path $root ("remote-verify-" + [guid]::NewGuid().ToString("N"))
-    python -m scripts.selfhost_backup stage-offsite --source-dir $source --destination-dir $outbound --key-file $KeyFile --lock-file (Join-Path $root ".operations.lock")
+    $privateConfig = @{}
+    foreach ($line in Get-Content -LiteralPath ".env.selfhost") {
+        if ($line -match '^([A-Z0-9_]+)=(.*)$') { $privateConfig[$matches[1]] = $matches[2].Trim('"', "'") }
+    }
+    $mediaEnabled = $privateConfig.ContainsKey("J2M_MEDIA_BACKUP_ENABLED") -and $privateConfig["J2M_MEDIA_BACKUP_ENABLED"] -eq "true"
+    $backupMode = if ($mediaEnabled) { "integral" } else { "legacy" }
+    python -m scripts.selfhost_backup stage-offsite --source-dir $source --destination-dir $outbound --key-file $KeyFile --lock-file (Join-Path $root ".operations.lock") --mode $backupMode --max-age-seconds 7200
     if ($LASTEXITCODE -ne 0) { throw "offsite staging failed" }
-    $selectedItems = @(Get-ChildItem -LiteralPath $outbound -Filter "*.j2mbackup")
-    if ($selectedItems.Count -ne 1) { throw "offsite staging did not produce exactly one backup" }
-    $selected = $selectedItems[0]
+    $selectedItems = @(Get-ChildItem -LiteralPath $outbound -Filter "j2m-set-*.j2mbackup")
+    if ($selectedItems.Count -gt 1) { throw "offsite staging produced multiple set indexes" }
+    if ($selectedItems.Count -eq 1) { $selected = $selectedItems[0] } else {
+        $legacy = @(Get-ChildItem -LiteralPath $outbound -Filter "*.j2mbackup")
+        if ($legacy.Count -ne 1) { throw "offsite staging did not produce one recoverable set" }
+        $selected = $legacy[0]
+    }
 
     # Only one complete, locally authenticated bundle is staged for this four-hour slot.
     rclone copy $outbound "$Remote/four-hour" --immutable --retries 3 --contimeout 15s --timeout 5m
     if ($LASTEXITCODE -ne 0) { throw "cloud copy failed" }
     New-Item -ItemType Directory -Force -Path $verifyDir | Out-Null
-    rclone copy "$Remote/four-hour" $verifyDir --include ($selected.Name + "*") --retries 3 --contimeout 15s --timeout 5m
+    $allowlist = Join-Path $verifyDir "four-hour-files.txt"
+    Get-ChildItem -LiteralPath $outbound -File | ForEach-Object { $_.Name } | Set-Content -LiteralPath $allowlist -Encoding ascii
+    rclone copy "$Remote/four-hour" $verifyDir --files-from $allowlist --retries 3 --contimeout 15s --timeout 5m
     if ($LASTEXITCODE -ne 0) { throw "remote verification download failed" }
-    python -m scripts.selfhost_backup verify (Join-Path $verifyDir $selected.Name) --key-file $KeyFile
+    if ($selected.Name.StartsWith("j2m-set-")) {
+        python -m scripts.selfhost_backup verify-set (Join-Path $verifyDir $selected.Name) --key-file $KeyFile
+    } else {
+        python -m scripts.selfhost_backup verify (Join-Path $verifyDir $selected.Name) --key-file $KeyFile
+    }
     if ($LASTEXITCODE -ne 0) { throw "remote cryptographic verification failed" }
     foreach ($category in @("daily", "configuration")) {
         rclone mkdir "$Remote/$category"
@@ -70,7 +95,7 @@ try {
     $configSelected = $null
     if (Test-Path -LiteralPath $configuration) {
         $configOutbound = Join-Path $root "outbound\configuration"
-        python -m scripts.selfhost_backup stage-offsite --source-dir $configuration --destination-dir $configOutbound --key-file $KeyFile --lock-file (Join-Path $root ".operations.lock")
+        python -m scripts.selfhost_backup stage-offsite --source-dir $configuration --destination-dir $configOutbound --key-file $KeyFile --lock-file (Join-Path $root ".operations.lock") --mode configuration
         if ($LASTEXITCODE -ne 0) { throw "configuration staging failed" }
         $configItems = @(Get-ChildItem -LiteralPath $configOutbound -Filter "*.j2mbackup")
         if ($configItems.Count -ne 1) { throw "configuration staging did not produce exactly one backup" }
@@ -84,14 +109,18 @@ try {
     }
 
     if ((Get-Date).ToUniversalTime().Hour -lt 4) {
-        foreach ($suffix in @("", ".sha256", ".complete.json")) {
-            rclone copyto ($selected.FullName + $suffix) "$Remote/daily/$($selected.Name)$suffix" --immutable --retries 3 --contimeout 15s --timeout 5m
+        foreach ($item in Get-ChildItem -LiteralPath $outbound -File) {
+            rclone copyto $item.FullName "$Remote/daily/$($item.Name)" --immutable --retries 3 --contimeout 15s --timeout 5m
             if ($LASTEXITCODE -ne 0) { throw "daily copy failed" }
         }
         $dailyVerify = Join-Path $verifyDir "daily"
         New-Item -ItemType Directory -Force -Path $dailyVerify | Out-Null
-        rclone copy "$Remote/daily" $dailyVerify --include ($selected.Name + "*") --retries 3 --contimeout 15s --timeout 5m
-        python -m scripts.selfhost_backup verify (Join-Path $dailyVerify $selected.Name) --key-file $KeyFile
+        rclone copy "$Remote/daily" $dailyVerify --files-from $allowlist --retries 3 --contimeout 15s --timeout 5m
+        if ($selected.Name.StartsWith("j2m-set-")) {
+            python -m scripts.selfhost_backup verify-set (Join-Path $dailyVerify $selected.Name) --key-file $KeyFile
+        } else {
+            python -m scripts.selfhost_backup verify (Join-Path $dailyVerify $selected.Name) --key-file $KeyFile
+        }
         if ($LASTEXITCODE -ne 0) { throw "daily cryptographic verification failed" }
     }
 
