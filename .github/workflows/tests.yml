@@ -63,7 +63,6 @@ jobs:
       - run: docker build --tag j2m-staging:test .
       - name: Verify joint PostgreSQL and media restoration in isolated Docker resources
         run: |
-          DATABASE_URL="$TEST_POSTGRES_URL" DATABASE_SSLMODE=disable flask --app run.py db upgrade
           docker tag j2m-staging:test j2m-interactive:0000000000000000000000000000000000000001
           python tests/integral_restore_ci.py
       - run: docker build --file Dockerfile.postgres-test --tag j2m-postgres:production-test .
