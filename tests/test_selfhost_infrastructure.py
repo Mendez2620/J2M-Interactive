@@ -131,6 +131,8 @@ class SelfHostInfrastructureTestCase(unittest.TestCase):
         self.assertIn("--wait-timeout 120", deploy)
         self.assertIn("$ApprovedSha -eq $previousSha", deploy)
         self.assertIn("Test-J2MLocalHttps", deploy)
+        self.assertIn("--expected-revision", deploy)
+        self.assertIn('Headers["X-J2M-Revision"]', deploy)
         self.assertIn("selfhost_proxy_recovery.py", deploy)
         self.assertIn("Confirm-J2MLocalProxy", deploy)
         self.assertIn('"/api/health", "/api/ready"', deploy)
@@ -273,7 +275,7 @@ class SelfHostInfrastructureTestCase(unittest.TestCase):
                 "if ($args[0] -eq 'compose' -and $joined -match ' up ') { "
                 "$global:upCalls++; if ($env:J2M_IMAGE -eq ('j2m-interactive:' + $newSha)) { $global:LASTEXITCODE=1 } "
                 "else { $global:LASTEXITCODE=0 }; return }; $global:LASTEXITCODE=0 }; "
-                "function global:Invoke-WebRequest { $global:httpsCalls++; [pscustomobject]@{StatusCode=200} }; "
+                "function global:Invoke-WebRequest { $global:httpsCalls++; [pscustomobject]@{StatusCode=200; Headers=@{'X-J2M-Revision'=$env:J2M_IMAGE.Substring(16)}} }; "
                 f"try {{ & '{deploy}' -ApprovedSha $newSha -EnvFile '{env_file}' }} "
                 "catch { Write-Output ('DEPLOY_ERROR=' + $_.Exception.Message); "
                 "Write-Output ('UP_CALLS=' + $global:upCalls); Write-Output ('HTTPS_CALLS=' + $global:httpsCalls); "
@@ -333,7 +335,7 @@ class SelfHostInfrastructureTestCase(unittest.TestCase):
                 "function global:docker { $joined=$args -join ' '; if ($args[0] -eq 'ps') { $global:LASTEXITCODE=0; return }; "
                 "if ($args[0] -eq 'compose' -and $joined -match ' up ') { $global:upCalls++ }; $global:LASTEXITCODE=0 }; "
                 "function global:Invoke-WebRequest { $global:httpsCalls++; if ($global:httpsCalls -eq 1) { throw 'synthetic HTTPS failure' }; "
-                "[pscustomobject]@{StatusCode=200} }; "
+                "[pscustomobject]@{StatusCode=200; Headers=@{'X-J2M-Revision'=$env:J2M_IMAGE.Substring(16)}} }; "
                 f"try {{ & '{deploy}' -ApprovedSha $newSha -EnvFile '{env_file}' }} catch {{ "
                 "Write-Output ('DEPLOY_ERROR=' + $_.Exception.Message); Write-Output ('UP_CALLS=' + $global:upCalls); "
                 "Write-Output ('HTTPS_CALLS=' + $global:httpsCalls); Write-Output ('PROXY_CALLS=' + $global:proxyCalls); exit 7 }"
@@ -363,7 +365,7 @@ class SelfHostInfrastructureTestCase(unittest.TestCase):
                 "function global:python { $global:proxyCalls++; $global:LASTEXITCODE=0 }; "
                 "function global:git { if ($args[0] -eq 'rev-parse') { Write-Output $newSha }; $global:LASTEXITCODE=0 }; "
                 "function global:docker { if ($args[0] -eq 'ps') { $global:LASTEXITCODE=0; return }; $global:LASTEXITCODE=0 }; "
-                "function global:Invoke-WebRequest { $global:httpsCalls++; [pscustomobject]@{StatusCode=200} }; "
+                "function global:Invoke-WebRequest { $global:httpsCalls++; [pscustomobject]@{StatusCode=200; Headers=@{'X-J2M-Revision'=$env:J2M_IMAGE.Substring(16)}} }; "
                 f"& '{deploy}' -ApprovedSha $newSha -EnvFile '{env_file}'; Write-Output ('HTTPS_CALLS=' + $global:httpsCalls); "
                 "Write-Output ('PROXY_CALLS=' + $global:proxyCalls)"
             )
