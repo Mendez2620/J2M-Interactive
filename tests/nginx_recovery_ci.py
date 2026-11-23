@@ -131,7 +131,11 @@ def main() -> int:
     run("docker", "pull", NGINX_IMAGE, timeout=180)
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
-        ca_path, _, _ = write_certificates(root)
+        root.chmod(0o755)
+        ca_path, cert_path, key_path = write_certificates(root)
+        # Synthetic TLS files are disposable; permit UID 101 to read them.
+        cert_path.chmod(0o644)
+        key_path.chmod(0o644)
         (root / "web1.conf").write_text(backend_config("backend-v1", SHA_OLD), encoding="utf-8")
         (root / "web2.conf").write_text(backend_config("backend-v2", SHA_NEW), encoding="utf-8")
         (root / "broken.conf").write_text(backend_config("broken", SHA_NEW, healthy=False), encoding="utf-8")
@@ -152,6 +156,8 @@ def main() -> int:
                 "--label", f"com.docker.compose.service={prefix}-worker",
                 "--label", f"com.docker.compose.project={prefix}", NGINX_IMAGE)
             run("docker", "run", "-d", "--name", names["proxy"], "--network", network,
+                "--user", "101:101", "--read-only", "--tmpfs", "/tmp:rw,mode=1777",
+                "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
                 "-p", "127.0.0.1::8443", "-v", f"{root / 'proxy.conf'}:/etc/nginx/nginx.conf:ro",
                 "-v", f"{root}:/etc/nginx/tls:ro", NGINX_IMAGE)
             port = run("docker", "port", names["proxy"], "8443/tcp").rsplit(":", 1)[1]
