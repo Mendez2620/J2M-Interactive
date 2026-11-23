@@ -68,3 +68,36 @@ jobs:
           docker tag j2m-staging:test j2m-interactive:0000000000000000000000000000000000000001
           python tests/integral_restore_ci.py
       - run: docker build --file Dockerfile.postgres-test --tag j2m-postgres:production-test .
+
+  powershell-syntax:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse Windows self-hosting deployment scripts
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $paths = @(
+            'scripts/selfhost_deploy_approved.ps1',
+            'scripts/invoke_selfhost_compose.ps1',
+            'scripts/set_selfhost_image_pin.ps1'
+          )
+          foreach ($path in $paths) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Join-Path $PWD.Path $path), [ref]$tokens, [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Error $_.Message }
+              throw "PowerShell parse failed: $path"
+            }
+          }
+          $approved = 'j2m-interactive:' + ('a' * 40)
+          if (-not ($approved -cmatch '^j2m-interactive:([0-9a-f]{40})$')) {
+            throw 'Approved image tag regex was not accepted.'
+          }
+          if ($Matches[1] -cne ('a' * 40)) {
+            throw 'PowerShell SHA capture did not match the approved tag.'
+          }
