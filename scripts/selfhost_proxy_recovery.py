@@ -142,7 +142,6 @@ def recover_proxy(*, origin: str, expected_image: str, expected_revision: str,
     if legacy_bootstrap_rollback and (
         expected_revision != LEGACY_BOOTSTRAP_SHA
         or expected_image != f"j2m-interactive:{LEGACY_BOOTSTRAP_SHA}"
-        or project != "j2m-cutover-ready"
     ):
         raise ValueError("El modo legado solo permite recuperar la versión local anterior aprobada.")
     safe_origin = _validate_origin(origin)
