@@ -12,11 +12,43 @@ if str(ROOT) not in sys.path:
 from scripts import selfhost_proxy_recovery as recovery
 
 
+SHA_NEW = "b" * 40
+SHA_OLD = "a" * 40
+NETWORK = "project_j2m-private"
+
+
+class _FakeHTTPResponse:
+    def __init__(self, url, revision, status=200):
+        self.status = status
+        self.url = url
+        self.headers = {"X-J2M-Revision": revision}
+
+    def geturl(self):
+        return self.url
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
 class SelfHostProxyRecoveryTests(unittest.TestCase):
     @staticmethod
     def _docker_result(*arguments, **_kwargs):
+        network_info = {NETWORK: {"IPAddress": "172.23.0.3"}}
         if arguments[:2] == ("inspect", "web"):
-            return json.dumps([{"Config": {"Image": "approved"}, "State": {"Running": True}}])
+            return json.dumps([{
+                "Config": {
+                    "Image": "approved",
+                    "Labels": {
+                        "com.docker.compose.project": "project",
+                        "com.docker.compose.service": "web",
+                    },
+                },
+                "NetworkSettings": {"Networks": network_info},
+                "State": {"Running": True},
+            }])
         if arguments[:2] == ("ps", "-q"):
             return "worker-id"
         if arguments[:2] == ("inspect", "worker-id"):
@@ -25,7 +57,10 @@ class SelfHostProxyRecoveryTests(unittest.TestCase):
                 "State": {"Running": True},
             }])
         if arguments[:2] == ("inspect", "proxy"):
-            return json.dumps([{"State": {"Running": True}}])
+            return json.dumps([{
+                "State": {"Running": True},
+                "NetworkSettings": {"Networks": network_info},
+            }])
         if arguments[:2] == ("exec", "proxy"):
             return ""
         raise AssertionError(arguments)
@@ -34,6 +69,7 @@ class SelfHostProxyRecoveryTests(unittest.TestCase):
         return recovery.recover_proxy(
             origin="https://localhost:8443",
             expected_image="approved",
+            expected_revision=SHA_NEW,
             web_container="web",
             worker_service="worker-service",
             project="project",
@@ -45,10 +81,12 @@ class SelfHostProxyRecoveryTests(unittest.TestCase):
 
     @patch.object(recovery, "_https_ready", return_value=True)
     @patch.object(recovery, "_docker")
-    def test_healthy_proxy_is_not_reloaded(self, docker, _ready):
+    def test_healthy_approved_backend_is_not_reloaded(self, docker, ready):
         docker.side_effect = self._docker_result
         self.assertFalse(self._recover())
-        self.assertNotIn(("exec", "proxy", "nginx", "-s", "reload"), [call.args for call in docker.call_args_list])
+        self.assertEqual(ready.call_args.args[-1], SHA_NEW)
+        self.assertNotIn(("exec", "proxy", "nginx", "-s", "reload"),
+                         [call.args for call in docker.call_args_list])
 
     @patch.object(recovery, "_https_ready", side_effect=[False, False, True])
     @patch.object(recovery, "_docker")
@@ -80,17 +118,92 @@ class SelfHostProxyRecoveryTests(unittest.TestCase):
             self._recover()
         ready.assert_not_called()
 
+    @patch.object(recovery, "_https_ready", return_value=True)
+    @patch.object(recovery, "_docker")
+    def test_wrong_web_project_is_rejected_before_https(self, docker, ready):
+        def foreign_web(*arguments, **kwargs):
+            result = self._docker_result(*arguments, **kwargs)
+            if arguments[:2] == ("inspect", "web"):
+                parsed = json.loads(result)
+                parsed[0]["Config"]["Labels"]["com.docker.compose.project"] = "foreign"
+                return json.dumps(parsed)
+            return result
+
+        docker.side_effect = foreign_web
+        with self.assertRaisesRegex(RuntimeError, "proyecto o red"):
+            self._recover()
+        ready.assert_not_called()
+
+    @patch.object(recovery, "_https_ready", return_value=True)
+    @patch.object(recovery, "_docker")
+    def test_wrong_proxy_network_is_rejected_before_https(self, docker, ready):
+        def detached_proxy(*arguments, **kwargs):
+            result = self._docker_result(*arguments, **kwargs)
+            if arguments[:2] == ("inspect", "proxy"):
+                parsed = json.loads(result)
+                parsed[0]["NetworkSettings"]["Networks"] = {}
+                return json.dumps(parsed)
+            return result
+
+        docker.side_effect = detached_proxy
+        with self.assertRaisesRegex(RuntimeError, "red autorizada"):
+            self._recover()
+        ready.assert_not_called()
+
+    def test_http_200_from_old_revision_is_never_accepted(self):
+        def old_response(url, **_kwargs):
+            return _FakeHTTPResponse(url, SHA_OLD)
+
+        with patch.object(recovery, "urlopen", side_effect=old_response):
+            self.assertFalse(recovery._https_ready(
+                "https://localhost:8443", object(), 1, SHA_NEW
+            ))
+
+    def test_http_200_without_revision_is_never_accepted(self):
+        with patch.object(recovery, "urlopen",
+                          side_effect=lambda url, **kw: _FakeHTTPResponse(url, "")):
+            self.assertFalse(recovery._https_ready(
+                "https://localhost:8443", object(), 1, SHA_NEW
+            ))
+
+    def test_http_200_from_expected_revision_is_accepted_on_both_routes(self):
+        requested = []
+        def correct_response(url, **_kwargs):
+            requested.append(url)
+            return _FakeHTTPResponse(url, SHA_NEW)
+
+        with patch.object(recovery, "urlopen", side_effect=correct_response):
+            self.assertTrue(recovery._https_ready(
+                "https://localhost:8443", object(), 1, SHA_NEW
+            ))
+        self.assertEqual(requested, [
+            "https://localhost:8443/api/health",
+            "https://localhost:8443/api/ready",
+        ])
+
     def test_origin_and_limits_are_fail_closed(self):
-        for origin in ("http://localhost:8443", "https://example.com:8443", "https://localhost:8443/path"):
-            with self.assertRaises(ValueError):
+        for origin in ("http://localhost:8443", "https://example.com:8443",
+                       "https://localhost:8443/path"):
+            with self.subTest(origin=origin), self.assertRaises(ValueError):
                 recovery.recover_proxy(
                     origin=origin,
                     expected_image="approved",
+                    expected_revision=SHA_NEW,
                     web_container="web",
                     worker_service="worker",
                     project="project",
                     proxy_container="proxy",
                 )
+        with self.assertRaisesRegex(ValueError, "SHA completo"):
+            recovery.recover_proxy(
+                origin="https://localhost:8443",
+                expected_image="approved",
+                expected_revision="invalid",
+                web_container="web",
+                worker_service="worker",
+                project="project",
+                proxy_container="proxy",
+            )
 
 
 if __name__ == "__main__":
