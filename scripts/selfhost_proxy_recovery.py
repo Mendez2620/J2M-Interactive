@@ -1,15 +1,19 @@
-"""Refresh the local HTTPS proxy after an approved web-container replacement."""
+"""Refresh the local HTTPS proxy, verifying the exact release served over TLS."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import ssl
 import subprocess
 import time
 from pathlib import Path
 from urllib.parse import urlparse
 from urllib.request import urlopen
+
+
+_REVISION_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 
 
 def _docker(*arguments: str, timeout: float = 15.0) -> str:
@@ -42,11 +46,16 @@ def _validate_origin(value: str) -> str:
     return value.rstrip("/")
 
 
-def _https_ready(origin: str, context: ssl.SSLContext, timeout: float) -> bool:
+def _https_ready(origin: str, context: ssl.SSLContext, timeout: float,
+                 expected_revision: str) -> bool:
+    """Never accept 200 from an old or unidentified backend."""
     try:
         for path in ("/api/health", "/api/ready"):
-            with urlopen(origin + path, timeout=timeout, context=context) as response:
-                if response.status != 200:
+            url = origin + path
+            with urlopen(url, timeout=timeout, context=context) as response:
+                if (response.status != 200
+                        or response.geturl() != url
+                        or response.headers.get("X-J2M-Revision") != expected_revision):
                     return False
         return True
     except Exception:
@@ -54,10 +63,18 @@ def _https_ready(origin: str, context: ssl.SSLContext, timeout: float) -> bool:
 
 
 def _verify_runtime(expected_image: str, web_container: str, worker_service: str,
-                    project: str, proxy_container: str) -> None:
+                    project: str, proxy_container: str, network_name: str) -> None:
     web = json.loads(_docker("inspect", web_container))[0]
-    if web.get("Config", {}).get("Image") != expected_image or not web.get("State", {}).get("Running"):
-        raise RuntimeError("El contenedor web activo no corresponde a la imagen aprobada.")
+    web_labels = web.get("Config", {}).get("Labels", {}) or {}
+    web_network = (web.get("NetworkSettings", {}).get("Networks", {}) or {}).get(network_name, {})
+    if (
+        web.get("Config", {}).get("Image") != expected_image
+        or not web.get("State", {}).get("Running")
+        or web_labels.get("com.docker.compose.project") != project
+        or web_labels.get("com.docker.compose.service") != "web"
+        or not web_network.get("IPAddress")
+    ):
+        raise RuntimeError("Web no corresponde a la imagen, proyecto o red aprobados.")
 
     worker_ids = [item for item in _docker(
         "ps", "-q", "--filter", f"label=com.docker.compose.service={worker_service}"
@@ -66,47 +83,55 @@ def _verify_runtime(expected_image: str, web_container: str, worker_service: str
         raise RuntimeError("Debe existir exactamente un worker autorizado.")
     worker = json.loads(_docker("inspect", worker_ids[0]))[0]
     labels = worker.get("Config", {}).get("Labels", {}) or {}
-    if labels.get("com.docker.compose.project") != project or not worker.get("State", {}).get("Running"):
+    if (labels.get("com.docker.compose.project") != project
+            or not worker.get("State", {}).get("Running")):
         raise RuntimeError("El worker activo no pertenece al proyecto autorizado.")
 
     proxy = json.loads(_docker("inspect", proxy_container))[0]
-    if not proxy.get("State", {}).get("Running"):
-        raise RuntimeError("El proxy HTTPS local no está en ejecución.")
+    proxy_network = (proxy.get("NetworkSettings", {}).get("Networks", {}) or {}).get(network_name, {})
+    if not proxy.get("State", {}).get("Running") or not proxy_network.get("IPAddress"):
+        raise RuntimeError("El proxy HTTPS no está conectado a la red autorizada.")
 
 
-def recover_proxy(*, origin: str, expected_image: str, web_container: str,
-                  worker_service: str, project: str, proxy_container: str,
+def recover_proxy(*, origin: str, expected_image: str, expected_revision: str,
+                  web_container: str, worker_service: str, project: str,
+                  proxy_container: str, network_name: str | None = None,
                   attempts: int = 8, retry_seconds: float = 1.5,
                   request_timeout: float = 5.0, ca_file: Path | None = None) -> bool:
     if not 1 <= attempts <= 20 or not 0 <= retry_seconds <= 10 or not 1 <= request_timeout <= 20:
         raise ValueError("Los límites de recuperación del proxy no son válidos.")
+    if _REVISION_PATTERN.fullmatch(expected_revision) is None:
+        raise ValueError("La revisión esperada debe ser un SHA completo de 40 caracteres.")
     safe_origin = _validate_origin(origin)
     context = ssl.create_default_context(cafile=str(ca_file) if ca_file else None)
-    _verify_runtime(expected_image, web_container, worker_service, project, proxy_container)
+    _verify_runtime(expected_image, web_container, worker_service, project, proxy_container,
+                    network_name or f"{project}_j2m-private")
 
-    if _https_ready(safe_origin, context, request_timeout):
-        print("Proxy HTTPS ya resolvía el backend aprobado; no fue necesario recargarlo.")
+    if _https_ready(safe_origin, context, request_timeout, expected_revision):
+        print("Proxy HTTPS ya sirve la revisión aprobada; no fue necesario recargarlo.")
         return False
 
     _docker("exec", proxy_container, "nginx", "-t")
     _docker("exec", proxy_container, "nginx", "-s", "reload")
     for attempt in range(attempts):
-        if _https_ready(safe_origin, context, request_timeout):
-            print("Proxy HTTPS recargado y backend aprobado verificado.")
+        if _https_ready(safe_origin, context, request_timeout, expected_revision):
+            print("Proxy HTTPS recargado y revisión aprobada verificada.")
             return True
         if attempt + 1 < attempts:
             time.sleep(retry_seconds)
-    raise RuntimeError("Nginx no alcanzó el backend aprobado dentro del tiempo permitido.")
+    raise RuntimeError("Nginx no alcanzó la revisión aprobada dentro del tiempo permitido.")
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Recupera la resolución del proxy HTTPS local.")
+    parser = argparse.ArgumentParser(description="Recupera la revisión HTTPS del proxy local.")
     parser.add_argument("--origin", required=True)
     parser.add_argument("--expected-image", required=True)
+    parser.add_argument("--expected-revision", required=True)
     parser.add_argument("--web-container", default="j2m-cutover-ready-web-1")
     parser.add_argument("--worker-service", default="google-wallet-worker")
     parser.add_argument("--project", default="j2m-cutover-ready")
     parser.add_argument("--proxy-container", default="j2m-cutover-ready-local-https")
+    parser.add_argument("--network-name")
     parser.add_argument("--attempts", type=int, default=8)
     parser.add_argument("--retry-seconds", type=float, default=1.5)
     parser.add_argument("--request-timeout", type=float, default=5.0)
@@ -115,10 +140,12 @@ def main() -> int:
     recover_proxy(
         origin=args.origin,
         expected_image=args.expected_image,
+        expected_revision=args.expected_revision,
         web_container=args.web_container,
         worker_service=args.worker_service,
         project=args.project,
         proxy_container=args.proxy_container,
+        network_name=args.network_name,
         attempts=args.attempts,
         retry_seconds=args.retry_seconds,
         request_timeout=args.request_timeout,
