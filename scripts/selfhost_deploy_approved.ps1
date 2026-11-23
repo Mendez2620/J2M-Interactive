@@ -23,6 +23,20 @@ function Test-J2MLocalHttps([string]$Origin) {
     }
 }
 
+function Confirm-J2MLocalProxy([string]$Origin, [string]$ExpectedImage) {
+    & python "$PSScriptRoot\selfhost_proxy_recovery.py" `
+        --origin $Origin `
+        --expected-image $ExpectedImage `
+        --attempts 8 `
+        --retry-seconds 1.5 `
+        --request-timeout 5
+    if ($LASTEXITCODE -ne 0) {
+        throw "No se pudo confirmar la resolución del proxy HTTPS local."
+    }
+    # Require a second, independent TLS check after any no-op or graceful reload.
+    Test-J2MLocalHttps $Origin
+}
+
 if (git status --porcelain) { throw "El árbol de trabajo debe estar limpio." }
 git fetch origin main
 if ($LASTEXITCODE -ne 0) { throw "No se pudo actualizar origin/main." }
@@ -56,12 +70,12 @@ if ($WithTunnel) { $profiles = @("--profile", "tunnel"); $services += "cloudflar
 try {
     & "$PSScriptRoot\set_selfhost_image_pin.ps1" -ApprovedSha $ApprovedSha -EnvFile $EnvFile
     & "$PSScriptRoot\invoke_selfhost_compose.ps1" -EnvFile $EnvFile @profiles up -d --no-build --wait --wait-timeout 120 @services
-    Test-J2MLocalHttps $LocalHttpsOrigin
+    Confirm-J2MLocalProxy $LocalHttpsOrigin $imageTag
 } catch {
     & "$PSScriptRoot\set_selfhost_image_pin.ps1" -ApprovedSha $previousSha -EnvFile $EnvFile
     try {
         & "$PSScriptRoot\invoke_selfhost_compose.ps1" -EnvFile $EnvFile up -d --no-build --wait --wait-timeout 120 web google-wallet-worker
-        Test-J2MLocalHttps $LocalHttpsOrigin
+        Confirm-J2MLocalProxy $LocalHttpsOrigin $previousImage
     } catch {
         throw "Falló el despliegue y no fue posible confirmar por HTTPS la recuperación de la imagen anterior."
     }
