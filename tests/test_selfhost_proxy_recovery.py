@@ -203,7 +203,7 @@ class SelfHostProxyRecoveryTests(unittest.TestCase):
             expected_revision=recovery.LEGACY_BOOTSTRAP_SHA,
             web_container="web",
             worker_service="worker-service",
-            project="j2m-cutover-ready",
+            project="project",
             proxy_container="proxy",
             network_name=NETWORK,
             attempts=2,
