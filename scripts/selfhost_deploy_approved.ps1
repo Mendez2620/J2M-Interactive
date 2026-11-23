@@ -9,7 +9,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-function Test-J2MLocalHttps([string]$Origin) {
+function Test-J2MLocalHttps([string]$Origin, [string]$ExpectedRevision) {
     $uri = $null
     if (-not [Uri]::TryCreate($Origin, [UriKind]::Absolute, [ref]$uri) -or
         $uri.Scheme -ne "https" -or $uri.Host -ne "localhost" -or
@@ -19,14 +19,21 @@ function Test-J2MLocalHttps([string]$Origin) {
     }
     foreach ($path in @("/api/health", "/api/ready")) {
         $response = Invoke-WebRequest -UseBasicParsing -Uri ($Origin.TrimEnd("/") + $path) -TimeoutSec 20
-        if ($response.StatusCode -ne 200) { throw "HTTPS local no quedó saludable." }
+        if ($response.StatusCode -ne 200 -or [string]$response.Headers["X-J2M-Revision"] -cne $ExpectedRevision) {
+            throw "HTTPS no sirve la revisión exacta aprobada."
+        }
     }
 }
 
 function Confirm-J2MLocalProxy([string]$Origin, [string]$ExpectedImage) {
+    if (-not ($ExpectedImage -cmatch '^j2m-interactive:([0-9a-f]{40})$')) {
+        throw "La imagen esperada no tiene un SHA aprobado."
+    }
+    $expectedRevision = $Matches[1]
     & python "$PSScriptRoot\selfhost_proxy_recovery.py" `
         --origin $Origin `
         --expected-image $ExpectedImage `
+        --expected-revision $expectedRevision `
         --attempts 8 `
         --retry-seconds 1.5 `
         --request-timeout 5
@@ -34,7 +41,7 @@ function Confirm-J2MLocalProxy([string]$Origin, [string]$ExpectedImage) {
         throw "No se pudo confirmar la resolución del proxy HTTPS local."
     }
     # Require a second, independent TLS check after any no-op or graceful reload.
-    Test-J2MLocalHttps $Origin
+    Test-J2MLocalHttps $Origin $expectedRevision
 }
 
 if (git status --porcelain) { throw "El árbol de trabajo debe estar limpio." }
