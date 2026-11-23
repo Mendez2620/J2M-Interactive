@@ -9,7 +9,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-function Test-J2MLocalHttps([string]$Origin, [string]$ExpectedRevision) {
+function Test-J2MLocalHttps([string]$Origin, [string]$ExpectedRevision, [switch]$AllowUnmarkedBootstrap) {
     $uri = $null
     if (-not [Uri]::TryCreate($Origin, [UriKind]::Absolute, [ref]$uri) -or
         $uri.Scheme -ne "https" -or $uri.Host -ne "localhost" -or
@@ -19,29 +19,39 @@ function Test-J2MLocalHttps([string]$Origin, [string]$ExpectedRevision) {
     }
     foreach ($path in @("/api/health", "/api/ready")) {
         $response = Invoke-WebRequest -UseBasicParsing -Uri ($Origin.TrimEnd("/") + $path) -TimeoutSec 20
-        if ($response.StatusCode -ne 200 -or [string]$response.Headers["X-J2M-Revision"] -cne $ExpectedRevision) {
+        if ($response.StatusCode -ne 200) { throw "HTTPS no está saludable." }
+        $observedRevision = [string]$response.Headers["X-J2M-Revision"]
+        if ($AllowUnmarkedBootstrap) {
+            if (-not [string]::IsNullOrEmpty($observedRevision)) {
+                throw "El rollback legado devolvió una revisión inesperada."
+            }
+        } elseif ($observedRevision -cne $ExpectedRevision) {
             throw "HTTPS no sirve la revisión exacta aprobada."
         }
     }
 }
 
-function Confirm-J2MLocalProxy([string]$Origin, [string]$ExpectedImage) {
+function Confirm-J2MLocalProxy([string]$Origin, [string]$ExpectedImage, [switch]$LegacyBootstrapRollback) {
     if (-not ($ExpectedImage -cmatch '^j2m-interactive:([0-9a-f]{40})$')) {
         throw "La imagen esperada no tiene un SHA aprobado."
     }
     $expectedRevision = $Matches[1]
-    & python "$PSScriptRoot\selfhost_proxy_recovery.py" `
-        --origin $Origin `
-        --expected-image $ExpectedImage `
-        --expected-revision $expectedRevision `
-        --attempts 8 `
-        --retry-seconds 1.5 `
-        --request-timeout 5
+    $recoveryArgs = @(
+        "$PSScriptRoot\selfhost_proxy_recovery.py",
+        "--origin", $Origin,
+        "--expected-image", $ExpectedImage,
+        "--expected-revision", $expectedRevision,
+        "--attempts", "8",
+        "--retry-seconds", "1.5",
+        "--request-timeout", "5"
+    )
+    if ($LegacyBootstrapRollback) { $recoveryArgs += "--legacy-bootstrap-rollback" }
+    & python @recoveryArgs
     if ($LASTEXITCODE -ne 0) {
         throw "No se pudo confirmar la resolución del proxy HTTPS local."
     }
     # Require a second, independent TLS check after any no-op or graceful reload.
-    Test-J2MLocalHttps $Origin $expectedRevision
+    Test-J2MLocalHttps $Origin $expectedRevision -AllowUnmarkedBootstrap:$LegacyBootstrapRollback
 }
 
 if (git status --porcelain) { throw "El árbol de trabajo debe estar limpio." }
@@ -82,7 +92,9 @@ try {
     & "$PSScriptRoot\set_selfhost_image_pin.ps1" -ApprovedSha $previousSha -EnvFile $EnvFile
     try {
         & "$PSScriptRoot\invoke_selfhost_compose.ps1" -EnvFile $EnvFile up -d --no-build --wait --wait-timeout 120 web google-wallet-worker
-        Confirm-J2MLocalProxy $LocalHttpsOrigin $previousImage
+        # One-time exception for the actual deployed pre-header release only.
+        $bootstrapLegacy = $previousSha -ceq "dae140e3684be29c534be3e1725598d226b68e03"
+        Confirm-J2MLocalProxy $LocalHttpsOrigin $previousImage -LegacyBootstrapRollback:$bootstrapLegacy
     } catch {
         throw "Falló el despliegue y no fue posible confirmar por HTTPS la recuperación de la imagen anterior."
     }

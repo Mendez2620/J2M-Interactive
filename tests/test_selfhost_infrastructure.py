@@ -132,6 +132,8 @@ class SelfHostInfrastructureTestCase(unittest.TestCase):
         self.assertIn("$ApprovedSha -eq $previousSha", deploy)
         self.assertIn("Test-J2MLocalHttps", deploy)
         self.assertIn("--expected-revision", deploy)
+        self.assertIn("-LegacyBootstrapRollback:$bootstrapLegacy", deploy)
+        self.assertIn("--legacy-bootstrap-rollback", deploy)
         self.assertIn('Headers["X-J2M-Revision"]', deploy)
         self.assertIn("selfhost_proxy_recovery.py", deploy)
         self.assertIn("Confirm-J2MLocalProxy", deploy)

@@ -181,6 +181,65 @@ class SelfHostProxyRecoveryTests(unittest.TestCase):
             "https://localhost:8443/api/ready",
         ])
 
+
+    @patch.object(recovery, "_legacy_https_ready", return_value=True)
+    @patch.object(recovery, "_https_ready")
+    @patch.object(recovery, "_docker")
+    def test_bootstrap_legacy_rollback_forces_reload_without_sha_header(self, docker, normal_ready, legacy_ready):
+        def legacy_runtime(*arguments, **kwargs):
+            if arguments[:2] == ("network", "inspect"):
+                return json.dumps([{"Containers": {"web-id": {"Name": "web"}}}])
+            if arguments[:2] == ("inspect", "web"):
+                item = json.loads(self._docker_result(*arguments, **kwargs))
+                item[0]["Config"]["Image"] = "j2m-interactive:" + recovery.LEGACY_BOOTSTRAP_SHA
+                item[0]["NetworkSettings"]["Networks"][NETWORK]["Aliases"] = ["web"]
+                return json.dumps(item)
+            return self._docker_result(*arguments, **kwargs)
+
+        docker.side_effect = legacy_runtime
+        self.assertTrue(recovery.recover_proxy(
+            origin="https://localhost:8443",
+            expected_image="j2m-interactive:" + recovery.LEGACY_BOOTSTRAP_SHA,
+            expected_revision=recovery.LEGACY_BOOTSTRAP_SHA,
+            web_container="web",
+            worker_service="worker-service",
+            project="j2m-cutover-ready",
+            proxy_container="proxy",
+            network_name=NETWORK,
+            attempts=2,
+            retry_seconds=0,
+            request_timeout=1,
+            legacy_bootstrap_rollback=True,
+        ))
+        self.assertIn(("exec", "proxy", "nginx", "-s", "reload"),
+                      [call.args for call in docker.call_args_list])
+        normal_ready.assert_not_called()
+        legacy_ready.assert_called_once()
+
+    def test_bootstrap_legacy_rollback_rejects_any_other_image(self):
+        with self.assertRaisesRegex(ValueError, "solo permite"):
+            recovery.recover_proxy(
+                origin="https://localhost:8443",
+                expected_image="j2m-interactive:" + SHA_NEW,
+                expected_revision=SHA_NEW,
+                web_container="web",
+                worker_service="worker-service",
+                project="j2m-cutover-ready",
+                proxy_container="proxy",
+                legacy_bootstrap_rollback=True,
+            )
+
+    @patch.object(recovery, "urlopen")
+    def test_legacy_https_requires_unmarked_200_without_redirects(self, opened):
+        opened.side_effect = lambda url, **kw: _FakeHTTPResponse(url, "")
+        self.assertTrue(recovery._legacy_https_ready(
+            "https://localhost:8443", object(), 1
+        ))
+        opened.side_effect = lambda url, **kw: _FakeHTTPResponse(url, SHA_NEW)
+        self.assertFalse(recovery._legacy_https_ready(
+            "https://localhost:8443", object(), 1
+        ))
+
     def test_origin_and_limits_are_fail_closed(self):
         for origin in ("http://localhost:8443", "https://example.com:8443",
                        "https://localhost:8443/path"):

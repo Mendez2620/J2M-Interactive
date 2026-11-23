@@ -21,7 +21,7 @@ from cryptography.x509.oid import NameOID
 
 ROOT = Path(__file__).resolve().parents[1]
 NGINX_IMAGE = "nginx@sha256:0563c36f94a6d3ec3584161b77859f740f7e20b4853f52c796a864ce6908e8ea"
-SHA_OLD = "a" * 40
+SHA_OLD = "dae140e3684be29c534be3e1725598d226b68e03"
 SHA_NEW = "b" * 40
 
 
@@ -62,8 +62,9 @@ def write_certificates(directory: Path) -> tuple[Path, Path, Path]:
     return ca_path, cert_path, key_path
 
 
-def backend_config(marker: str, revision: str, healthy: bool = True) -> str:
+def backend_config(marker: str, revision: str | None, healthy: bool = True) -> str:
     status = 200 if healthy else 503
+    header = f'add_header X-J2M-Revision "{revision}" always;' if revision else ""
     return f"""worker_processes 1;
 pid /tmp/nginx.pid;
 events {{ worker_connections 128; }}
@@ -71,7 +72,7 @@ http {{
   access_log off; client_body_temp_path /tmp/client; proxy_temp_path /tmp/proxy;
   fastcgi_temp_path /tmp/fastcgi; uwsgi_temp_path /tmp/uwsgi; scgi_temp_path /tmp/scgi;
   server {{ listen 8000;
-    add_header X-J2M-Revision "{revision}" always;
+    {header}
     location = /api/health {{ return {status} '{marker}'; }}
     location = /api/ready {{ return {status} '{marker}'; }}
     location = /marker {{ return 200 '{marker}'; }}
@@ -131,7 +132,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
         ca_path, _, _ = write_certificates(root)
-        (root / "web1.conf").write_text(backend_config("backend-v1", SHA_OLD), encoding="utf-8")
+        (root / "web1.conf").write_text(backend_config("backend-v1", None), encoding="utf-8")
         (root / "web2.conf").write_text(backend_config("backend-v2", SHA_NEW), encoding="utf-8")
         (root / "broken.conf").write_text(backend_config("broken", SHA_NEW, healthy=False), encoding="utf-8")
         (root / "proxy.conf").write_text(proxy_config(), encoding="utf-8")
@@ -221,6 +222,7 @@ def main() -> int:
             run(sys.executable, str(ROOT / "scripts" / "selfhost_proxy_recovery.py"),
                 "--origin", origin, "--expected-image", NGINX_IMAGE,
                 "--expected-revision", SHA_OLD, "--network-name", network,
+                "--legacy-bootstrap-rollback",
                 "--web-container", names["web1"], "--worker-service", f"{prefix}-worker",
                 "--project", prefix, "--proxy-container", names["proxy"],
                 "--attempts", "10", "--retry-seconds", "0.25", "--request-timeout", "2",
