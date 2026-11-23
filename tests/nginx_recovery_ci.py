@@ -132,7 +132,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
         ca_path, _, _ = write_certificates(root)
-        (root / "web1.conf").write_text(backend_config("backend-v1", None), encoding="utf-8")
+        (root / "web1.conf").write_text(backend_config("backend-v1", SHA_OLD), encoding="utf-8")
         (root / "web2.conf").write_text(backend_config("backend-v2", SHA_NEW), encoding="utf-8")
         (root / "broken.conf").write_text(backend_config("broken", SHA_NEW, healthy=False), encoding="utf-8")
         (root / "proxy.conf").write_text(proxy_config(), encoding="utf-8")
@@ -222,7 +222,6 @@ def main() -> int:
             run(sys.executable, str(ROOT / "scripts" / "selfhost_proxy_recovery.py"),
                 "--origin", origin, "--expected-image", NGINX_IMAGE,
                 "--expected-revision", SHA_OLD, "--network-name", network,
-                "--legacy-bootstrap-rollback",
                 "--web-container", names["web1"], "--worker-service", f"{prefix}-worker",
                 "--project", prefix, "--proxy-container", names["proxy"],
                 "--attempts", "10", "--retry-seconds", "0.25", "--request-timeout", "2",
