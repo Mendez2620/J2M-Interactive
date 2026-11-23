@@ -26,7 +26,7 @@ function Test-J2MLocalHttps([string]$Origin, [string]$ExpectedRevision) {
 }
 
 function Confirm-J2MLocalProxy([string]$Origin, [string]$ExpectedImage) {
-    if ($ExpectedImage -cnotmatch '^j2m-interactive:([0-9a-f]{40})$') {
+    if (-not ($ExpectedImage -cmatch '^j2m-interactive:([0-9a-f]{40})$')) {
         throw "La imagen esperada no tiene un SHA aprobado."
     }
     $expectedRevision = $Matches[1]
