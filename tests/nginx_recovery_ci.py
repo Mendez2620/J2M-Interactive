@@ -21,6 +21,8 @@ from cryptography.x509.oid import NameOID
 
 ROOT = Path(__file__).resolve().parents[1]
 NGINX_IMAGE = "nginx@sha256:0563c36f94a6d3ec3584161b77859f740f7e20b4853f52c796a864ce6908e8ea"
+SHA_OLD = "a" * 40
+SHA_NEW = "b" * 40
 
 
 def run(*arguments: str, check: bool = True, timeout: int = 60) -> str:
@@ -60,7 +62,7 @@ def write_certificates(directory: Path) -> tuple[Path, Path, Path]:
     return ca_path, cert_path, key_path
 
 
-def backend_config(marker: str, healthy: bool = True) -> str:
+def backend_config(marker: str, revision: str, healthy: bool = True) -> str:
     status = 200 if healthy else 503
     return f"""worker_processes 1;
 pid /tmp/nginx.pid;
@@ -69,6 +71,7 @@ http {{
   access_log off; client_body_temp_path /tmp/client; proxy_temp_path /tmp/proxy;
   fastcgi_temp_path /tmp/fastcgi; uwsgi_temp_path /tmp/uwsgi; scgi_temp_path /tmp/scgi;
   server {{ listen 8000;
+    add_header X-J2M-Revision "{revision}" always;
     location = /api/health {{ return {status} '{marker}'; }}
     location = /api/ready {{ return {status} '{marker}'; }}
     location = /marker {{ return 200 '{marker}'; }}
@@ -128,14 +131,16 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
         ca_path, _, _ = write_certificates(root)
-        (root / "web1.conf").write_text(backend_config("backend-v1"), encoding="utf-8")
-        (root / "web2.conf").write_text(backend_config("backend-v2"), encoding="utf-8")
-        (root / "broken.conf").write_text(backend_config("broken", healthy=False), encoding="utf-8")
+        (root / "web1.conf").write_text(backend_config("backend-v1", SHA_OLD), encoding="utf-8")
+        (root / "web2.conf").write_text(backend_config("backend-v2", SHA_NEW), encoding="utf-8")
+        (root / "broken.conf").write_text(backend_config("broken", SHA_NEW, healthy=False), encoding="utf-8")
         (root / "proxy.conf").write_text(proxy_config(), encoding="utf-8")
         try:
             run("docker", "network", "create", network)
             def start_backend(name: str, config: str, alias: str | None = None) -> None:
-                command = ["docker", "run", "-d", "--name", name, "--network", network, "--read-only", "--tmpfs", "/tmp"]
+                command = ["docker", "run", "-d", "--name", name, "--network", network, "--read-only", "--tmpfs", "/tmp",
+                           "--label", f"com.docker.compose.project={prefix}",
+                           "--label", "com.docker.compose.service=web"]
                 if alias:
                     command += ["--network-alias", alias]
                 command += ["-v", f"{root / config}:/etc/nginx/nginx.conf:ro", NGINX_IMAGE]
@@ -160,6 +165,28 @@ def main() -> int:
                 raise
             ip1 = json.loads(run("docker", "inspect", names["web1"]))[0]["NetworkSettings"]["Networks"][network]["IPAddress"]
 
+            # The previous backend remains healthy (200); reload must still
+            # happen when its public revision differs from the expected one.
+            start_backend(names["web2"], "web2.conf", "web-new")
+            wait_marker(origin, context, "backend-v1")
+            (root / "proxy.conf").write_text(
+                proxy_config().replace("http://web:8000", "http://web-new:8000"),
+                encoding="utf-8",
+            )
+            run(sys.executable, str(ROOT / "scripts" / "selfhost_proxy_recovery.py"),
+                "--origin", origin, "--expected-image", NGINX_IMAGE,
+                "--expected-revision", SHA_NEW, "--network-name", network,
+                "--web-container", names["web2"], "--worker-service", f"{prefix}-worker",
+                "--project", prefix, "--proxy-container", names["proxy"],
+                "--attempts", "10", "--retry-seconds", "0.25", "--request-timeout", "2",
+                "--ca-file", str(ca_path))
+            wait_marker(origin, context, "backend-v2")
+            (root / "proxy.conf").write_text(proxy_config(), encoding="utf-8")
+            run("docker", "exec", names["proxy"], "nginx", "-t")
+            run("docker", "exec", names["proxy"], "nginx", "-s", "reload")
+            wait_marker(origin, context, "backend-v1")
+            run("docker", "rm", "-f", names["web2"])
+
             run("docker", "network", "disconnect", network, names["web1"])
             run("docker", "run", "-d", "--name", names["filler1"], "--network", network, NGINX_IMAGE)
             start_backend(names["web2"], "web2.conf", "web")
@@ -168,6 +195,7 @@ def main() -> int:
                 raise RuntimeError("synthetic replacement did not receive a different IP")
             run(sys.executable, str(ROOT / "scripts" / "selfhost_proxy_recovery.py"),
                 "--origin", origin, "--expected-image", NGINX_IMAGE,
+                "--expected-revision", SHA_NEW, "--network-name", network,
                 "--web-container", names["web2"], "--worker-service", f"{prefix}-worker",
                 "--project", prefix, "--proxy-container", names["proxy"],
                 "--attempts", "10", "--retry-seconds", "0.25", "--request-timeout", "2",
@@ -180,6 +208,7 @@ def main() -> int:
             failed = subprocess.run([
                 sys.executable, str(ROOT / "scripts" / "selfhost_proxy_recovery.py"),
                 "--origin", origin, "--expected-image", NGINX_IMAGE,
+                "--expected-revision", SHA_NEW, "--network-name", network,
                 "--web-container", names["broken"], "--worker-service", f"{prefix}-worker",
                 "--project", prefix, "--proxy-container", names["proxy"],
                 "--attempts", "2", "--retry-seconds", "0.1", "--request-timeout", "1",
@@ -191,6 +220,7 @@ def main() -> int:
             run("docker", "network", "connect", "--alias", "web", network, names["web1"])
             run(sys.executable, str(ROOT / "scripts" / "selfhost_proxy_recovery.py"),
                 "--origin", origin, "--expected-image", NGINX_IMAGE,
+                "--expected-revision", SHA_OLD, "--network-name", network,
                 "--web-container", names["web1"], "--worker-service", f"{prefix}-worker",
                 "--project", prefix, "--proxy-container", names["proxy"],
                 "--attempts", "10", "--retry-seconds", "0.25", "--request-timeout", "2",
