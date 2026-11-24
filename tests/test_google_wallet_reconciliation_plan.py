@@ -222,6 +222,8 @@ class ReconciliationPreviewPostgresTests(ReconciliationPreviewCases, unittest.Te
         if (url.get_backend_name() != "postgresql" or url.host not in {"127.0.0.1", "localhost"}
                 or url.database != "j2m_test"):
             self.skipTest("requires the dedicated loopback j2m_test PostgreSQL service")
+        # SQLAlchemy 2.1 defaults to psycopg 3; the project pins psycopg2.
+        url = url.set(drivername="postgresql+psycopg2")
         schema = "wallet_preview_" + uuid.uuid4().hex
         admin = create_engine(url)
         self.addCleanup(admin.dispose)
