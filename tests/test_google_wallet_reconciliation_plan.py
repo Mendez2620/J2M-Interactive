@@ -16,7 +16,10 @@ from app.config import TestingConfig
 from app.extensions import db
 from app.models import Business, Customer, GoogleWalletSyncJob, LoyaltyLedgerEntry, Transaction
 from app.services.loyalty_transaction_service import process_loyalty_transaction
-from app.services.google_wallet_reconciliation_plan import preview_google_wallet_reconciliation
+from app.services.google_wallet_reconciliation_plan import (
+    execute_google_wallet_reconciliation, preview_google_wallet_reconciliation,
+)
+from app.services.google_wallet_sync_service import _customer_lock
 
 
 class ReconciliationPreviewCases:
@@ -179,6 +182,131 @@ class ReconciliationPreviewCases:
         finally:
             db.session.rollback()
         self.assertEqual(Transaction.query.count(), 1)
+
+    def _execute(self, candidate, service, *, business_id=None):
+        db.session.remove()
+        self.app.config["GOOGLE_WALLET_MODE"] = "real"
+        return execute_google_wallet_reconciliation(
+            candidate, business_id=business_id or self.business_id, service=service,
+        )
+
+    def test_executor_records_only_confirmed_transaction_and_is_idempotent(self):
+        customer = self.customer(current_stamps=2)
+        transaction = self.movement(customer)
+        candidate = self.preview().candidates[0]
+        calls = []
+
+        class Provider:
+            mode = "real"
+
+            def reconcile_existing_loyalty_balance(_self, record, *, business_id):
+                calls.append((record.id, business_id, record.current_stamps))
+                return {"status": "success", "reason": "balance_updated"}
+
+        provider = Provider()
+        self.assertEqual(self._execute(candidate, provider),
+                         {"status": "success", "reason": "balance_updated"})
+        self.assertEqual(calls, [(customer, self.business_id, 3)])
+        job = GoogleWalletSyncJob.query.filter_by(transaction_id=transaction).one()
+        self.assertEqual((job.status, job.business_id, job.customer_id),
+                         ("completed", self.business_id, customer))
+        self.assertEqual(self._execute(candidate, provider)["reason"], "stale_candidate")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(Transaction.query.count(), 1)
+        self.assertEqual(LoyaltyLedgerEntry.query.count(), 2)
+        self.assertEqual(GoogleWalletSyncJob.query.count(), 1)
+
+    def test_executor_completes_existing_failed_job_without_duplicate(self):
+        customer = self.customer()
+        transaction = self.movement(customer)
+        job_id = self.job(customer, transaction, "failed")
+        db.session.get(GoogleWalletSyncJob, job_id).attempts = 3
+        db.session.commit()
+        candidate = self.preview().candidates[0]
+
+        class Provider:
+            mode = "real"
+
+            def reconcile_existing_loyalty_balance(_self, record, *, business_id):
+                return {"status": "success", "reason": "already_current"}
+
+        self.assertEqual(self._execute(candidate, Provider())["status"], "success")
+        job = db.session.get(GoogleWalletSyncJob, job_id)
+        self.assertEqual((job.status, job.attempts), ("completed", 3))
+        self.assertEqual(GoogleWalletSyncJob.query.count(), 1)
+
+    def test_executor_never_queues_missing_or_uncertain_remote_object(self):
+        customer = self.customer()
+        self.movement(customer)
+        candidate = self.preview().candidates[0]
+
+        class Provider:
+            mode = "real"
+
+            def reconcile_existing_loyalty_balance(_self, record, *, business_id):
+                return _self.response
+
+        provider = Provider()
+        for response, expected in (
+            ({"status": "skipped", "reason": "object_not_found", "status_code": 404}, "skipped"),
+            ({"status": "retry", "reason": "balance_unconfirmed"}, "retry"),
+            ({"status": "error", "status_code": 403, "private": "not for logs"}, "error"),
+            ({"status": "success"}, "retry"),
+            (None, "retry"),
+        ):
+            with self.subTest(response=response):
+                provider.response = response
+                result = self._execute(candidate, provider)
+                self.assertEqual(result["status"], expected)
+                self.assertNotIn("private", result)
+                self.assertEqual(GoogleWalletSyncJob.query.count(), 0)
+
+    def test_executor_rejects_stale_foreign_disabled_and_busy_candidates(self):
+        customer = self.customer()
+        self.movement(customer)
+        candidate = self.preview().candidates[0]
+
+        class Provider:
+            mode = "real"
+
+            def reconcile_existing_loyalty_balance(_self, record, *, business_id):
+                raise AssertionError("No remote call")
+
+        provider = Provider()
+        self.assertEqual(execute_google_wallet_reconciliation(
+            candidate, business_id=self.business_id, service=provider,
+        )["status"], "disabled")
+        self.assertEqual(self._execute(candidate, provider, business_id=self.other_id)["reason"],
+                         "invalid_candidate")
+        with _customer_lock(customer) as acquired:
+            self.assertTrue(acquired)
+            self.assertEqual(self._execute(candidate, provider)["reason"], "customer_busy")
+        self.movement(customer)
+        self.assertEqual(self._execute(candidate, provider)["reason"], "stale_candidate")
+        self.assertEqual(GoogleWalletSyncJob.query.count(), 1)  # normal real-mode movement
+
+    def test_executor_never_completes_movement_arriving_during_remote_call(self):
+        customer = self.customer()
+        first = self.movement(customer)
+        candidate = self.preview().candidates[0]
+        movements = []
+        test = self
+
+        class Provider:
+            mode = "real"
+
+            def reconcile_existing_loyalty_balance(_self, record, *, business_id):
+                movements.append(test.movement(customer))
+                db.session.remove()
+                return {"status": "success", "reason": "balance_updated"}
+
+        result = self._execute(candidate, Provider())
+        self.assertEqual(result, {"status": "retry", "reason": "changed_during_provider_call"})
+        self.assertIsNone(GoogleWalletSyncJob.query.filter_by(transaction_id=first).first())
+        newer = GoogleWalletSyncJob.query.filter_by(transaction_id=movements[0]).one()
+        self.assertEqual(newer.status, "pending")
+        self.assertEqual(Transaction.query.count(), 2)
+        self.assertEqual(db.session.get(Customer, customer).current_stamps, 2)
 
     def test_read_only_sql_no_provider(self):
         customer = self.customer()

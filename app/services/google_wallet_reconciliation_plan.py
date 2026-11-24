@@ -8,8 +8,12 @@ shared customer fence and persist its own outcome.
 from collections import Counter
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from types import SimpleNamespace
+from datetime import datetime, timezone
 
 from sqlalchemy import or_, select
+from flask import current_app
+from sqlalchemy.exc import IntegrityError
 
 from app.extensions import db
 from app.models import Business, Customer, GoogleWalletSyncJob, LoyaltyLedgerEntry, Transaction
@@ -216,3 +220,125 @@ def preview_google_wallet_reconciliation(business_id, *, limit=50, after_custome
             return ReconciliationPreview(
                 True, min(limit, len(customers)), dict(counts), tuple(candidates), next_id,
             )
+
+
+def execute_google_wallet_reconciliation(candidate, *, business_id, service):
+    """Internal, explicitly invoked recovery of one previously inspected candidate.
+
+    No endpoint, CLI, automatic execution or authorization by a customer ID.
+    The future operational entrypoint must enforce administrator authorization.
+    Confirmed remote success is recorded in the existing transaction outbox;
+    skipped or uncertain results never enqueue ordinary creation-capable work.
+    """
+    from app.services.google_wallet_sync_service import _customer_lock
+
+    if (not isinstance(candidate, ReconciliationCandidate)
+            or type(business_id) is not int or business_id < 1
+            or candidate.business_id != business_id
+            or type(candidate.customer_id) is not int or candidate.customer_id < 1):
+        return {"status": "error", "reason": "invalid_candidate"}
+    if (current_app.config.get("GOOGLE_WALLET_MODE") != "real"
+            or getattr(service, "mode", None) != "real"):
+        return {"status": "disabled", "reason": "real_mode_required"}
+
+    # Shared fence with normal balance sync and design publication. Never hold
+    # the customer row lock over provider I/O, which would block purchases.
+    with _customer_lock(candidate.customer_id) as acquired:
+        if not acquired:
+            return {"status": "retry", "reason": "customer_busy"}
+        fresh = preview_google_wallet_reconciliation(
+            business_id, limit=1, after_customer_id=candidate.customer_id - 1,
+        )
+        if fresh.candidates != (candidate,):
+            return {"status": "skipped", "reason": "stale_candidate"}
+
+        # Send only immutable, verified balance/program values. Do not use
+        # an ORM identity map that may contain stale or uncommitted changes.
+        business = SimpleNamespace(
+            id=business_id, is_active=True, loyalty_type=candidate.loyalty_type,
+            stamps_reward_limit=candidate.reward_limit,
+            wallet_balance_label=candidate.balance_label,
+        )
+        customer = SimpleNamespace(
+            id=candidate.customer_id, business_id=business_id, business=business,
+            current_points=float(candidate.points), current_stamps=candidate.stamps,
+        )
+        try:
+            result = service.reconcile_existing_loyalty_balance(
+                customer, business_id=business_id,
+            )
+        except Exception:
+            return {"status": "retry", "reason": "provider_exception"}
+        if not isinstance(result, dict):
+            return {"status": "retry", "reason": "provider_unconfirmed"}
+        if result.get("status") != "success" or not isinstance(result.get("reason"), str) or result.get("reason") not in {
+            "already_current", "balance_updated",
+        }:
+            # Only return a controlled classification, not arbitrary provider
+            # payloads, identifiers, credentials, or diagnostic strings.
+            status = result.get("status")
+            if not isinstance(status, str) or status not in {"skipped", "error", "retry", "disabled"}:
+                status = "retry"
+            reason = result.get("reason")
+            safe_reasons = {
+                "object_not_found", "object_not_active", "business_inactive",
+                "tenant_mismatch", "remote_identity_mismatch", "balance_unconfirmed",
+                "invalid_provider_response", "real_mode_required",
+            }
+            response = {"status": status, "reason": reason if isinstance(reason, str)
+                        and reason in safe_reasons else "provider_unconfirmed"}
+            code = result.get("status_code")
+            if type(code) is int and 400 <= code <= 599:
+                response["status_code"] = code
+            return response
+
+        # The remote call was confirmed, but transactions may have arrived.
+        # A short local write transaction locks the business/customer and
+        # revalidates the full ledger before recording ONLY the inspected
+        # transaction. The normal writer updates Customer before inserting its
+        # transaction/ledger/job. New movements therefore cannot be silently
+        # marked completed by this operation.
+        b, c, job = Business.__table__, Customer.__table__, GoogleWalletSyncJob.__table__
+        try:
+            with db.engine.begin() as connection:
+                if connection.dialect.name == "sqlite":
+                    connection.exec_driver_sql("BEGIN IMMEDIATE")
+                elif connection.dialect.name != "postgresql":
+                    raise RuntimeError("Base de datos no compatible con reconciliación.")
+                business_row = connection.execute(select(
+                    b.c.id, b.c.is_active, b.c.loyalty_type, b.c.stamps_reward_limit,
+                    b.c.wallet_balance_label,
+                ).where(b.c.id == business_id).with_for_update()).mappings().one_or_none()
+                customer_row = connection.execute(select(
+                    c.c.id, c.c.current_points, c.c.current_stamps,
+                ).where(c.c.id == candidate.customer_id, c.c.business_id == business_id)
+                 .with_for_update()).mappings().one_or_none()
+                if (business_row is None or not business_row["is_active"]
+                        or customer_row is None):
+                    return {"status": "retry", "reason": "changed_during_provider_call"}
+                status, verified = _inspect_customer(connection, business_row, customer_row)
+                if status != "eligible" or verified != candidate:
+                    return {"status": "retry", "reason": "changed_during_provider_call"}
+                now = datetime.now(timezone.utc).replace(tzinfo=None)
+                if candidate.job_id is None:
+                    connection.execute(job.insert().values(
+                        business_id=business_id, customer_id=candidate.customer_id,
+                        transaction_id=candidate.transaction_id, status="completed",
+                        attempts=0, created_at=now, updated_at=now,
+                    ))
+                else:
+                    updated = connection.execute(job.update().where(
+                        job.c.id == candidate.job_id,
+                        job.c.business_id == business_id,
+                        job.c.customer_id == candidate.customer_id,
+                        job.c.transaction_id == candidate.transaction_id,
+                        job.c.status == "failed",
+                    ).values(status="completed", locked_at=None, next_attempt_at=None,
+                             last_status_code=None, updated_at=now))
+                    if updated.rowcount != 1:
+                        return {"status": "retry", "reason": "changed_during_provider_call"}
+        except IntegrityError:
+            # A conflicting job must never be overwritten. A subsequent fresh
+            # attempt can verify the remote balance without repeating a PATCH.
+            return {"status": "retry", "reason": "local_completion_conflict"}
+        return {"status": "success", "reason": result["reason"]}

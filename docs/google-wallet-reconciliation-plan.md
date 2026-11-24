@@ -15,3 +15,14 @@ El resultado contiene agregados y snapshots internos no serializables públicame
 - límites, auditoría, idempotencia, recuperación de fallos y autorización separada para llamadas reales.
 
 Las pruebas usan SQLite aislado y, cuando se dispone del servicio PostgreSQL de CI dedicado, esquemas sintéticos únicos. No se accede a Supabase ni a Google.
+
+
+## Ejecutor interno de una candidatura
+
+`execute_google_wallet_reconciliation(candidate, business_id=..., service=...)` requiere el modo real configurado, un negocio explícito y un proveedor real inyectado. No es una interfaz autorizada por sí misma: no tiene endpoint, comando ni tarea programada.
+
+Adquiere el mismo bloqueo por cliente que el worker, vuelve a construir una fotografía fresca y exige coincidencia exacta con la candidatura. Envía al proveedor únicamente la representación del saldo comprobado, sin QR ni información personal. La llamada remota no mantiene bloqueadas las filas del cliente durante I/O. Tras una confirmación de saldo, abre una transacción local breve, bloquea negocio/cliente en PostgreSQL (SQLite usa BEGIN IMMEDIATE), vuelve a comprobar ledger y trabajo, y registra la última transacción inspeccionada como completada. Si ya existe un trabajo fallido, actualiza exclusivamente ese trabajo conservando sus intentos previos. Si falta, inserta un único trabajo completado; nunca uno pendiente que podría crear otra tarjeta.
+
+Un objeto ausente, error, respuesta sin confirmación o cambio concurrente no genera un nuevo trabajo ni se declara completado. Una colisión de unicidad no sobrescribe el trabajo ganador. Repetir después de una confirmación local no llama al proveedor. Si Google confirma pero el proceso falla antes del registro local, la siguiente recuperación debe verificar de nuevo el objeto existente; el proveedor ya implementa no-op cuando el saldo coincide.
+
+Pendiente antes de operación: autorización administrativa, selección y revisión del lote, registro durable de intentos fallidos/omitidos (solo éxitos quedan registrados en el outbox actual), límites operativos, política de reintentos, verificación de recuperación real y prueba en dispositivo. No activar el proveedor por este cambio.
