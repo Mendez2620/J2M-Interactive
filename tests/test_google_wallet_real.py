@@ -217,6 +217,73 @@ class GoogleWalletRealTestCase(unittest.TestCase):
         ])
         self.assertEqual(patch_body["linksModuleData"]["custom"], "keep")
 
+
+    def test_reissue_preserves_foreign_modules_and_removes_revoked_referral(self):
+        from datetime import datetime, timezone
+        participant = ensure_customer_invitation(self.customer)
+        participant.is_enabled = False
+        participant.revoked_at = datetime.now(timezone.utc)
+        db.session.commit()
+
+        old_url = f"https://staging.example.test/invite/{participant.invitation_code}"
+        external_uri = {"id": "menu", "uri": "https://example.test/menu"}
+        external_text = {"id": "foreign", "header": "External", "body": "Keep"}
+        existing = {
+            "barcode": {"value": "old-qr"},
+            "loyaltyPoints": {"balance": {"string": "9 / 8"}},
+            "textModulesData": [
+                external_text,
+                {"id": "program", "body": "Old", "custom": "keep"},
+                {"id": "reward", "body": "Removed reward"},
+            ],
+            "linksModuleData": {"custom": "keep", "uris": [
+                external_uri,
+                {"id": "invite_friends", "uri": old_url},
+                {"id": "invite_friends", "uri": old_url},
+            ]},
+            "appLinkData": {"webAppLinkInfo": {"appTarget": {"targetUri": {"uri": old_url}}}},
+        }
+        self.business.reward_description = None
+        service = self.service([FakeResponse(200, existing), FakeResponse(200, {})])
+        service._ensure_loyalty_object(self.customer)
+        body = service.http.calls[-1][2]
+        self.assertEqual(body["textModulesData"][0], external_text)
+        self.assertEqual([item["id"] for item in body["textModulesData"]], ["foreign", "program"])
+        self.assertEqual(body["textModulesData"][1]["custom"], "keep")
+        self.assertEqual(body["linksModuleData"], {"custom": "keep", "uris": [external_uri]})
+        self.assertIsNone(body["appLinkData"])
+        self.assertNotIn("loyaltyPoints", body)
+        self.assertNotIn("id", body)
+        self.assertNotIn("classId", body)
+        self.assertEqual(body["barcode"]["value"], self.customer.qr_code_token)
+
+    def test_reissue_and_publication_share_owned_metadata_without_overwriting_foreign_app_link(self):
+        external_app_link = {"webAppLinkInfo": {"appTarget": {
+            "targetUri": {"uri": "https://external.example.test/support"}
+        }}}
+        existing = {
+            "appLinkData": external_app_link,
+            "textModulesData": [{"id": "foreign", "body": "Keep"}],
+            "linksModuleData": {"uris": [{"id": "foreign", "uri": "https://example.test"}]},
+        }
+        service = self.service([
+            FakeResponse(200, existing), FakeResponse(200, {}),
+            FakeResponse(200, existing), FakeResponse(200, {}),
+        ])
+        service._ensure_loyalty_object(self.customer)
+        issuance = service.http.calls[-1][2]
+        result = service.publish_loyalty_object_metadata(self.customer)
+        publication = service.http.calls[-1][2]
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(issuance["textModulesData"], publication["textModulesData"])
+        self.assertEqual(issuance["linksModuleData"], publication["linksModuleData"])
+        self.assertNotIn("appLinkData", issuance)
+        self.assertNotIn("appLinkData", publication)
+        self.assertNotIn("loyaltyPoints", issuance)
+        self.assertNotIn("loyaltyPoints", publication)
+        self.assertIn("barcode", issuance)
+        self.assertNotIn("barcode", publication)
+
     def test_controlled_publication_skips_object_not_issued_without_post(self):
         before = (self.customer.qr_code_token, self.customer.current_points, self.customer.current_stamps)
         service = self.service([FakeResponse(404)])
