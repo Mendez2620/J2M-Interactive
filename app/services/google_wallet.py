@@ -259,32 +259,11 @@ class GoogleWalletService:
                 # A concurrent creator won. Read its complete object before
                 # replacing any array-valued metadata in the PATCH.
                 existing = self._request("GET", resource)
-        desired_links = metadata.get("linksModuleData")
-        if desired_links:
-            existing_module = existing.get("linksModuleData") if isinstance(existing, dict) else None
-            merged_module = copy.deepcopy(existing_module) if isinstance(existing_module, dict) else {}
-            existing_uris = merged_module.get("uris")
-            existing_uris = existing_uris if isinstance(existing_uris, list) else []
-            desired_uris = desired_links.get("uris") if isinstance(desired_links, dict) else []
-            invite = next((item for item in desired_uris
-                           if isinstance(item, dict) and item.get("id") == "invite_friends"), None)
-            if invite:
-                merged_uris = []
-                invite_added = False
-                for item in existing_uris:
-                    if isinstance(item, dict) and item.get("id") == "invite_friends":
-                        if invite_added:
-                            continue
-                        updated = copy.deepcopy(item)
-                        updated.update(copy.deepcopy(invite))
-                        merged_uris.append(updated)
-                        invite_added = True
-                    else:
-                        merged_uris.append(copy.deepcopy(item))
-                if not invite_added:
-                    merged_uris.append(copy.deepcopy(invite))
-                merged_module["uris"] = merged_uris
-                metadata["linksModuleData"] = merged_module
+        # Reissuing an existing pass follows the same controlled-module policy
+        # as design publication, while still updating the issuance-owned QR.
+        for key in ("textModulesData", "linksModuleData", "appLinkData"):
+            metadata.pop(key, None)
+        metadata.update(self._owned_metadata_patch(existing, body))
         return self._request("PATCH", resource, body=metadata)
 
     @staticmethod
@@ -311,6 +290,36 @@ class GoogleWalletService:
                 merged.append(copy.deepcopy(item))
                 emitted.add(item_id)
         return merged
+
+    def _owned_metadata_patch(self, existing, desired):
+        """Merge owned modules and remove obsolete owned links, preserving foreign data."""
+        controlled_text = {"program", "reward", "instructions", "terms", "contact"}
+        existing_text = existing.get("textModulesData") if isinstance(existing, dict) else []
+        patch_body = {"textModulesData": self._merge_items(
+            existing_text if isinstance(existing_text, list) else [],
+            desired.get("textModulesData", []), controlled_text,
+        )}
+        existing_links = existing.get("linksModuleData") if isinstance(existing, dict) else None
+        desired_links = desired.get("linksModuleData")
+        merged_links = copy.deepcopy(existing_links) if isinstance(existing_links, dict) else {}
+        current_uris = merged_links.get("uris") if isinstance(merged_links.get("uris"), list) else []
+        wanted_uris = desired_links.get("uris", []) if isinstance(desired_links, dict) else []
+        merged_links["uris"] = self._merge_items(current_uris, wanted_uris, {"invite_friends"})
+        if merged_links["uris"] or existing_links is not None:
+            patch_body["linksModuleData"] = merged_links
+
+        if "appLinkData" in desired:
+            patch_body["appLinkData"] = desired["appLinkData"]
+        else:
+            current_app_link = existing.get("appLinkData") if isinstance(existing, dict) else None
+            try:
+                current_uri = current_app_link["webAppLinkInfo"]["appTarget"]["targetUri"]["uri"]
+            except (KeyError, TypeError):
+                current_uri = ""
+            base = str(self._config("PUBLIC_BASE_URL", "") or "").rstrip("/")
+            if base and isinstance(current_uri, str) and current_uri.startswith(f"{base}/invite/"):
+                patch_body["appLinkData"] = None
+        return patch_body
 
     def publish_loyalty_class(self, business, prepared=None):
         """Publish shared design without changing the stable class identity."""
@@ -342,32 +351,7 @@ class GoogleWalletService:
             else:
                 return {"status": "retry" if exc.retryable else "error", "status_code": exc.status_code}
 
-        controlled_text = {"program", "reward", "instructions", "terms", "contact"}
-        existing_text = existing.get("textModulesData") if isinstance(existing, dict) else []
-        patch_body = {"textModulesData": self._merge_items(
-            existing_text if isinstance(existing_text, list) else [],
-            desired.get("textModulesData", []), controlled_text,
-        )}
-        existing_links = existing.get("linksModuleData") if isinstance(existing, dict) else None
-        desired_links = desired.get("linksModuleData")
-        merged_links = copy.deepcopy(existing_links) if isinstance(existing_links, dict) else {}
-        current_uris = merged_links.get("uris") if isinstance(merged_links.get("uris"), list) else []
-        wanted_uris = desired_links.get("uris", []) if isinstance(desired_links, dict) else []
-        merged_links["uris"] = self._merge_items(current_uris, wanted_uris, {"invite_friends"})
-        if merged_links["uris"] or existing_links is not None:
-            patch_body["linksModuleData"] = merged_links
-
-        if "appLinkData" in desired:
-            patch_body["appLinkData"] = desired["appLinkData"]
-        else:
-            current_app_link = existing.get("appLinkData") if isinstance(existing, dict) else None
-            try:
-                current_uri = current_app_link["webAppLinkInfo"]["appTarget"]["targetUri"]["uri"]
-            except (KeyError, TypeError):
-                current_uri = ""
-            base = str(self._config("PUBLIC_BASE_URL", "") or "").rstrip("/")
-            if base and current_uri.startswith(f"{base}/invite/"):
-                patch_body["appLinkData"] = None
+        patch_body = self._owned_metadata_patch(existing, desired)
         try:
             self._request("PATCH", resource, body=patch_body)
             return {"status": "success", "object_id": object_id}
