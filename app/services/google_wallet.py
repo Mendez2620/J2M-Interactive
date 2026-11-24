@@ -396,6 +396,72 @@ class GoogleWalletService:
         token = jwt.encode(claims, self.sa_private_key, algorithm="RS256")
         return token, f"{self.SAVE_URL_PREFIX}{token}"
 
+    def reconcile_existing_loyalty_balance(self, customer, *, business_id):
+        """Reconcile one existing remote object; never issue, recreate or activate it.
+
+        Caller must authorize the tenant, verify the local ledger and hold the
+        per-customer synchronization fence while obtaining the current balance
+        and performing this operation. This method does not mutate local data,
+        claim a job, or authorize an operational batch.
+        """
+        if self.mode != "real":
+            return {"status": "disabled", "reason": "real_mode_required"}
+        business = customer.business
+        if (type(business_id) is not int or business_id < 1
+                or customer.business_id != business_id
+                or business is None or business.id != business_id):
+            return {"status": "error", "reason": "tenant_mismatch"}
+        if not business.is_active:
+            return {"status": "skipped", "reason": "business_inactive"}
+
+        object_id = self.get_object_id(customer)
+        class_id = self.get_class_id(business)
+        resource = f"loyaltyObject/{quote(object_id, safe='')}"
+        desired = self._loyalty_points(customer)
+
+        def identity_matches(value):
+            return (isinstance(value, dict) and value.get("id") == object_id
+                    and value.get("classId") == class_id)
+
+        def is_active(value):
+            return str(value.get("state", "")).upper() == "ACTIVE"
+
+        def balance_matches(value):
+            points = value.get("loyaltyPoints")
+            if not isinstance(points, dict):
+                return False
+            balance = points.get("balance")
+            return (isinstance(balance, dict)
+                    and points.get("label") == desired["label"]
+                    and balance.get("string") == desired["balance"]["string"]
+                    and all(balance.get(key) is None for key in ("int", "double", "money")))
+
+        try:
+            existing = self._request("GET", resource)
+            if not identity_matches(existing):
+                return {"status": "error", "reason": "remote_identity_mismatch"}
+            if not is_active(existing):
+                return {"status": "skipped", "reason": "object_not_active"}
+            if balance_matches(existing):
+                return {"status": "success", "reason": "already_current"}
+
+            updated = self._request("PATCH", resource, body={"loyaltyPoints": desired})
+            if not identity_matches(updated):
+                return {"status": "error", "reason": "remote_identity_mismatch"}
+            if not is_active(updated):
+                return {"status": "skipped", "reason": "object_not_active"}
+            if not balance_matches(updated):
+                return {"status": "retry", "reason": "balance_unconfirmed"}
+            return {"status": "success", "reason": "balance_updated"}
+        except GoogleWalletAPIError as exc:
+            if exc.status_code == 404:
+                return {"status": "skipped", "reason": "object_not_found", "status_code": 404}
+            return {"status": "retry" if exc.retryable else "error",
+                    "status_code": exc.status_code}
+        except ValueError:
+            # A malformed response is not proof that a remote write succeeded.
+            return {"status": "retry", "reason": "invalid_provider_response"}
+
     def update_loyalty_object(self, customer):
         if self.mode == "disabled":
             return {"status": "disabled"}
