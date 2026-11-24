@@ -13,13 +13,14 @@ from datetime import datetime, timezone
 
 from sqlalchemy import or_, select
 from flask import current_app
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from app.extensions import db
 from app.models import Business, Customer, GoogleWalletSyncJob, LoyaltyLedgerEntry, Transaction
 
 
 MAX_CUSTOMERS = 100
+MAX_EXECUTION_BATCH = 25
 MAX_HISTORY = 5000
 _QUANTUM = Decimal("0.000001")
 _JOB_STATES = {"pending", "processing", "completed", "failed"}
@@ -246,9 +247,14 @@ def execute_google_wallet_reconciliation(candidate, *, business_id, service):
     with _customer_lock(candidate.customer_id) as acquired:
         if not acquired:
             return {"status": "retry", "reason": "customer_busy"}
-        fresh = preview_google_wallet_reconciliation(
-            business_id, limit=1, after_customer_id=candidate.customer_id - 1,
-        )
+        try:
+            fresh = preview_google_wallet_reconciliation(
+                business_id, limit=1, after_customer_id=candidate.customer_id - 1,
+            )
+        except ValueError:
+            return {"status": "skipped", "reason": "stale_candidate"}
+        except SQLAlchemyError:
+            return {"status": "retry", "reason": "local_preflight_unavailable"}
         if fresh.candidates != (candidate,):
             return {"status": "skipped", "reason": "stale_candidate"}
 
@@ -341,4 +347,53 @@ def execute_google_wallet_reconciliation(candidate, *, business_id, service):
             # A conflicting job must never be overwritten. A subsequent fresh
             # attempt can verify the remote balance without repeating a PATCH.
             return {"status": "retry", "reason": "local_completion_conflict"}
+        except SQLAlchemyError:
+            # Remote success cannot be declared locally when persistence fails.
+            return {"status": "retry", "reason": "local_completion_unconfirmed"}
         return {"status": "success", "reason": result["reason"]}
+
+
+def execute_google_wallet_reconciliation_batch(candidates, *, business_id, service):
+    """Internal bounded batch, not an externally authorized operation.
+
+    Validate the entire selection before any remote I/O. Stop on errors or
+    retries instead of amplifying a provider/database outage. Only a verified
+    completed transaction is persisted by the individual executor.
+    """
+    if (type(business_id) is not int or business_id < 1
+            or not isinstance(candidates, (tuple, list))
+            or not 1 <= len(candidates) <= MAX_EXECUTION_BATCH):
+        raise ValueError("Lote de reconciliación inválido.")
+    if any(not isinstance(item, ReconciliationCandidate)
+           or item.business_id != business_id
+           or type(item.customer_id) is not int or item.customer_id < 1
+           for item in candidates):
+        raise ValueError("Candidatura de otro negocio o inválida.")
+    if len({item.customer_id for item in candidates}) != len(candidates):
+        raise ValueError("Clientes duplicados en lote.")
+
+    if (current_app.config.get("GOOGLE_WALLET_MODE") != "real"
+            or getattr(service, "mode", None) != "real"):
+        return {"requested": len(candidates), "processed": 0,
+                "remaining": len(candidates), "counts": {}, "stop_reason": "real_mode_required"}
+
+    counts = Counter()
+    processed = 0
+    stop_reason = None
+    for candidate in sorted(candidates, key=lambda item: item.customer_id):
+        try:
+            result = execute_google_wallet_reconciliation(
+                candidate, business_id=business_id, service=service,
+            )
+        except SQLAlchemyError:
+            result = {"status": "retry", "reason": "local_execution_unconfirmed"}
+        processed += 1
+        counts[result["status"]] += 1
+        if result["status"] in {"error", "retry", "disabled"}:
+            stop_reason = result["reason"]
+            break
+    return {
+        "requested": len(candidates), "processed": processed,
+        "remaining": len(candidates) - processed, "counts": dict(counts),
+        "stop_reason": stop_reason,
+    }

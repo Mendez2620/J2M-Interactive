@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from sqlalchemy import create_engine, event, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.engine import make_url
 
 from app import create_app
@@ -17,7 +18,8 @@ from app.extensions import db
 from app.models import Business, Customer, GoogleWalletSyncJob, LoyaltyLedgerEntry, Transaction
 from app.services.loyalty_transaction_service import process_loyalty_transaction
 from app.services.google_wallet_reconciliation_plan import (
-    execute_google_wallet_reconciliation, preview_google_wallet_reconciliation,
+    execute_google_wallet_reconciliation, execute_google_wallet_reconciliation_batch,
+    preview_google_wallet_reconciliation,
 )
 from app.services.google_wallet_sync_service import _customer_lock
 
@@ -307,6 +309,61 @@ class ReconciliationPreviewCases:
         self.assertEqual(newer.status, "pending")
         self.assertEqual(Transaction.query.count(), 2)
         self.assertEqual(db.session.get(Customer, customer).current_stamps, 2)
+
+    def test_executor_local_completion_failure_is_not_reported_as_success(self):
+        customer = self.customer()
+        self.movement(customer)
+        candidate = self.preview().candidates[0]
+
+        class Provider:
+            mode = "real"
+
+            def reconcile_existing_loyalty_balance(_self, record, *, business_id):
+                return {"status": "success", "reason": "already_current"}
+
+        with patch.object(db.engine, "begin",
+                          side_effect=OperationalError("write", {}, RuntimeError("private"))):
+            result = self._execute(candidate, Provider())
+        self.assertEqual(result, {"status": "retry", "reason": "local_completion_unconfirmed"})
+        self.assertEqual(GoogleWalletSyncJob.query.count(), 0)
+        self.assertEqual(self._execute(candidate, Provider())["status"], "success")
+
+    def test_batch_validates_all_candidates_and_stops_after_provider_failure(self):
+        ids = [self.customer() for _ in range(3)]
+        for customer in ids:
+            self.movement(customer)
+        other = self.customer(self.other_id)
+        self.movement(other)
+        candidates = self.preview().candidates
+        foreign = preview_google_wallet_reconciliation(self.other_id).candidates[0]
+        self.app.config["GOOGLE_WALLET_MODE"] = "real"
+        calls = []
+
+        class Provider:
+            mode = "real"
+
+            def reconcile_existing_loyalty_balance(_self, record, *, business_id):
+                calls.append(record.id)
+                if record.id == ids[1]:
+                    return {"status": "retry", "status_code": 429}
+                return {"status": "success", "reason": "already_current"}
+
+        provider = Provider()
+        for invalid in ((), (candidates[0], candidates[0]), (candidates[0], foreign),
+                        tuple(candidates[0] for _ in range(26))):
+            with self.subTest(length=len(invalid)), self.assertRaises(ValueError):
+                execute_google_wallet_reconciliation_batch(
+                    invalid, business_id=self.business_id, service=provider,
+                )
+        self.assertEqual(calls, [])
+        report = execute_google_wallet_reconciliation_batch(
+            tuple(reversed(candidates)), business_id=self.business_id, service=provider,
+        )
+        self.assertEqual(calls, ids[:2])
+        self.assertEqual(report, {"requested": 3, "processed": 2, "remaining": 1,
+                                  "counts": {"success": 1, "retry": 1},
+                                  "stop_reason": "provider_unconfirmed"})
+        self.assertEqual(GoogleWalletSyncJob.query.count(), 1)
 
     def test_read_only_sql_no_provider(self):
         customer = self.customer()
