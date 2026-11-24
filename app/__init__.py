@@ -315,6 +315,9 @@ def create_app(config_name=None):
         db.session.commit()
         click.echo(f"Administrador de plataforma creado: {email}")
 
+    from app.services.google_wallet_reconciliation_audit import register_reconciliation_audit
+    register_reconciliation_audit(app)
+
     @app.cli.command("process-google-wallet-sync")
     def process_google_wallet_sync():
         """Process the persistent Google Wallet outbox once."""
