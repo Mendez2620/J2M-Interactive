@@ -164,7 +164,23 @@ class ReconciliationPreviewCases:
         self.assertFalse(self.preview().business_active)
         self.assertEqual(self.preview().scanned, 0)
 
-    def test_read_only_sql_no_provider_or_pending_session_flush(self):
+    def test_unflushed_session_data_is_not_written_or_used_in_preview(self):
+        customer = self.customer()
+        self.movement(customer)
+        db.session.remove()
+        uncommitted = Transaction(business_id=self.business_id, customer_id=customer,
+                                  type="earn", stamps_amount=1)
+        db.session.add(uncommitted)
+        try:
+            result = preview_google_wallet_reconciliation(self.business_id)
+            self.assertEqual(result.counts, {"eligible": 1})
+            self.assertIsNone(uncommitted.id)
+            self.assertIn(uncommitted, db.session.new)
+        finally:
+            db.session.rollback()
+        self.assertEqual(Transaction.query.count(), 1)
+
+    def test_read_only_sql_no_provider(self):
         customer = self.customer()
         self.movement(customer)
         db.session.remove()
