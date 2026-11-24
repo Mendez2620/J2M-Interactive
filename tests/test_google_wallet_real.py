@@ -354,6 +354,113 @@ class GoogleWalletRealTestCase(unittest.TestCase):
         timeout = self.service([requests.Timeout()]).update_loyalty_object(self.customer)
         self.assertEqual(timeout["status"], "retry")
 
+    def _existing_balance_object(self, service, *, balance="1 / 8", **overrides):
+        return {
+            "id": service.get_object_id(self.customer),
+            "classId": service.get_class_id(self.business),
+            "state": "ACTIVE",
+            "loyaltyPoints": {"label": "Sellos", "balance": {"string": balance}},
+            **overrides,
+        }
+
+    def test_reconciliation_patches_only_existing_balance_and_confirms_response(self):
+        service = self.service([])
+        old = self._existing_balance_object(service, barcode={"value": "preserve"})
+        updated = self._existing_balance_object(service, balance="2 / 8")
+        service.http.responses = [FakeResponse(200, old), FakeResponse(200, updated)]
+        before = (self.customer.current_stamps, self.customer.qr_code_token,
+                  Transaction.query.count(), GoogleWalletSyncJob.query.count())
+        result = service.reconcile_existing_loyalty_balance(
+            self.customer, business_id=self.business.id
+        )
+        self.assertEqual(result, {"status": "success", "reason": "balance_updated"})
+        self.assertEqual([call[0] for call in service.http.calls], ["GET", "PATCH"])
+        self.assertEqual(service.http.calls[0][1], service.http.calls[1][1])
+        self.assertEqual(service.http.calls[-1][2], {
+            "loyaltyPoints": {"label": "Sellos", "balance": {"string": "2 / 8"}},
+        })
+        self.assertEqual(before, (self.customer.current_stamps, self.customer.qr_code_token,
+                                  Transaction.query.count(), GoogleWalletSyncJob.query.count()))
+
+    def test_reconciliation_already_current_needs_no_remote_write(self):
+        service = self.service([])
+        service.http.responses = [FakeResponse(200, self._existing_balance_object(
+            service, balance="2 / 8"
+        ))]
+        self.assertEqual(service.reconcile_existing_loyalty_balance(
+            self.customer, business_id=self.business.id
+        ), {"status": "success", "reason": "already_current"})
+        self.assertEqual([call[0] for call in service.http.calls], ["GET"])
+
+    def test_reconciliation_never_recreates_missing_or_disappearing_object(self):
+        for disappears in (False, True):
+            with self.subTest(disappears=disappears):
+                service = self.service([])
+                service.http.responses = ([FakeResponse(200, self._existing_balance_object(service)),
+                                          FakeResponse(404)] if disappears else [FakeResponse(404)])
+                with patch.object(service, "ensure_resources", side_effect=AssertionError("No recreation")):
+                    result = service.reconcile_existing_loyalty_balance(
+                        self.customer, business_id=self.business.id
+                    )
+                self.assertEqual(result, {"status": "skipped", "reason": "object_not_found",
+                                          "status_code": 404})
+                self.assertEqual([call[0] for call in service.http.calls],
+                                 ["GET", "PATCH"] if disappears else ["GET"])
+
+    def test_reconciliation_rejects_foreign_or_inactive_remote_object(self):
+        for overrides, expected in (
+            ({"id": "foreign.object"}, "remote_identity_mismatch"),
+            ({"classId": "foreign.class"}, "remote_identity_mismatch"),
+            ({"state": "INACTIVE"}, "object_not_active"),
+            ({"state": None}, "object_not_active"),
+        ):
+            with self.subTest(overrides=overrides):
+                service = self.service([])
+                service.http.responses = [FakeResponse(200, self._existing_balance_object(
+                    service, **overrides
+                ))]
+                result = service.reconcile_existing_loyalty_balance(
+                    self.customer, business_id=self.business.id
+                )
+                self.assertEqual(result["reason"], expected)
+                self.assertEqual([call[0] for call in service.http.calls], ["GET"])
+
+    def test_reconciliation_requires_matching_active_tenant_and_real_mode(self):
+        service = self.service([])
+        self.assertEqual(service.reconcile_existing_loyalty_balance(
+            self.customer, business_id=self.business.id + 1
+        ), {"status": "error", "reason": "tenant_mismatch"})
+        self.business.is_active = False
+        self.assertEqual(service.reconcile_existing_loyalty_balance(
+            self.customer, business_id=self.business.id
+        ), {"status": "skipped", "reason": "business_inactive"})
+        self.assertEqual(service.http.calls, [])
+        for mode in ("disabled", "mock"):
+            with self.subTest(mode=mode):
+                client = FakeSession([])
+                inactive = GoogleWalletService(mode=mode, http_session=client)
+                self.assertEqual(inactive.reconcile_existing_loyalty_balance(
+                    self.customer, business_id=self.business.id
+                ), {"status": "disabled", "reason": "real_mode_required"})
+                self.assertEqual(client.calls, [])
+
+    def test_reconciliation_classifies_failure_and_requires_confirmed_balance(self):
+        for code, expected in ((403, "error"), (429, "retry"), (503, "retry")):
+            with self.subTest(code=code):
+                service = self.service([FakeResponse(code)])
+                self.assertEqual(service.reconcile_existing_loyalty_balance(
+                    self.customer, business_id=self.business.id
+                )["status"], expected)
+        service = self.service([])
+        service.http.responses = [
+            FakeResponse(200, self._existing_balance_object(service)),
+            FakeResponse(200, self._existing_balance_object(service)),
+        ]
+        self.assertEqual(service.reconcile_existing_loyalty_balance(
+            self.customer, business_id=self.business.id
+        ), {"status": "retry", "reason": "balance_unconfirmed"})
+        self.assertEqual([call[0] for call in service.http.calls], ["GET", "PATCH"])
+
     def test_missing_object_is_recreated_before_reporting_sync_success(self):
         service = self.service([
             FakeResponse(404),
