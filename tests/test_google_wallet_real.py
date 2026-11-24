@@ -533,6 +533,68 @@ class GoogleWalletRealTestCase(unittest.TestCase):
         db.session.add(job); db.session.commit()
         return job
 
+    def test_sync_worker_rejects_cross_tenant_and_cross_customer_jobs(self):
+        other_business = Business(name="Other wallet", slug="other-wallet")
+        db.session.add(other_business)
+        db.session.flush()
+        other_customer = Customer(business_id=other_business.id, full_name="Synthetic other")
+        same_business_customer = Customer(business_id=self.business.id, full_name="Synthetic same")
+        db.session.add_all([other_customer, same_business_customer])
+        db.session.flush()
+
+        invalid_jobs = []
+        for index, (job_business_id, transaction_business_id, transaction_customer_id) in enumerate((
+            (other_business.id, self.business.id, self.customer.id),
+            (self.business.id, other_business.id, self.customer.id),
+            (self.business.id, self.business.id, same_business_customer.id),
+            (self.business.id, other_business.id, other_customer.id),
+        )):
+            transaction = Transaction(
+                business_id=transaction_business_id, customer_id=transaction_customer_id,
+                type="earn", stamps_amount=1, request_id=f"invalid-link-{index}",
+            )
+            db.session.add(transaction)
+            db.session.flush()
+            job = GoogleWalletSyncJob(
+                business_id=job_business_id, customer_id=self.customer.id,
+                transaction_id=transaction.id,
+            )
+            db.session.add(job)
+            invalid_jobs.append(job)
+        db.session.commit()
+        before = (self.customer.current_points, self.customer.current_stamps, Transaction.query.count())
+        service = self.service([])
+        with patch.object(service, "update_loyalty_object") as update:
+            with self.assertLogs("app.services.google_wallet_sync_service", level="WARNING") as captured:
+                self.assertEqual(process_pending_google_wallet_jobs(service=service), 4)
+            update.assert_not_called()
+        self.assertIn("google_wallet_sync_invalid_linkage count=4", " ".join(captured.output))
+        self.assertNotIn(self.customer.qr_code_token, " ".join(captured.output))
+        for job in invalid_jobs:
+            db.session.refresh(job)
+            self.assertEqual((job.status, job.attempts, job.last_status_code), ("failed", 1, None))
+        self.assertEqual(before, (self.customer.current_points, self.customer.current_stamps,
+                                  Transaction.query.count()))
+
+    def test_sync_worker_separates_valid_and_invalid_jobs_for_same_customer(self):
+        valid = self._job("valid-link")
+        invalid = self._job("invalid-link")
+        other_business = Business(name="Foreign wallet", slug="foreign-wallet")
+        db.session.add(other_business)
+        db.session.flush()
+        invalid.business_id = other_business.id
+        db.session.commit()
+        service = self.service([FakeResponse(200, {"updated": True})])
+        self.assertEqual(process_pending_google_wallet_jobs(service=service), 2)
+        db.session.refresh(valid)
+        db.session.refresh(invalid)
+        self.assertEqual(valid.status, "completed")
+        self.assertEqual(invalid.status, "failed")
+        self.assertEqual([call[0] for call in service.http.calls], ["PATCH"])
+        self.assertEqual(service.http.calls[0][2], {
+            "loyaltyPoints": {"label": "Sellos", "balance": {"string": "2 / 8"}},
+        })
+
     def test_outbox_watermark_keeps_newer_job_pending_and_sends_current_balance(self):
         old_job = self._job("old-two-stamps")
         sent = []

@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import case, func, or_, text
 
 from app.extensions import db
-from app.models import Customer, GoogleWalletSyncJob
+from app.models import Customer, GoogleWalletSyncJob, Transaction
 from app.services.google_wallet import GoogleWalletService
 
 
@@ -146,14 +146,34 @@ def process_pending_google_wallet_jobs(limit=50, service=None):
                     GoogleWalletSyncJob.id <= watermark,
                 ).update({"status": "processing", "locked_at": now}, synchronize_session=False)
                 customer = db.session.get(Customer, customer_id)
-                if customer is None:
-                    _record_result(job_ids, {"status": "error", "status_code": None}, now)
-                else:
+                # A legacy or inconsistent outbox row must never authorize a
+                # provider call for a customer from another business or movement.
+                valid_ids = []
+                if customer is not None:
+                    valid_ids = [row[0] for row in db.session.query(
+                        GoogleWalletSyncJob.id
+                    ).join(
+                        Transaction, Transaction.id == GoogleWalletSyncJob.transaction_id
+                    ).filter(
+                        GoogleWalletSyncJob.id.in_(job_ids),
+                        GoogleWalletSyncJob.business_id == customer.business_id,
+                        GoogleWalletSyncJob.customer_id == customer.id,
+                        Transaction.business_id == customer.business_id,
+                        Transaction.customer_id == customer.id,
+                    ).all()]
+                valid_set = set(valid_ids)
+                invalid_ids = [job_id for job_id in job_ids if job_id not in valid_set]
+                if invalid_ids:
+                    _record_result(invalid_ids, {"status": "error", "status_code": None}, now)
+                    logging.getLogger(__name__).warning(
+                        "google_wallet_sync_invalid_linkage count=%s", len(invalid_ids)
+                    )
+                if valid_ids:
                     try:
                         result = service.update_loyalty_object(customer)
                     except Exception:
                         result = {"status": "retry", "status_code": None}
-                    _record_result(job_ids, result, now)
+                    _record_result(valid_ids, result, now)
                 db.session.commit()
                 processed += len(job_ids)
         except Exception:
