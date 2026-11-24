@@ -15,13 +15,14 @@ from sqlalchemy.engine import make_url
 from app import create_app
 from app.config import TestingConfig
 from app.extensions import db
-from app.models import Business, Customer, GoogleWalletSyncJob, LoyaltyLedgerEntry, Transaction
+from app.models import AccessAudit, Business, Customer, GoogleWalletSyncJob, LoyaltyLedgerEntry, PlatformAdmin, Transaction
 from app.services.loyalty_transaction_service import process_loyalty_transaction
 from app.services.google_wallet_reconciliation_plan import (
     execute_google_wallet_reconciliation, execute_google_wallet_reconciliation_batch,
     preview_google_wallet_reconciliation,
 )
 from app.services.google_wallet_sync_service import _customer_lock
+from app.services.google_wallet_reconciliation_control import run_reviewed_reconciliation
 
 
 class ReconciliationPreviewCases:
@@ -364,6 +365,99 @@ class ReconciliationPreviewCases:
                                   "counts": {"success": 1, "retry": 1},
                                   "stop_reason": "provider_unconfirmed"})
         self.assertEqual(GoogleWalletSyncJob.query.count(), 1)
+
+    def reviewed_fixture(self):
+        customer = self.customer()
+        self.movement(customer)
+        admin = PlatformAdmin(name="Synthetic admin", email="admin@example.invalid",
+                              password_hash="not-a-real-password-hash", is_active=True)
+        db.session.add(admin)
+        db.session.commit()
+        admin_id = admin.id
+        candidates = self.preview().candidates
+        self.app.config["GOOGLE_WALLET_MODE"] = "real"
+        return candidates, admin_id
+
+    def test_reviewed_operation_requires_gate_active_admin_and_confirmation(self):
+        candidates, admin_id = self.reviewed_fixture()
+
+        class Provider:
+            mode = "real"
+
+            def reconcile_existing_loyalty_balance(_self, record, *, business_id):
+                raise AssertionError("Provider forbidden")
+
+        args = dict(business_id=self.business_id, admin_id=admin_id,
+                    request_id=str(uuid.uuid4()), confirm=True, service=Provider())
+        self.assertEqual(run_reviewed_reconciliation(candidates, **args)["status"], "disabled")
+        self.app.config["GOOGLE_WALLET_RECONCILIATION_ENABLED"] = True
+        with self.assertRaises(ValueError):
+            run_reviewed_reconciliation(candidates, **{**args, "confirm": False})
+        db.session.get(PlatformAdmin, admin_id).is_active = False
+        db.session.commit()
+        db.session.remove()
+        self.assertEqual(run_reviewed_reconciliation(candidates, **args),
+                         {"status": "error", "reason": "admin_inactive"})
+        self.assertEqual(AccessAudit.query.count(), 0)
+
+    def test_reviewed_operation_records_each_attempt_and_replays_without_provider(self):
+        candidates, admin_id = self.reviewed_fixture()
+        self.app.config["GOOGLE_WALLET_RECONCILIATION_ENABLED"] = True
+        calls = []
+        test = self
+
+        class Provider:
+            mode = "real"
+
+            def reconcile_existing_loyalty_balance(_self, record, *, business_id):
+                with db.engine.connect() as connection:
+                    actions = connection.execute(text("SELECT action FROM access_audits ORDER BY id")).scalars().all()
+                test.assertEqual(actions, ["wallet_reconciliation_started", "wallet_reconciliation_item_started"])
+                calls.append(record.id)
+                return {"status": "skipped", "reason": "object_not_found", "status_code": 404}
+
+        args = dict(business_id=self.business_id, admin_id=admin_id,
+                    request_id=str(uuid.uuid4()), confirm=True, service=Provider())
+        report = run_reviewed_reconciliation(candidates, **args)
+        self.assertEqual(report["counts"], {"skipped": 1})
+        self.assertFalse(report["replayed"])
+        self.assertEqual(run_reviewed_reconciliation(candidates, **args), {**report, "replayed": True})
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(AccessAudit.query.count(), 4)
+        self.assertEqual(GoogleWalletSyncJob.query.count(), 0)
+        for row in AccessAudit.query.all():
+            self.assertEqual(row.platform_admin_id, admin_id)
+            self.assertNotIn("Synthetic private name", row.new_state)
+
+    def test_reviewed_operation_interrupted_audit_cannot_automatically_replay(self):
+        candidates, admin_id = self.reviewed_fixture()
+        self.app.config["GOOGLE_WALLET_RECONCILIATION_ENABLED"] = True
+        calls = []
+
+        class Provider:
+            mode = "real"
+
+            def reconcile_existing_loyalty_balance(_self, record, *, business_id):
+                calls.append(record.id)
+                return {"status": "retry", "reason": "balance_unconfirmed"}
+
+        from app.services import google_wallet_reconciliation_control as control
+        original = control._append
+
+        def interrupt(connection, action, **kwargs):
+            if action == control._ITEM_FINISH:
+                raise OperationalError("write", {}, RuntimeError("private"))
+            return original(connection, action, **kwargs)
+
+        args = dict(business_id=self.business_id, admin_id=admin_id,
+                    request_id=str(uuid.uuid4()), confirm=True, service=Provider())
+        with patch.object(control, "_append", side_effect=interrupt):
+            self.assertEqual(run_reviewed_reconciliation(candidates, **args)["status"], "unconfirmed")
+        self.assertEqual(run_reviewed_reconciliation(candidates, **args),
+                         {"status": "unconfirmed", "reason": "request_incomplete"})
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(AccessAudit.query.count(), 2)
+        self.assertEqual(GoogleWalletSyncJob.query.count(), 0)
 
     def test_read_only_sql_no_provider(self):
         customer = self.customer()

@@ -28,3 +28,14 @@ Un objeto ausente, error, respuesta sin confirmación o cambio concurrente no ge
 Pendiente antes de operación: autorización administrativa, selección y revisión del lote, registro durable de intentos fallidos/omitidos (solo éxitos quedan registrados en el outbox actual), límites operativos, política de reintentos, verificación de recuperación real y prueba en dispositivo. No activar el proveedor por este cambio.
 
 El lote interno `execute_google_wallet_reconciliation_batch` admite entre 1 y 25 candidaturas de un solo negocio, rechaza toda la selección si hay identidades repetidas o ajenas, ordena por cliente y se detiene ante el primer error o reintento. Solo devuelve agregados. No constituye un comando operativo autorizado; los resultados inciertos no se marcan completados.
+
+
+## Control de administración e historial durable
+
+El módulo interno `google_wallet_reconciliation_control.py` añade `run_reviewed_reconciliation`. Requiere una identidad de administrador de plataforma previamente autenticada por el futuro punto de entrada, administrador activo en la base, negocio activo, confirmación booleana explícita, UUID de solicitud y selección acotada. Un ID de administrador por sí solo no autentica a nadie.
+
+Utiliza la tabla existente `access_audits`, como el flujo de publicaciones. Registra por inserción el inicio de la solicitud, cada inicio/resultado individual y el resumen final. No se agregan migraciones ni se modifica la retención existente. Los registros guardan referencias locales de auditoría, huella de selección y resultados controlados, sin saldos claros, nombres ni credenciales. Un bloqueo por negocio serializa el control de solicitudes. La misma solicitud y selección terminada reproduce el resumen sin llamar al proveedor. Una solicitud iniciada sin resultado final permanece incierta y no se repite automáticamente; requiere investigación y nueva selección autorizada.
+
+El resultado remoto, la cobertura local y la bitácora no forman una transacción distribuida. Si se pierde el registro final, no se declara éxito de la solicitud aunque la cobertura local ya pudiera estar confirmada. No se garantiza inmutabilidad física de la tabla por este cambio; se utiliza su contrato de historial por inserción existente.
+
+La bandera `GOOGLE_WALLET_RECONCILIATION_ENABLED` permanece ausente/falsa y no se expone a configuración de entorno, interfaz web o CLI. Pendientes: conectar un punto de entrada autenticado con CSRF, revisión explícita de la selección, autorización operativa y validación física. No se debe activar esta operación todavía.
