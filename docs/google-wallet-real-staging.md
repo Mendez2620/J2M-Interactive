@@ -97,6 +97,12 @@ En PostgreSQL, la cola toma un advisory lock transaccional por cliente. Dos work
 
 La emisión y la recuperación solo incluyen el balance al crear inicialmente un `LoyaltyObject`. Si el objeto ya existe, esos flujos actualizan únicamente metadatos seguros como QR, estado y textos; nunca envían `loyaltyPoints`. La cola protegida es la única ruta que actualiza puntos o sellos. Si una creación concurrente devuelve `409`, la emisión aplica solo metadatos y el worker vuelve a enviar el saldo confirmado antes de completar su trabajo.
 
+### Fase 8E.2A: conservación de metadatos de tarjetas existentes
+
+La reemisión, la recuperación de recursos y la publicación de diseños aplican la misma política de módulos propios de J2M. Se conservan textos y enlaces ajenos, se actualizan o eliminan los IDs controlados por J2M según el estado actual y se retira el enlace de referidos controlado cuando ya no corresponde. Un enlace de aplicación ajeno sin sustitución solicitada permanece intacto. La emisión puede actualizar el QR autorizado; la publicación no modifica el QR. Ninguno de esos PATCH de objetos existentes toca el saldo ni cambia su ID.
+
+Las regresiones ejercitan respuestas HTTP sintéticas, incluida una invitación revocada, sin contactar Google. La eliminación efectiva de enlaces en Google Wallet y la visualización de pases existentes requieren comprobación en Demo Mode con una cuenta y dispositivo autorizados; no se consideran validadas por las pruebas unitarias.
+
 Los errores `429`, `408`, `5xx`, timeouts y conectividad vuelven a `pending` con espera exponencial. Los errores permanentes quedan en `failed` con su código HTTP, sin borrar el movimiento. Si el objeto fue eliminado en Google, el proceso intenta reconstruir sus recursos. Si el worker se suspende, los trabajos permanecen en PostgreSQL; al reanudarlo se procesan en orden. Un proceso que termina abruptamente revierte su reclamo, y un estado heredado `processing` puede recuperarse después de cinco minutos sin solaparse con un propietario que aún conserve el advisory lock.
 
 La concurrencia PostgreSQL se cubre por diseño y SQL específico, pero debe verificarse con dos ejecuciones reales en Railway staging antes de producción. Las pruebas locales SQLite validan de forma determinista la exclusión, la marca de agua, los reintentos y la recuperación; no sustituyen esa validación externa.
