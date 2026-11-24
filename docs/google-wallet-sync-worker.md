@@ -31,6 +31,8 @@ Cada ciclo registra solo agregados: procesados, pendientes, procesando, reintent
 
 Crear alertas sobre los eventos `google_wallet_worker_backlog` y `google_wallet_worker_cycle_failed`. Investigar además cualquier negocio que muestre `con error` o `reintentando` en Super Admin. Códigos 429, 5xx y errores de red son reintentables; 401/403 normalmente requieren corregir credenciales o permisos. Un objeto 404 se recupera mediante la creación segura ya implementada.
 
+Antes de una llamada al proveedor, el worker verifica que cada trabajo reclamado, su transacción y su cliente correspondan al mismo negocio y cliente. Los vínculos inconsistentes se marcan como fallidos sin llamada remota atribuible a esos trabajos; los trabajos válidos del mismo lote conservan su procesamiento normal. El evento agregado `google_wallet_sync_invalid_linkage` permite investigar inconsistencias sin registrar identificadores ni datos privados. Esta comprobación no repara ni elimina movimientos y no sustituye la verificación contable de reconciliación.
+
 El healthcheck de proceso no demuestra progreso. Alerte también por ausencia de
 ciclos y por antigüedad creciente del trabajo más antiguo para detectar un
 worker vivo pero bloqueado.
