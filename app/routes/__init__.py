@@ -1,3 +1,6 @@
+import os
+import re
+
 from flask import Blueprint, current_app, jsonify, make_response, send_from_directory
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -19,6 +22,21 @@ from app.services.unified_staff_access_service import unified_staff_access
 # Health Check Blueprint or root API routes
 main_bp = Blueprint("main", __name__)
 
+# A public revision marker is emitted only for an exact pinned local release.
+# Other installations preserve their existing health/readiness JSON contract.
+_RELEASE_IMAGE_PATTERN = re.compile(r"^j2m-interactive:([0-9a-f]{40})$")
+
+
+def _probe_response(payload, status):
+    response = make_response(jsonify(payload), status)
+    response.headers["Cache-Control"] = "no-store"
+    match = _RELEASE_IMAGE_PATTERN.fullmatch(os.environ.get("J2M_RELEASE_IMAGE", ""))
+    if match is not None:
+        response.headers["X-J2M-Revision"] = match.group(1)
+    return response
+
+
+
 
 @main_bp.route("/staff-access", methods=["GET", "POST"])
 def staff_access():
@@ -28,10 +46,7 @@ def staff_access():
 @main_bp.route("/api/health", methods=["GET"])
 def health_check():
     """Health check endpoint to verify backend service status."""
-    return (
-        jsonify({"status": "ok", "app": "J2M Interactive Loyalty SaaS"}),
-        200,
-    )
+    return _probe_response({"status": "ok", "app": "J2M Interactive Loyalty SaaS"}, 200)
 
 
 @main_bp.route("/api/ready", methods=["GET"])
@@ -41,8 +56,8 @@ def readiness_check():
         db.session.execute(text("SELECT 1"))
     except SQLAlchemyError:
         db.session.rollback()
-        return jsonify({"status": "unavailable", "database": "unavailable"}), 503
-    return jsonify({"status": "ready", "database": "available"}), 200
+        return _probe_response({"status": "unavailable", "database": "unavailable"}, 503)
+    return _probe_response({"status": "ready", "database": "available"}, 200)
 
 
 @main_bp.route("/service-worker.js", methods=["GET"])

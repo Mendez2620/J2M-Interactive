@@ -30,6 +30,7 @@ services:
       - j2m-media:/app/instance/media
     environment:
       J2M_PROCESS_TYPE: web
+      J2M_RELEASE_IMAGE: ${J2M_IMAGE:?approved release tag required}
       PORT: "8000"
     ports:
       - 127.0.0.1:${J2M_LOCAL_PORT:-8000}:8000

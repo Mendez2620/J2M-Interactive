@@ -131,6 +131,12 @@ class SelfHostInfrastructureTestCase(unittest.TestCase):
         self.assertIn("--wait-timeout 120", deploy)
         self.assertIn("$ApprovedSha -eq $previousSha", deploy)
         self.assertIn("Test-J2MLocalHttps", deploy)
+        self.assertIn("--expected-revision", deploy)
+        self.assertIn("-LegacyBootstrapRollback:$bootstrapLegacy", deploy)
+        self.assertIn("--legacy-bootstrap-rollback", deploy)
+        self.assertIn('Headers["X-J2M-Revision"]', deploy)
+        self.assertIn("selfhost_proxy_recovery.py", deploy)
+        self.assertIn("Confirm-J2MLocalProxy", deploy)
         self.assertIn('"/api/health", "/api/ready"', deploy)
         self.assertLess(deploy.index("try {", deploy.index('$services = @')), deploy.index("set_selfhost_image_pin.ps1", deploy.index('$services = @')))
         self.assertNotIn("db upgrade", deploy)
@@ -262,7 +268,8 @@ class SelfHostInfrastructureTestCase(unittest.TestCase):
             deploy = ROOT / "scripts" / "selfhost_deploy_approved.ps1"
             command = (
                 f"& '{protect}' -Path '{env_file}'; "
-                f"$newSha='{requested}'; $global:upCalls=0; $global:httpsCalls=0; "
+                f"$newSha='{requested}'; $global:upCalls=0; $global:httpsCalls=0; $global:proxyCalls=0; "
+                "function global:python { $global:proxyCalls++; $global:LASTEXITCODE=0 }; "
                 "function global:git { "
                 "if ($args[0] -eq 'rev-parse') { Write-Output $newSha }; $global:LASTEXITCODE=0 }; "
                 "function global:docker { $joined=$args -join ' '; "
@@ -270,10 +277,11 @@ class SelfHostInfrastructureTestCase(unittest.TestCase):
                 "if ($args[0] -eq 'compose' -and $joined -match ' up ') { "
                 "$global:upCalls++; if ($env:J2M_IMAGE -eq ('j2m-interactive:' + $newSha)) { $global:LASTEXITCODE=1 } "
                 "else { $global:LASTEXITCODE=0 }; return }; $global:LASTEXITCODE=0 }; "
-                "function global:Invoke-WebRequest { $global:httpsCalls++; [pscustomobject]@{StatusCode=200} }; "
+                "function global:Invoke-WebRequest { $global:httpsCalls++; [pscustomobject]@{StatusCode=200; Headers=@{'X-J2M-Revision'=('5' * 40)}} }; "
                 f"try {{ & '{deploy}' -ApprovedSha $newSha -EnvFile '{env_file}' }} "
                 "catch { Write-Output ('DEPLOY_ERROR=' + $_.Exception.Message); "
-                "Write-Output ('UP_CALLS=' + $global:upCalls); Write-Output ('HTTPS_CALLS=' + $global:httpsCalls); exit 7 }"
+                "Write-Output ('UP_CALLS=' + $global:upCalls); Write-Output ('HTTPS_CALLS=' + $global:httpsCalls); "
+                "Write-Output ('PROXY_CALLS=' + $global:proxyCalls); exit 7 }"
             )
             result = subprocess.run(
                 ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
@@ -283,6 +291,7 @@ class SelfHostInfrastructureTestCase(unittest.TestCase):
             self.assertIn("la imagen y el pin anteriores fueron restaurados", result.stdout)
             self.assertIn("UP_CALLS=2", result.stdout)
             self.assertIn("HTTPS_CALLS=2", result.stdout)
+            self.assertIn("PROXY_CALLS=1", result.stdout)
             contents = env_file.read_text(encoding="utf-8")
             self.assertEqual(contents.count("J2M_IMAGE="), 1)
             self.assertIn(f"J2M_IMAGE=j2m-interactive:{previous}", contents)
@@ -322,15 +331,16 @@ class SelfHostInfrastructureTestCase(unittest.TestCase):
             deploy = ROOT / "scripts" / "selfhost_deploy_approved.ps1"
             command = (
                 f"& '{protect}' -Path '{env_file}'; $newSha='{requested}'; "
-                "$global:upCalls=0; $global:httpsCalls=0; "
+                "$global:upCalls=0; $global:httpsCalls=0; $global:proxyCalls=0; "
+                "function global:python { $global:proxyCalls++; $global:LASTEXITCODE=0 }; "
                 "function global:git { if ($args[0] -eq 'rev-parse') { Write-Output $newSha }; $global:LASTEXITCODE=0 }; "
                 "function global:docker { $joined=$args -join ' '; if ($args[0] -eq 'ps') { $global:LASTEXITCODE=0; return }; "
                 "if ($args[0] -eq 'compose' -and $joined -match ' up ') { $global:upCalls++ }; $global:LASTEXITCODE=0 }; "
                 "function global:Invoke-WebRequest { $global:httpsCalls++; if ($global:httpsCalls -eq 1) { throw 'synthetic HTTPS failure' }; "
-                "[pscustomobject]@{StatusCode=200} }; "
+                "[pscustomobject]@{StatusCode=200; Headers=@{'X-J2M-Revision'=('7' * 40)}} }; "
                 f"try {{ & '{deploy}' -ApprovedSha $newSha -EnvFile '{env_file}' }} catch {{ "
                 "Write-Output ('DEPLOY_ERROR=' + $_.Exception.Message); Write-Output ('UP_CALLS=' + $global:upCalls); "
-                "Write-Output ('HTTPS_CALLS=' + $global:httpsCalls); exit 7 }"
+                "Write-Output ('HTTPS_CALLS=' + $global:httpsCalls); Write-Output ('PROXY_CALLS=' + $global:proxyCalls); exit 7 }"
             )
             result = subprocess.run(
                 ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
@@ -340,6 +350,7 @@ class SelfHostInfrastructureTestCase(unittest.TestCase):
             self.assertIn("la imagen y el pin anteriores fueron restaurados", result.stdout)
             self.assertIn("UP_CALLS=2", result.stdout)
             self.assertIn("HTTPS_CALLS=3", result.stdout)
+            self.assertIn("PROXY_CALLS=2", result.stdout)
             self.assertIn(f"J2M_IMAGE=j2m-interactive:{previous}", env_file.read_text(encoding="utf-8"))
 
     @unittest.skipUnless(os.name == "nt", "PowerShell deploy integration only runs on Windows")
@@ -352,11 +363,13 @@ class SelfHostInfrastructureTestCase(unittest.TestCase):
             protect = ROOT / "scripts" / "protect_selfhost_secrets.ps1"
             deploy = ROOT / "scripts" / "selfhost_deploy_approved.ps1"
             command = (
-                f"& '{protect}' -Path '{env_file}'; $newSha='{requested}'; $global:httpsCalls=0; "
+                f"& '{protect}' -Path '{env_file}'; $newSha='{requested}'; $global:httpsCalls=0; $global:proxyCalls=0; "
+                "function global:python { $global:proxyCalls++; $global:LASTEXITCODE=0 }; "
                 "function global:git { if ($args[0] -eq 'rev-parse') { Write-Output $newSha }; $global:LASTEXITCODE=0 }; "
                 "function global:docker { if ($args[0] -eq 'ps') { $global:LASTEXITCODE=0; return }; $global:LASTEXITCODE=0 }; "
-                "function global:Invoke-WebRequest { $global:httpsCalls++; [pscustomobject]@{StatusCode=200} }; "
-                f"& '{deploy}' -ApprovedSha $newSha -EnvFile '{env_file}'; Write-Output ('HTTPS_CALLS=' + $global:httpsCalls)"
+                "function global:Invoke-WebRequest { $global:httpsCalls++; [pscustomobject]@{StatusCode=200; Headers=@{'X-J2M-Revision'=('a' * 40)}} }; "
+                f"& '{deploy}' -ApprovedSha $newSha -EnvFile '{env_file}'; Write-Output ('HTTPS_CALLS=' + $global:httpsCalls); "
+                "Write-Output ('PROXY_CALLS=' + $global:proxyCalls)"
             )
             result = subprocess.run(
                 ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
@@ -364,6 +377,7 @@ class SelfHostInfrastructureTestCase(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("HTTPS_CALLS=2", result.stdout)
+            self.assertIn("PROXY_CALLS=1", result.stdout)
             self.assertIn(f"J2M_IMAGE=j2m-interactive:{requested}", env_file.read_text(encoding="utf-8"))
 
     def test_ci_validates_compose_without_private_values(self):
