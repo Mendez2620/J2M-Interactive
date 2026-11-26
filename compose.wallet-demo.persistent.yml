@@ -1,0 +1,9 @@
+# Compose v2.24.4+ override for the retained Demo database. Wallet remains disabled.
+services:
+  db:
+    tmpfs: !reset []
+    volumes:
+      - postgres:/var/lib/postgresql/data
+
+volumes:
+  postgres:

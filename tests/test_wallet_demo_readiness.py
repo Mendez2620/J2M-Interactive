@@ -33,5 +33,5 @@ class WalletDemoReadinessTests(unittest.TestCase):
     def test_structural_success_cannot_authorize_real_demo(self, read, runtime, candidate):
         config = dict(J2M_DEMO_CREDENTIALS_FILE="synthetic.json", J2M_DEMO_ISSUER="123",
                       J2M_OPERATIONAL_ISSUER="456", J2M_DEMO_HTTPS_ORIGIN="https://demo.example")
-        with patch.dict(demo.os.environ, config), patch("builtins.print"):
+        with patch.dict(demo.os.environ, config), patch("builtins.print"), patch("sys.argv", ["preflight"]):
             self.assertEqual(demo.main(), 2)

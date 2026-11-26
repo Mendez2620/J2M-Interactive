@@ -1,4 +1,5 @@
 """Offline technical preflight for the disabled Wallet Demo environment."""
+import argparse
 import json
 import os
 import re
@@ -38,7 +39,7 @@ def valid_candidate(issuer, operational_issuer, origin, credentials):
     return True
 
 
-def runtime():
+def runtime(*, persistent=False):
     network, = json.loads(docker("network", "inspect", NETWORK))
     labels = network.get("Labels") or {}
     if not network.get("Internal") or labels.get("com.docker.compose.project") != PROJECT:
@@ -62,8 +63,15 @@ def runtime():
                 or not container["State"]["Running"] or set(container["NetworkSettings"]["Networks"]) != {NETWORK}):
             raise ValueError("Container mismatch")
         found[role] = container["Id"]
-        expected_mounts = {f"{PROJECT}_media"} if role == "app" else set()
-        if {m.get("Name") for m in container["Mounts"] if m["Type"] != "tmpfs"} != expected_mounts:
+        expected_mounts = {}
+        if role == "app":
+            expected_mounts[f"{PROJECT}_media"] = "/app/instance/media"
+        elif role == "db" and persistent:
+            expected_mounts[f"{PROJECT}_postgres"] = "/var/lib/postgresql/data"
+        mounts = [m for m in container["Mounts"] if m["Type"] != "tmpfs"]
+        if (len(mounts) != len(expected_mounts)
+                or any(m["Type"] != "volume" or expected_mounts.get(m.get("Name")) != m["Destination"]
+                       for m in mounts)):
             raise ValueError("Unexpected mounts")
         if role != "app" and ports:
             raise ValueError("Unexpected port")
@@ -86,8 +94,11 @@ def runtime():
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--persistent", action="store_true", help="Require the dedicated PostgreSQL volume.")
+    args = parser.parse_args()
     try:
-        runtime()
+        runtime(persistent=args.persistent)
         print("Synthetic runtime and schema verified.")
         # The file is inspected locally and its contents are never passed to Docker.
         credentials = json.loads(Path(os.environ["J2M_DEMO_CREDENTIALS_FILE"]).read_text(encoding="utf-8"))

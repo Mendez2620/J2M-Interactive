@@ -106,3 +106,70 @@ inesperada, saldo incoherente o escritura incierta.
 | Referidos | Consentir, consumir y dejar vencer una capacidad de prueba | Enlace público solo con consentimiento; capacidad temporal según estado | Validar apertura de los enlaces y retiro de capacidades no válidas. |
 | Revocación y programa | Revocar; deshabilitar y reactivar | Revocación local inmediata; retirada visual eventual; sin reactivar revocados | Verificar ambos puntos de acceso en Wallet. Detener si se repone un enlace revocado. |
 | Interrupción | Simular interrupción antes del envío o pérdida de confirmación | Solo se recuperan trabajos autorizados; una reserva incierta no se libera | Confirmar que no aparecen escrituras posteriores incompatibles. |
+
+## Preparación de la primera ventana real
+
+Use los dos archivos Compose con proyecto explícito `j2m-wallet-demo`:
+
+```sh
+docker compose -p j2m-wallet-demo -f compose.wallet-demo.yml -f compose.wallet-demo.persistent.yml config --quiet
+docker compose -p j2m-wallet-demo -f compose.wallet-demo.yml -f compose.wallet-demo.persistent.yml up -d --wait
+python -m scripts.check_wallet_demo_readiness --persistent
+```
+
+El volumen dedicado `j2m-wallet-demo_postgres` conserva las secuencias, los
+jobs y las reservas. Archive una copia cifrada del PostgreSQL ficticio y
+registre de forma controlada la relación entre emisor, clase y objeto. Detenga
+con `stop app worker` o `down` usando los mismos archivos y proyecto.
+Si se pierde el volumen, bloquee la emisión para ese emisor hasta recuperar
+la base correspondiente o disponer de otro emisor dedicado y autorizado.
+No reinicialice secuencias ni recicle IDs. El perfil conserva ambos Wallet
+deshabilitados y la red interna. Modificar un modo manualmente invalida
+el preflight. La salida futura a Google requiere una autorización separada.
+
+### Evidencias que debe confirmar el propietario
+
+1. En Google Pay & Wallet Console, compruebe si su cuenta puede administrar
+   un segundo emisor. Si hace falta crear uno o aceptar términos, decídalo
+   personalmente. Conserve evidencia del emisor dedicado y de Demo Mode.
+2. En el proyecto Google Cloud de pruebas, habilite Google Wallet API y use
+   una cuenta de servicio dedicada. En Wallet Console, conceda Developer
+   exclusivamente en el emisor de pruebas y revise que la misma cuenta no
+   figure con acceso al emisor operativo. Conserve el JSON en un archivo
+   privado fuera del repositorio y no lo transfiera por chat.
+3. Añada la cuenta Google del dispositivo a Test accounts. No solicite
+   acceso comercial. Separe la confirmación de estos requisitos de la
+   autorización posterior para ejecutar llamadas reales.
+
+Documentación oficial: [Emisor](https://developers.google.com/wallet/retail/loyalty-cards/getting-started/issuer-onboarding),
+[autenticación REST](https://developers.google.com/wallet/retail/loyalty-cards/getting-started/auth/rest) y
+[Demo Mode](https://developers.google.com/wallet/retail/loyalty-cards/test-and-go-live/request-publishing-access).
+
+### Red y HTTPS
+
+Para el ensayo básico, el propietario puede aprobar un logo ficticio en un
+alojamiento HTTPS ya disponible y entregar el enlace de guardado al
+dispositivo por un canal privado. Esto no requiere publicar J2M ni PostgreSQL.
+Los flujos con enlaces de referidos y recuperación necesitan su propio origen
+HTTPS alcanzable desde el dispositivo. Una ventana real necesitaría salida
+controlada hacia `oauth2.googleapis.com` y `walletobjects.googleapis.com`,
+sin acceso a Supabase ni redes operativas. Ninguna salida se abre en este
+perfil.
+
+### Ensayo mínimo y criterios de parada
+
+| Paso | Evidencia esperada |
+| --- | --- |
+| Autorizar | Preflight, emisor y cuenta de pruebas verificados, ventana aprobada y artefactos cifrados preparados. |
+| Autenticar e inspeccionar | OAuth de la cuenta dedicada sin registrar token, identidades de clase y objeto previstas, sin colisión. |
+| Emitir y guardar | Negocio y cliente ficticios, ocho sellos y logo de prueba. Guardar en el dispositivo de prueba y ver 0/8. |
+| Comprar | Movimiento, ledger y outbox concordantes. Mismo objeto y QR, con 1/8 en el dispositivo. |
+| Reintentar y canjear | Repetir la clave de la compra sin otro movimiento. Completar las compras legítimas restantes y canjear. Comparar saldo, QR e ID. |
+| Cerrar | Detener escritores, conservar reservas, historial y base cifrada. Si una escritura queda incierta, no repetir emisión ni liberar la reserva. |
+
+Pare ante un recurso inesperado, una discrepancia contable o una respuesta
+incierta. Google documenta marcar el objeto como inactivo o vencido para
+moverlo a pases vencidos. Eso requiere una operación posterior autorizada.
+No presuponga que el objeto o la clase puedan eliminarse.
+[Referencia LoyaltyObject](https://developers.google.com/wallet/reference/rest/v1/loyaltyobject) y
+[pases vencidos](https://developers.google.com/wallet/retail/loyalty-cards/use-cases/expired-passes).
