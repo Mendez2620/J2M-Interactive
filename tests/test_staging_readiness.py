@@ -20,7 +20,7 @@ from app.services.google_wallet_sync_service import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_HEAD = "9d0e1f2a3b4c"
+EXPECTED_HEAD = "a1b2c3d4e5f6"
 
 
 class StagingReadinessTestCase(unittest.TestCase):
