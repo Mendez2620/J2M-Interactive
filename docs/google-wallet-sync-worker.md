@@ -1,12 +1,10 @@
 # Operación del worker de Google Wallet
 
-## Causa del backlog
+## Worker permanente
 
-Las transacciones guardan de forma atómica un trabajo en `google_wallet_sync_jobs`, pero el servicio web de Railway solo inicia Gunicorn. El comando anterior `process-google-wallet-sync` procesa un lote y termina; si ningún servicio o tarea programada lo invoca, los trabajos permanecen en `pending` con `attempts = 0`.
-
-Esta conclusión describe el flujo del repositorio. La configuración real de Railway debe comprobarse en su panel antes del despliegue.
-
-## Servicio independiente en Railway
+El stack local define el worker `google-wallet-worker` en `compose.selfhost.yml`.
+En modo real, el trabajo de outbox se confirma en la misma transacción que la compra o el canje.
+El fallo del proveedor no revierte esa operación contable.
 
 Crear un segundo servicio desde el mismo repositorio y la misma imagen Docker, separado del servicio web. Configurarlo con:
 
@@ -18,18 +16,28 @@ Crear un segundo servicio desde el mismo repositorio y la misma imagen Docker, s
 - `GOOGLE_WALLET_SYNC_ALERT_STALE_SECONDS=300`
 - Política de reinicio ante fallo. El worker no publica un puerto HTTP y no necesita un dominio.
 - `J2M_PROCESS_TYPE=google-wallet-worker`.
-- Sin `healthcheckPath` HTTP en el servicio Railway. El `railway.toml`
-  compartido omite la ruta para que ningún worker la herede; `/api/ready` se
-  configura solo en el servicio web. La imagen valida que PID 1 ejecute el
-  worker y la política `ON_FAILURE` cubre la terminación del proceso.
+- El worker usa la comprobación de proceso del contenedor. `/api/ready`
+  corresponde únicamente al servicio web.
 
-Una réplica es suficiente inicialmente. Varias réplicas son compatibles: cada actualización queda cercada por un advisory lock transaccional de PostgreSQL por cliente. Un trabajo abandonado en `processing` vuelve a ser elegible después de cinco minutos. Los fallos temporales usan reintentos con espera exponencial; los fallos permanentes quedan en `failed`. La llamada externa tiene timeout y nunca bloquea la transacción de puntos o sellos.
+Cada reclamación local usa un token aleatorio. El worker procesa exclusivamente
+las filas devueltas por el UPDATE condicional y acepta el resultado solo si
+el token todavía coincide. El advisory lock PostgreSQL es de sesión. La
+reserva persistente del objeto protege la escritura incluso si PostgreSQL
+pierde esa sesión. Recuperar un trabajo local abandonado después de cinco
+minutos no elimina una reserva remota incierta.
+
+La migración `c3d4e5f6a7b8` agrega el token de reclamación. Durante una actualización
+o restauración mantenga Google Wallet deshabilitado hasta verificar el estado
+del proveedor, las reservas recientes, la afinidad de sesión PostgreSQL y
+la ausencia de escritores con versiones anteriores. Un resultado local
+completado registra cobertura del movimiento, sin acreditar la instalación
+de la tarjeta o el momento en que un dispositivo recibe el cambio.
 
 ## Métricas y alertas
 
 Cada ciclo registra solo agregados: procesados, pendientes, procesando, reintentando, completados, fallidos, antigüedad del trabajo más antiguo y fechas de último intento/éxito. No se registran tokens QR, datos de clientes ni credenciales.
 
-Crear alertas sobre los eventos `google_wallet_worker_backlog` y `google_wallet_worker_cycle_failed`. Investigar además cualquier negocio que muestre `con error` o `reintentando` en Super Admin. Códigos 429, 5xx y errores de red son reintentables; 401/403 normalmente requieren corregir credenciales o permisos. Un objeto 404 se recupera mediante la creación segura ya implementada.
+Crear alertas sobre los eventos `google_wallet_worker_backlog` y `google_wallet_worker_cycle_failed`. El contador `uncertain_objects` muestra escrituras iniciadas o inciertas con reserva activa. El outbox aplica espera exponencial acotada. Un reintento local frente a 429, 5xx o pérdida de respuesta no permite reenviar una escritura mientras la reserva siga incierta. Los 401/403 normalmente requieren corregir credenciales o permisos. Un objeto 404 se recupera mediante la creación segura ya implementada.
 
 Antes de una llamada al proveedor, el worker verifica que cada trabajo reclamado, su transacción y su cliente correspondan al mismo negocio y cliente. Los vínculos inconsistentes se marcan como fallidos sin llamada remota atribuible a esos trabajos; los trabajos válidos del mismo lote conservan su procesamiento normal. El evento agregado `google_wallet_sync_invalid_linkage` permite investigar inconsistencias sin registrar identificadores ni datos privados. Esta comprobación no repara ni elimina movimientos y no sustituye la verificación contable de reconciliación.
 

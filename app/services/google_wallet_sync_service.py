@@ -4,11 +4,13 @@ import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 
-from sqlalchemy import case, func, or_, text
+from sqlalchemy import case, func, or_, text, update
 
 from app.extensions import db
 from app.models import Customer, GoogleWalletSyncJob, Transaction
+from app.models.google_wallet_write_reservation import table as reservation_table
 from app.services.google_wallet import GoogleWalletService
 
 
@@ -92,12 +94,18 @@ def _business_class_lock(business_id):
     return _resource_lock(_CLASS_ADVISORY_NAMESPACE, business_id)
 
 
-def _record_result(job_ids, result, now, *, claim=None):
+def _claim_sync_jobs(job_ids, now, token):
+    return list(db.session.scalars(update(GoogleWalletSyncJob).where(
+        GoogleWalletSyncJob.id.in_(job_ids), *_eligible(now),
+    ).values(status="processing", locked_at=now, claim_token=token)
+      .returning(GoogleWalletSyncJob.id).execution_options(synchronize_session=False)))
+
+
+def _record_result(job_ids, result, now, *, claim):
     status = result.get("status")
     query = GoogleWalletSyncJob.query.filter(GoogleWalletSyncJob.id.in_(job_ids))
-    if claim is not None:
-        query = query.filter_by(status="processing", locked_at=claim)
-    values = {"locked_at": None, "last_status_code": result.get("status_code")}
+    query = query.filter_by(status="processing", claim_token=claim)
+    values = {"locked_at": None, "claim_token": None, "last_status_code": result.get("status_code")}
     if status == "success":
         values.update(status="completed", last_status_code=None, next_attempt_at=None)
     elif status == "error":
@@ -140,7 +148,11 @@ def process_pending_google_wallet_jobs(limit=50, service=None):
                 if not jobs:
                     db.session.rollback()
                     continue
-                job_ids = [job.id for job in jobs]
+                claim = uuid4().hex
+                job_ids = _claim_sync_jobs([job.id for job in jobs], now, claim)
+                if not job_ids:
+                    db.session.rollback()
+                    continue
                 customer = db.session.get(Customer, customer_id)
                 # A legacy or inconsistent outbox row must never authorize a
                 # provider call for a customer from another business or movement.
@@ -159,18 +171,15 @@ def process_pending_google_wallet_jobs(limit=50, service=None):
                     ).all()]
                 valid_set = set(valid_ids)
                 invalid_ids = [job_id for job_id in job_ids if job_id not in valid_set]
+                db.session.commit()
                 if valid_ids:
-                    GoogleWalletSyncJob.query.filter(
-                        GoogleWalletSyncJob.id.in_(valid_ids), *_eligible(now),
-                    ).update({"status": "processing", "locked_at": now}, synchronize_session=False)
-                    db.session.commit()
                     try:
                         result = service.update_loyalty_object(customer)
                     except Exception:
                         result = {"status": "retry", "status_code": None}
-                    _record_result(valid_ids, result, now, claim=now)
+                    _record_result(valid_ids, result, _now(), claim=claim)
                 if invalid_ids:
-                    _record_result(invalid_ids, {"status": "error", "status_code": None}, now)
+                    _record_result(invalid_ids, {"status": "error", "status_code": None}, _now(), claim=claim)
                     logging.getLogger(__name__).warning(
                         "google_wallet_sync_invalid_linkage count=%s", len(invalid_ids)
                     )
@@ -215,8 +224,14 @@ def google_wallet_sync_metrics():
     retrying = db.session.query(func.count(GoogleWalletSyncJob.id)).filter(
         GoogleWalletSyncJob.status == "pending", GoogleWalletSyncJob.attempts > 0
     ).scalar() or 0
+    uncertain_objects = db.session.query(func.count()).select_from(reservation_table).filter(
+        reservation_table.c.kind == "loyaltyObject",
+        reservation_table.c.state.in_(("started", "uncertain")),
+        reservation_table.c.active_slot == 1,
+    ).scalar()
     return {
         "pending": pending, "processing": processing, "retrying": retrying,
+        "uncertain_objects": uncertain_objects,
         "completed": rows.get("completed", 0), "failed": rows.get("failed", 0),
         "oldest_pending_seconds": int((now - oldest_pending).total_seconds()) if oldest_pending else None,
         "last_attempt_at": last_attempt.isoformat() if last_attempt else None,

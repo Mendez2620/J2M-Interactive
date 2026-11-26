@@ -498,6 +498,40 @@ class ReconciliationPreviewSQLiteTests(ReconciliationPreviewCases, unittest.Test
 
 @unittest.skipUnless(os.getenv("TEST_POSTGRES_URL"), "synthetic PostgreSQL CI not configured")
 class ReconciliationPreviewPostgresTests(ReconciliationPreviewCases, unittest.TestCase):
+    def test_normal_worker_claims_only_returned_rows_and_fences_stale_owner(self):
+        from datetime import timedelta
+        from threading import Barrier
+        from app.services.google_wallet_sync_service import _claim_sync_jobs, _now, _record_result
+
+        customer = self.customer()
+        job = self.job(customer, self.movement(customer), "pending")
+        barrier = Barrier(2, timeout=10)
+        timestamp = _now()
+
+        def claim(token):
+            with self.app.app_context():
+                barrier.wait()
+                acquired = _claim_sync_jobs([job], timestamp, token)
+                db.session.commit()
+                return token, acquired
+
+        tokens = ["a" * 32, "b" * 32]
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            outcomes = list(executor.map(claim, tokens))
+        self.assertEqual(sorted(len(ids) for _, ids in outcomes), [0, 1])
+        first = next(token for token, ids in outcomes if ids)
+        successor = "c" * 32
+        later = timestamp + timedelta(minutes=6)
+        self.assertEqual(_claim_sync_jobs([job], later, successor), [job])
+        db.session.commit()
+        _record_result([job], {"status": "success"}, later, claim=first)
+        db.session.commit()
+        row = db.session.get(GoogleWalletSyncJob, job)
+        self.assertEqual((row.status, row.claim_token), ("processing", successor))
+        _record_result([job], {"status": "success"}, later, claim=successor)
+        db.session.commit()
+        self.assertEqual((row.status, row.claim_token), ("completed", None))
+
     def test_delayed_reconciliation_cannot_overtake_new_purchase_after_lock_loss(self):
         from app.services.google_wallet import GoogleWalletService
         from app.services.google_wallet_sync_service import process_pending_google_wallet_jobs
