@@ -9,14 +9,24 @@ y el acceso de publicación comercial son decisiones independientes.
 
 ## Entorno aislado
 
-1. Reserve un proyecto Compose independiente, por ejemplo `j2m-wallet-demo`.
-   Para el ensayo sintético use `compose.selfhost.yml`,
-   `compose.selfhost.test.yml` y `.env.selfhost.test.example`. Valide con
-   `docker compose config --quiet` y el nombre explícito de proyecto.
-2. Verifique que red, volúmenes de base y medios pertenezcan al proyecto nuevo.
-   Use exclusivamente PostgreSQL sintético y datos ficticios. La revisión
-   esperada es `c3d4e5f6a7b8`. Mantenga las conexiones al entorno operativo
-   fuera del alcance y no reutilice archivos privados del stack operativo.
+1. Use el proyecto independiente de `compose.wallet-demo.yml`. Construya la
+
+   imagen revisada con la etiqueta `j2m-interactive:wallet-demo-synthetic` y
+
+   ejecute `docker compose -f compose.wallet-demo.yml config --quiet` antes
+
+   de `up -d --wait`. La plantilla sintética fija la base, los modos Wallet,
+
+   la red interna y la publicación en loopback. No combine este archivo con
+
+   Compose operativo ni suministre un archivo de secretos.
+
+2. El migrador aislado debe terminar antes del arranque web. Verifique la
+
+   revisión `c3d4e5f6a7b8` y la respuesta de `/api/ready` desde el contenedor.
+
+   Use `docker compose -f compose.wallet-demo.yml down` al terminar.
+
 3. Antes de una futura prueba real, verifique con el propietario el emisor
    dedicado, sus credenciales dedicadas y sus cuentas Google autorizadas.
    No use el emisor operativo: los IDs incorporan el emisor y los IDs
@@ -42,12 +52,14 @@ El worker usa advisory locks de sesión, reservas persistentes y tokens de
 reclamación. No desbloquee una reserva incierta por antigüedad. Antes de
 un cambio autorizado, compruebe pin, ID inmutable de imagen, propiedad de
 contenedor y red, y respuesta de Nginx con `X-J2M-Revision` de la versión
-aprobada. Si el rollback depende de la excepción legada sin cabecera, la
-recarga y los HTTP 200 no prueban identidad de extremo a extremo. Bloquee el
-cambio hasta demostrar el rollback con evidencia suficiente en un entorno
-aislado. No pruebe rollback restaurando una base antigua sobre producción.
+aprobada. El despliegue exige esa evidencia antes de construir, cambiar el
+pin o recrear servicios. La revisión legada queda bloqueada porque no emite
+la cabecera. Su compatibilidad con el esquema actualizado sigue pendiente. No pruebe rollback restaurando una base antigua sobre producción.
 Mantenga un solo worker activo, preserve reservas e historial y verifique
 compatibilidad de esquema antes de recuperar una versión anterior.
+
+El diagnóstico de esquema ejecutable es `python -m scripts.check_wallet_referral_schema`.
+Usa TLS con verificación de host y una transacción de solo lectura.
 
 ## Tarjetas e invitaciones históricas
 

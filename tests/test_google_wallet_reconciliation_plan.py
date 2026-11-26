@@ -518,8 +518,38 @@ class ReconciliationPreviewPostgresTests(ReconciliationPreviewCases, unittest.Te
         )
         job = GoogleWalletReferralJob.query.filter_by(customer_id=None).one()
         job_id = job.id
-        self.assertEqual(process_wallet_referral_jobs(limit=1), 1)
+        reading_page, release_page = Event(), Event()
+        engine = db.engine
+        db.session.remove()
+
+        def pause_claimed_worker(_conn, _cursor, statement, _params, _context, _executemany):
+            if "FROM referral_participants" in statement and "ORDER BY" in statement:
+                reading_page.set()
+                if not release_page.wait(10):
+                    raise TimeoutError("Synthetic expansion was not released")
+
+        def expand():
+            with self.app.app_context():
+                return process_wallet_referral_jobs(limit=1)
+
+        event.listen(engine, "before_cursor_execute", pause_claimed_worker)
+        try:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                winner = pool.submit(expand)
+                try:
+                    self.assertTrue(reading_page.wait(10))
+                    self.assertEqual(pool.submit(expand).result(timeout=10), 0)
+                finally:
+                    release_page.set()
+                self.assertEqual(winner.result(timeout=10), 1)
+        finally:
+            event.remove(engine, "before_cursor_execute", pause_claimed_worker)
         self.assertEqual(db.session.get(GoogleWalletReferralJob, job_id).cursor, expected[24])
+        # Create a participant beyond the persisted cursor before the next page.
+        added = self.customer()
+        expected.append(added)
+        ensure_customer_invitation(db.session.get(Customer, added))
+        db.session.commit()
         db.session.remove()
         self.assertEqual(process_wallet_referral_jobs(limit=1), 1)
         self.assertEqual(db.session.get(GoogleWalletReferralJob, job_id).cursor, expected[49])

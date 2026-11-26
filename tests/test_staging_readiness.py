@@ -231,33 +231,12 @@ class StagingReadinessTestCase(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         with engine.connect() as connection:
             self.assertEqual(connection.execute(text("SELECT version_num FROM alembic_version")).scalar(), EXPECTED_HEAD)
-            table = db.metadata.tables["google_wallet_referral_jobs"]
-            inspector = inspect(connection)
-            def shape(kind, nullable):
-                return (kind._type_affinity, getattr(kind, "length", None),
-                        getattr(kind, "timezone", None), nullable)
+            from scripts.check_wallet_referral_schema import validate_schema
 
-            actual = {column["name"]: shape(column["type"], column["nullable"])
-                      for column in inspector.get_columns(table.name)}
-            expected = {column.name: shape(column.type, column.nullable)
-                        for column in table.columns}
-            self.assertEqual(actual, expected)
-            foreign_keys = {(tuple(key["constrained_columns"]), key["referred_table"],
-                             tuple(key["referred_columns"])) for key in inspector.get_foreign_keys(table.name)}
-            self.assertIn((("business_id", "customer_id"), "customers", ("business_id", "id")), foreign_keys)
-            self.assertIn((("business_id",), "businesses", ("id",)), foreign_keys)
-            self.assertIn(("status", "run_at", "id"),
-                          {tuple(index["column_names"]) for index in inspector.get_indexes(table.name)})
-            self.assertIn("ck_wallet_referral_status",
-                          {constraint["name"] for constraint in inspector.get_check_constraints(table.name)})
-            self.assertTrue(connection.scalar(text(
-                "SELECT relrowsecurity FROM pg_class WHERE oid = 'google_wallet_referral_jobs'::regclass"
-            )))
-            self.assertEqual(connection.scalar(text(
-                "SELECT count(*) FROM information_schema.table_privileges "
-                "WHERE table_schema=current_schema() AND table_name='google_wallet_referral_jobs' "
-                "AND grantee IN ('PUBLIC','anon','authenticated')"
-            )), 0)
+            self.assertEqual(validate_schema(connection), [])
+            connection.execute(text("ALTER TABLE public.google_wallet_referral_jobs DISABLE ROW LEVEL SECURITY"))
+            self.assertIn("row-level security", validate_schema(connection))
+            connection.rollback()
             self.assertEqual(
                 connection.execute(text("SELECT username, email FROM staff WHERE id = 1")).one(),
                 ("existente", "Mixto@Example.Test"),
