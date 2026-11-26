@@ -7,6 +7,7 @@ from unittest.mock import patch
 from sqlalchemy import text
 
 from app import create_app
+from tests.admin_session_fixture import issue_for
 from app.extensions import db
 from app.models import (
     Business, Customer, PlatformAdmin, Promoter, ReferralAttribution,
@@ -47,7 +48,9 @@ class ReferralsPhase8C3ATestCase(unittest.TestCase):
         )[0]
 
     def test_integrated_tab_order_and_no_external_promoter_creation_form(self):
-        with self.client.session_transaction() as browser: browser["platform_admin_id"] = self.admin.id
+        with self.client.session_transaction() as browser:
+            browser["platform_admin_id"] = self.admin.id
+            browser["platform_admin_session"] = issue_for(browser["platform_admin_id"])
         page = self.client.get(f"/admin/business/{self.business.id}?tab=referrals")
         html = page.get_data(as_text=True)
         self.assertEqual(page.status_code, 200)
@@ -141,7 +144,9 @@ class ReferralsPhase8C3ATestCase(unittest.TestCase):
             db.session.add(attribution); db.session.flush()
             db.session.add(ReferralEligibility(business_id=self.business.id, attribution_id=attribution.id, participant_id=participant.id, customer_id=customer.id, status="pending"))
         db.session.commit()
-        with self.client.session_transaction() as browser: browser["platform_admin_id"] = self.admin.id
+        with self.client.session_transaction() as browser:
+            browser["platform_admin_id"] = self.admin.id
+            browser["platform_admin_session"] = issue_for(browser["platform_admin_id"])
         page = self.client.get(f"/admin/business/{self.business.id}?tab=referrals&referral_page=2")
         html = page.get_data(as_text=True)
         self.assertEqual(page.status_code, 200); self.assertIn("Página 2 de 2", html)

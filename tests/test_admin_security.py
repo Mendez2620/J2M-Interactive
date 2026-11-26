@@ -9,6 +9,7 @@ from html.parser import HTMLParser
 from unittest.mock import patch
 
 from app import create_app
+from tests.admin_session_fixture import issue_for
 from app.extensions import db
 from app.models import Business, PlatformAdmin, Staff
 
@@ -51,6 +52,7 @@ class AdminSecurityTestCase(unittest.TestCase):
     def login(self):
         with self.client.session_transaction() as session:
             session["platform_admin_id"] = self.admin_id
+            session["platform_admin_session"] = issue_for(session["platform_admin_id"])
 
     def test_anonymous_admin_access_is_rejected(self):
         response = self.client.get("/admin/dashboard", headers={"Accept": "application/json"})

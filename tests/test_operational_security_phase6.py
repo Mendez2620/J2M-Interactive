@@ -12,6 +12,7 @@ from sqlalchemy.exc import OperationalError
 from flask import render_template
 
 from app import create_app
+from tests.admin_session_fixture import issue_for
 from app.config import ProductionConfig, TestingConfig
 from app.extensions import db
 from app.models import AuthRateLimitSlot, Business, PlatformAdmin, Staff
@@ -138,6 +139,7 @@ class OperationalSecurityPhase6TestCase(unittest.TestCase):
         client = self.app.test_client()
         with client.session_transaction() as browser_session:
             browser_session["platform_admin_id"] = PlatformAdmin.query.filter_by(email="admin@example.test").one().id
+            browser_session["platform_admin_session"] = issue_for(browser_session["platform_admin_id"])
         dashboard = client.get("/admin").get_data(as_text=True)
         detail = client.get("/admin/business/1").get_data(as_text=True)
         with self.app.test_request_context("/scanner"):

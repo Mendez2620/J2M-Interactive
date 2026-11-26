@@ -7,6 +7,10 @@ from flask import jsonify, redirect, request, session, url_for
 
 from app.extensions import db
 from app.models.platform_admin import PlatformAdmin
+from app.models.platform_admin_session import PlatformAdminSession
+from app.services.platform_admin_session import digest, now
+from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 
 
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
@@ -14,10 +18,24 @@ EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 def current_platform_admin():
     admin_id = session.get("platform_admin_id")
-    if not admin_id:
+    token = session.get("platform_admin_session")
+    if type(admin_id) is not int or not isinstance(token, str) or len(token) != 43:
         return None
-    admin = db.session.get(PlatformAdmin, admin_id)
-    return admin if admin and admin.is_active else None
+    try:
+        row = db.session.execute(
+            select(PlatformAdmin, PlatformAdminSession.password_digest)
+            .join(PlatformAdminSession, PlatformAdminSession.admin_id == PlatformAdmin.id)
+            .where(PlatformAdmin.id == admin_id, PlatformAdmin.is_active.is_(True),
+                   PlatformAdminSession.token_digest == digest(token),
+                   PlatformAdminSession.revoked_at.is_(None), PlatformAdminSession.expires_at > now())
+            .execution_options(populate_existing=True)
+        ).one_or_none()
+    except SQLAlchemyError:
+        db.session.rollback()
+        return None
+    if row and hmac.compare_digest(digest(row[0].password_hash), row[1]):
+        return row[0]
+    return None
 
 
 def wants_json():

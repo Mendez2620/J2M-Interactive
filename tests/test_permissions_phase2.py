@@ -1,6 +1,7 @@
 import unittest
 
 from app import create_app
+from tests.admin_session_fixture import issue_for
 from app.extensions import db
 from app.models import AccessAudit, Business, Customer, PlatformAdmin, Staff
 
@@ -40,6 +41,7 @@ class PermissionsPhase2TestCase(unittest.TestCase):
     def admin_login(self, csrf=False):
         with self.client.session_transaction() as session:
             session["platform_admin_id"] = self.admin.id
+            session["platform_admin_session"] = issue_for(session["platform_admin_id"])
             if csrf:
                 session["csrf_token"] = "phase2-csrf"
 

@@ -109,6 +109,16 @@ class WriteOperation:
 
 
 _operations = ContextVar("wallet_write_operations", default=None)
+_write_authorizer = ContextVar("wallet_write_authorizer", default=None)
+
+
+@contextmanager
+def authorize_wallet_writes(callback):
+    token = _write_authorizer.set(callback)
+    try:
+        yield
+    finally:
+        _write_authorizer.reset(token)
 
 
 @contextmanager
@@ -139,5 +149,8 @@ def authorized_write(engine, resource):
     operation = (_operations.get() or {}).get((engine, resource))
     if operation is None or operation.state not in {"reserved", "confirmed"}:
         raise WalletWriteBlocked("Wallet write requires a matching reservation")
+    authorize = _write_authorizer.get()
+    if authorize is not None and not authorize():
+        raise WalletWriteBlocked("Administrative Wallet write authorization expired")
     operation.move("started")
     return operation

@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 import jwt
 
 from app import create_app
+from tests.admin_session_fixture import issue_for
 from app.extensions import db
 from app.models import Business, Customer, PlatformAdmin, Staff, Transaction
 from app.wallet_access import issue_wallet_token
@@ -46,6 +47,7 @@ class SecurityPhase1TestCase(unittest.TestCase):
         db.session.commit()
         with self.client.session_transaction() as session:
             session["platform_admin_id"] = admin.id
+            session["platform_admin_session"] = issue_for(session["platform_admin_id"])
 
     def tearDown(self):
         db.session.remove()

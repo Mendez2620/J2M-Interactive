@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 import openpyxl
 
 from app import create_app
+from tests.admin_session_fixture import issue_for
 from app.extensions import db
 from app.models import AccessAudit, Business, Customer, PlatformAdmin, Staff, StaffSession, Transaction
 from app.staff_auth import revoke_staff_sessions
@@ -192,7 +193,9 @@ class ManagerPortalPhase3TestCase(unittest.TestCase):
         self.assertNotIn("othercash", html)
 
     def test_super_admin_session_does_not_authorize_portal_and_jwt_api_still_works(self):
-        with self.client.session_transaction() as browser: browser["platform_admin_id"] = self.admin_id
+        with self.client.session_transaction() as browser:
+            browser["platform_admin_id"] = self.admin_id
+            browser["platform_admin_session"] = issue_for(browser["platform_admin_id"])
         self.assertIn("/manager/login", self.client.get("/manager/portal").headers["Location"])
         jwt_login = self.client.post("/api/scanner/login", json={"username": self.manager.username, "password": "ManagerPassword123", "business_slug": self.business.slug, "channel": "web"})
         self.assertEqual(jwt_login.status_code, 200)

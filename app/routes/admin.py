@@ -1,5 +1,5 @@
 from datetime import date, datetime
-from flask import Blueprint, jsonify, render_template, request, send_file, redirect, current_app
+from flask import Blueprint, abort, jsonify, make_response, render_template, request, send_file, redirect, current_app, session, url_for
 from io import BytesIO
 import math
 import re
@@ -7,8 +7,8 @@ import unicodedata
 import warnings
 from urllib.parse import urlparse
 from PIL import Image, UnidentifiedImageError
-from sqlalchemy import func, or_
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import joinedload
 from app.extensions import db
 from app.media_storage import MediaStorageError, get_media_storage, is_managed_media_key
@@ -780,6 +780,268 @@ def update_business(business_id: int):
         }), 200
 
     return redirect(f"/admin/business/{business.id}")
+
+
+@admin_bp.get("/business/<int:business_id>/wallet/reconciliation")
+@platform_admin_required
+def business_wallet_reconciliation(business_id):
+    import json
+    from app.models.platform_admin_session import AdminWalletReview, PlatformAdminSession
+    from app.services.admin_wallet_review import enabled
+    from collections import defaultdict
+    from uuid import UUID
+    from app.models import AccessAudit, PlatformAdmin
+    from app.services.google_wallet_reconciliation_audit import google_wallet_reconciliation_audit
+    from app.services.google_wallet_reconciliation_plan import preview_google_wallet_reconciliation
+    from app.models.google_wallet_write_reservation import table
+
+    business = db.session.get(Business, business_id)
+    if business is None:
+        abort(404)
+    cursor = request.args.get("after", "0")
+    if not cursor.isascii() or not cursor.isdecimal() or len(cursor) > 10 or int(cursor) > 2147483647:
+        abort(400)
+    reservation_page = request.args.get("reservations", "1")
+    if (not reservation_page.isascii() or not reservation_page.isdecimal()
+            or len(reservation_page) > 4 or not 1 <= int(reservation_page) <= 1000):
+        abort(400)
+    reservation_page = int(reservation_page)
+    review_page = request.args.get("reviews", "1")
+    if not review_page.isascii() or not review_page.isdecimal() or len(review_page) > 4 or not 1 <= int(review_page) <= 1000:
+        abort(400)
+    review_page = int(review_page)
+
+    audit = preview = None
+    counts = {}
+    history = []
+    review_statuses = []
+    active_reservations = []
+    status = 200
+    try:
+        audit = google_wallet_reconciliation_audit(business_id)
+        review_rows = db.session.execute(select(
+            AdminWalletReview.state, AdminWalletReview.created_at, AdminWalletReview.result,
+            AdminWalletReview.candidate_ids, PlatformAdmin.name.label("admin"),
+        ).outerjoin(PlatformAdminSession, PlatformAdminSession.token_digest == AdminWalletReview.session_digest)
+          .outerjoin(PlatformAdmin, PlatformAdmin.id == PlatformAdminSession.admin_id)
+          .where(AdminWalletReview.business_id == business_id)
+          .order_by(AdminWalletReview.created_at.desc(), AdminWalletReview.id.desc())
+          .offset((review_page - 1) * 20).limit(21)).all()
+        for row in review_rows:
+            requested = len(row.candidate_ids) if isinstance(row.candidate_ids, list) else None
+            result = row.result if isinstance(row.result, dict) else {}
+            counts_result = result.get("counts")
+            processed, remaining = result.get("processed"), result.get("remaining")
+            verified = (
+                row.state == "finished" and result.get("status") == "finished"
+                and requested is not None and 1 <= requested <= 25 and result.get("requested") == requested
+                and type(processed) is int and type(remaining) is int
+                and processed >= 0 and remaining >= 0 and processed + remaining == requested
+                and isinstance(counts_result, dict)
+                and set(counts_result) <= {"success", "skipped", "error", "retry", "disabled"}
+                and all(type(n) is int and 0 <= n <= requested for n in counts_result.values())
+                and sum(counts_result.values()) == processed
+            )
+            reason = result.get("stop_reason")
+            review_statuses.append({
+                "state": row.state if row.state != "finished" or verified else "inconclusive",
+                "created_at": row.created_at, "admin": row.admin or "Administrador no disponible",
+                "requested": requested, "verified": verified, "processed": processed,
+                "remaining": remaining, "confirmed": counts_result.get("success", 0) if verified else None,
+                "skipped": counts_result.get("skipped", 0) if verified else None,
+                "errors": sum(counts_result.get(key, 0) for key in ("error", "retry", "disabled")) if verified else None,
+                "stop": ("Autorización vencida o revocada" if reason == "authorization_expired"
+                         else "El procesamiento se detuvo antes de completar el lote" if reason else None),
+            })
+        preview = preview_google_wallet_reconciliation(business_id, limit=25, after_customer_id=int(cursor))
+        counts = dict(db.session.execute(
+            select(table.c.state, func.count()).where(
+                table.c.business_id == business_id, table.c.active_slot == 1,
+            ).group_by(table.c.state)
+        ).all())
+        active_reservations = db.session.execute(
+            select(table.c.kind, table.c.state, table.c.created_at).where(
+                table.c.business_id == business_id, table.c.active_slot == 1,
+            ).order_by(table.c.created_at.desc(), table.c.operation_id.desc())
+             .offset((reservation_page - 1) * 20).limit(21)
+        ).all()
+        starts = db.session.execute(
+            select(AccessAudit.previous_state, AccessAudit.new_state, AccessAudit.created_at,
+                   AccessAudit.platform_admin_id, PlatformAdmin.name)
+            .outerjoin(PlatformAdmin, PlatformAdmin.id == AccessAudit.platform_admin_id)
+            .where(AccessAudit.business_id == business_id,
+                   AccessAudit.action == "wallet_reconciliation_started")
+            .order_by(AccessAudit.id.desc()).limit(20)
+        ).all()
+        finishes = db.session.execute(
+            select(AccessAudit.previous_state, AccessAudit.platform_admin_id, AccessAudit.new_state,
+                   AccessAudit.created_at)
+            .where(AccessAudit.business_id == business_id,
+                   AccessAudit.action == "wallet_reconciliation_finished",
+                   AccessAudit.previous_state.in_([row.previous_state for row in starts]))
+            .order_by(AccessAudit.id.desc()).limit(40)
+        ).all()
+
+        def safe_report(value):
+            try:
+                result = json.loads(value or "{}")
+                return result if isinstance(result, dict) else {}
+            except (TypeError, ValueError):
+                return {}
+
+        def safe_count(value):
+            return value if type(value) is int and 0 <= value <= 25 else None
+
+        reports = defaultdict(list)
+        for finish in finishes:
+            reports[(finish.previous_state, finish.platform_admin_id)].append(finish)
+        audit_counts = {
+            (key, action): count for key, action, count in db.session.execute(
+                select(AccessAudit.previous_state, AccessAudit.action, func.count())
+                .where(AccessAudit.business_id == business_id,
+                       AccessAudit.previous_state.in_([row.previous_state for row in starts]),
+                       AccessAudit.action.in_(("wallet_reconciliation_started", "wallet_reconciliation_finished")))
+                .group_by(AccessAudit.previous_state, AccessAudit.action)
+            )
+        }
+        for row in starts:
+            key = (row.previous_state, row.platform_admin_id)
+            matches = reports[key]
+            result = safe_report(matches[0].new_state) if len(matches) == 1 else {}
+            totals = result.get("counts")
+            totals = totals if isinstance(totals, dict) else {}
+            requested = safe_count(safe_report(row.new_state).get("requested"))
+            processed, remaining = safe_count(result.get("processed")), safe_count(result.get("remaining"))
+            try:
+                request_id = safe_report(row.previous_state).get("request_id")
+                valid_id = isinstance(request_id, str) and str(UUID(request_id)) == request_id
+            except ValueError:
+                valid_id = False
+            if valid_id and db.session.scalar(select(AdminWalletReview.id).where(
+                AdminWalletReview.id == UUID(request_id).hex,
+                AdminWalletReview.business_id == business_id,
+            )) is not None:
+                continue
+            finished = (
+                valid_id and len(matches) == 1
+                and audit_counts.get((row.previous_state, "wallet_reconciliation_started")) == 1
+                and audit_counts.get((row.previous_state, "wallet_reconciliation_finished")) == 1
+                and matches[0].created_at >= row.created_at and result.get("status") == "finished"
+                and requested is not None and requested > 0 and requested == result.get("requested")
+                and processed is not None and remaining is not None and processed + remaining == requested
+                and set(totals) <= {"success", "skipped", "error", "retry", "disabled"}
+                and all(safe_count(value) is not None for value in totals.values())
+                and sum(totals.values()) == processed
+            )
+            history.append({
+                "date": row.created_at, "admin": row.name or "Administrador no disponible",
+                "requested": safe_count(safe_report(row.new_state).get("requested")),
+                "processed": safe_count(result.get("processed")),
+                "remaining": safe_count(result.get("remaining")),
+                "confirmed": safe_count(totals.get("success", 0)),
+                "skipped": safe_count(totals.get("skipped", 0)),
+                "errors": sum(safe_count(totals.get(key)) or 0 for key in ("error", "retry", "disabled")),
+                "finished": finished,
+            })
+    except SQLAlchemyError:
+        db.session.rollback()
+        status = 503
+    response = make_response(render_template(
+        "admin/wallet_reconciliation.html", business=business, audit=audit,
+        preview=preview, reservations=counts, history=history, available=status == 200, cursor=int(cursor),
+        active_reservations=active_reservations[:20], reservation_page=reservation_page,
+        more_reservations=len(active_reservations) > 20 and reservation_page < 1000,
+        review_statuses=review_statuses[:20], review_page=review_page,
+        more_reviews=len(review_statuses) > 20 and review_page < 1000,
+        execution_enabled=enabled() and business.is_active,
+    ), status)
+    response.headers["Cache-Control"] = "no-store, private"
+    return response
+
+
+@admin_bp.post("/business/<int:business_id>/wallet/reconciliation/reviews")
+@platform_admin_required
+def review_business_wallet_reconciliation(business_id):
+    from datetime import timedelta
+    from uuid import uuid4
+    from app.models.platform_admin_session import AdminWalletReview
+    from app.security import validate_csrf
+    from app.services.google_wallet_reconciliation_plan import preview_google_wallet_reconciliation
+    from app.services.platform_admin_session import digest, now
+    from app.services.admin_wallet_review import fingerprint
+
+    if not validate_csrf():
+        abort(400)
+    raw_ids = request.form.getlist("candidate")
+    raw_cursor = request.form.get("after", "0")
+    if not 1 <= len(raw_ids) <= 25 or any(
+        not item.isascii() or not item.isdecimal() or len(item) > 10 or int(item) > 2147483647
+        for item in [raw_cursor, *raw_ids]
+    ):
+        abort(400)
+    ids = {int(item) for item in raw_ids}
+    if 0 in ids or len(ids) != len(raw_ids):
+        abort(400)
+    if db.session.get(Business, business_id) is None:
+        abort(404)
+    preview = preview_google_wallet_reconciliation(business_id, limit=25, after_customer_id=int(raw_cursor))
+    selected = [item for item in preview.candidates if item.customer_id in ids]
+    if not preview.business_active or len(selected) != len(ids):
+        abort(409, "La selección ya no está disponible. Actualiza la vista previa.")
+    created = now()
+    review = AdminWalletReview(
+        id=uuid4().hex, business_id=business_id,
+        session_digest=digest(session["platform_admin_session"]),
+        candidate_ids=sorted(ids),
+        fingerprint=fingerprint(selected),
+        snapshot=[{"customer_id": item.customer_id, "stamps": item.stamps,
+                   "points": str(item.points), "loyalty_type": item.loyalty_type} for item in selected],
+        created_at=created, expires_at=created + timedelta(minutes=5),
+    )
+    db.session.add(review)
+    db.session.commit()
+    return redirect(url_for("admin.get_business_wallet_review", business_id=business_id, review_id=review.id), 303)
+
+
+@admin_bp.get("/business/<int:business_id>/wallet/reconciliation/reviews/<review_id>")
+@platform_admin_required
+def get_business_wallet_review(business_id, review_id):
+    from app.models.platform_admin_session import AdminWalletReview
+    from app.services.platform_admin_session import digest, now
+    from app.services.admin_wallet_review import enabled
+
+    review = AdminWalletReview.query.filter_by(
+        id=review_id, business_id=business_id,
+        session_digest=digest(session["platform_admin_session"]),
+    ).first_or_404()
+    business = db.session.get(Business, business_id)
+    response = make_response(render_template(
+        "admin/wallet_review.html", business=business, review=review,
+        expired=review.expires_at <= now(), execution_enabled=enabled(),
+    ))
+    response.headers["Cache-Control"] = "no-store, private"
+    return response
+
+
+@admin_bp.post("/business/<int:business_id>/wallet/reconciliation/reviews/<review_id>/confirm")
+@platform_admin_required
+def confirm_business_wallet_review(business_id, review_id):
+    from app.models.platform_admin_session import AdminWalletReview
+    from app.security import validate_csrf
+    from app.services.admin_wallet_review import confirm, enabled
+    from app.services.platform_admin_session import digest
+
+    if not validate_csrf() or request.form.get("confirm") != "yes":
+        abort(400)
+    review = AdminWalletReview.query.filter_by(
+        id=review_id, business_id=business_id,
+        session_digest=digest(session["platform_admin_session"]),
+    ).first_or_404()
+    if review.state == "prepared":
+        if not enabled():
+            abort(403, "La ejecución de reconciliación está deshabilitada.")
+        confirm(review)
+    return redirect(url_for("admin.get_business_wallet_review", business_id=business_id, review_id=review_id), 303)
 
 
 @admin_bp.post("/business/<int:business_id>/wallet/publications")

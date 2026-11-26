@@ -10,6 +10,7 @@ from unittest.mock import patch
 from PIL import Image
 
 from app import create_app
+from tests.admin_session_fixture import issue_for
 from app.extensions import db
 from app.models import (
     Business, BusinessCategory, Customer, GoogleWalletSyncJob, LoyaltyLedgerEntry,
@@ -56,6 +57,7 @@ class Phase74TestCase(unittest.TestCase):
     def admin_login(self):
         with self.client.session_transaction() as session:
             session["platform_admin_id"] = self.admin_id
+            session["platform_admin_session"] = issue_for(session["platform_admin_id"])
 
     def test_categories_are_independent_and_existing_records_are_unchanged(self):
         names = ["Restaurante", "Cafetería", "Bar", "Tienda", "Servicios", "Otros"]

@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app import create_app
+from tests.admin_session_fixture import issue_for
 from app.extensions import db
 from app.models import (AccessAudit, Business, Customer, PlatformAdmin, Promoter,
                         PromoterSession, ReferralAttribution, ReferralParticipant)
@@ -53,6 +54,7 @@ class PromotersPhase78TestCase(unittest.TestCase):
     def admin_login(self):
         with self.client.session_transaction() as browser:
             browser["platform_admin_id"] = self.admin_id
+            browser["platform_admin_session"] = issue_for(browser["platform_admin_id"])
 
     def test_attribution_is_created_only_after_verified_registration(self):
         response = self.client.post("/join/uno", json=self.referred_payload())
@@ -159,6 +161,7 @@ class PromotersPhase78TestCase(unittest.TestCase):
         admin_client = self.app.test_client()
         with admin_client.session_transaction() as browser:
             browser["platform_admin_id"] = self.admin_id
+            browser["platform_admin_session"] = issue_for(browser["platform_admin_id"])
         response = admin_client.post(
             f"/admin/business/{self.business.id}/promoters/{self.promoter.id}", data={"action":"toggle"}
         )
@@ -182,7 +185,10 @@ class PromotersPhase78TestCase(unittest.TestCase):
         denied = self.client.get(f"/admin/business/{self.business.id}/promoters/{other_promoter.id}/qr.svg")
         self.assertEqual(denied.status_code, 404)
         serializer = self.app.session_interface.get_signing_serializer(self.app)
-        self.client.set_cookie("session", serializer.dumps({"platform_admin_id":self.admin_id}), domain="attacker.example")
+        self.client.set_cookie("session", serializer.dumps({
+            "platform_admin_id": self.admin_id,
+            "platform_admin_session": issue_for(self.admin_id),
+        }), domain="attacker.example")
         response = self.client.get(
             f"/admin/business/{self.business.id}/promoters", base_url="http://attacker.example"
         )

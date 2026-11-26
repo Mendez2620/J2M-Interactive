@@ -4,6 +4,7 @@ from datetime import timedelta
 from sqlalchemy import text
 
 from app import create_app
+from tests.admin_session_fixture import issue_for
 from app.extensions import db
 from app.models import (
     AccessAudit, Business, Customer, GoogleWalletPublication,
@@ -74,6 +75,7 @@ class GoogleWalletPublicationPhase8C3C1TestCase(unittest.TestCase):
         self.admin_id = admin.id
         with self.client.session_transaction() as browser:
             browser["platform_admin_id"] = admin.id
+            browser["platform_admin_session"] = issue_for(browser["platform_admin_id"])
             browser["csrf_token"] = "publish-csrf"
 
     def tearDown(self):
