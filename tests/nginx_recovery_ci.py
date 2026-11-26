@@ -21,7 +21,7 @@ from cryptography.x509.oid import NameOID
 
 ROOT = Path(__file__).resolve().parents[1]
 NGINX_IMAGE = "nginx@sha256:0563c36f94a6d3ec3584161b77859f740f7e20b4853f52c796a864ce6908e8ea"
-SHA_OLD = "dae140e3684be29c534be3e1725598d226b68e03"
+SHA_OLD = "1" * 40  # Synthetic predecessor with a real revision header.
 SHA_NEW = "b" * 40
 
 
