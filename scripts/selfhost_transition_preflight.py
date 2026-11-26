@@ -6,9 +6,8 @@ Success of individual observations never authorizes the transition.
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import json
-import os
 from pathlib import Path
 import re
 import shutil

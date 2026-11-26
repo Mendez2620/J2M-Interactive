@@ -1348,11 +1348,32 @@ def _integral_components(index: Path, key_file: Path) -> tuple[str, Path, Path]:
 
 def restore_integral_isolated(index: Path, key_file: Path, image: str,
                               lock_file: Path | None = None,
-                              timeout: int = 900) -> RestoreReport:
-    """Restore one authenticated DB/media set and probe its public media in isolation."""
+                              timeout: int = 900, *,
+                              expected_image_id: str | None = None,
+                              expected_index_sha256: str | None = None) -> RestoreReport:
+    """Restore one authenticated DB/media set and probe its public media in isolation.
+
+    Optional identity constraints bind the transition rehearsal to one exact
+    index and immutable Docker image without altering scheduled restore callers.
+    """
     if not re.fullmatch(r"j2m-interactive:[0-9a-f]{40}", image):
         raise ValueError("La imagen debe estar fijada a un SHA aprobado exacto.")
+    if expected_image_id is not None:
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", expected_image_id):
+            raise ValueError("Identidad de imagen inválida.")
+        observed = subprocess.run(
+            ["docker", "image", "inspect", "--format", "{{.Id}}", image],
+            check=True, capture_output=True, text=True, timeout=15
+        ).stdout.strip()
+        if observed != expected_image_id:
+            raise RuntimeError("La imagen no coincide con la identidad aprobada.")
+        # Every subsequent Docker run uses the immutable ID, not the tag.
+        image = expected_image_id
     with exclusive_lock(lock_file or index.parent / ".operations.lock"):
+        if expected_index_sha256 is not None and (
+                not re.fullmatch(r"[0-9a-f]{64}", expected_index_sha256)
+                or not secrets.compare_digest(_hash_file(index), expected_index_sha256)):
+            raise RuntimeError("El índice no coincide con el conjunto aprobado.")
         backup_id, database, media = _integral_components(index, key_file)
         key = load_dpapi_key(key_file)
         suffix = secrets.token_hex(6)
@@ -1438,6 +1459,10 @@ def restore_integral_isolated(index: Path, key_file: Path, image: str,
             counts = [int(v) for v in _psql(pg_name,
                 "SELECT (SELECT count(*) FROM businesses)||','||(SELECT count(*) FROM customers)||','||"
                 "(SELECT count(*) FROM staff)||','||(SELECT count(*) FROM transactions)").split(",")]
+            if expected_index_sha256 is not None and (
+                    not secrets.compare_digest(_hash_file(index), expected_index_sha256)
+                    or not verify_integral_set(index, key_file)):
+                raise RuntimeError("El conjunto cambió durante la restauración.")
             return RestoreReport(revision, *counts)
         finally:
             for container in (app_name, pg_name):

@@ -60,3 +60,20 @@ de transporte o liberación no confirmada, se cierran las conexiones y
 se informa NO-GO; un lock de diagnóstico podría permanecer en una sesión
 del pooler hasta que esta termine. No se matan sesiones ni se libera
 ninguna otra clave. El resultado positivo no autoriza el despliegue.
+
+
+## Restauración exacta independiente (no ejecutada)
+
+Después de obtener el hash del índice y el ID inmutable del legado en
+el inventario, solicitar autorización explícita para restaurar esa copia
+real en una red y volumen Docker aislados. Reutiliza restore_integral_isolated,
+con el bloqueo de respaldo existente y el índice exacto; no usa una
+conexión a Supabase. La restauración ejecuta la imagen por ID inmutable,
+verifica el índice y componentes bajo el bloqueo y exige la revisión
+inicial. Revalida el conjunto y el tag al finalizar.
+
+    python -m scripts.verify_transition_restore --index <archivo-integral-exacto> --key-file <ruta-DPAPI-privada> --expected-index-sha256 <hash> --expected-legacy-image-id <sha256:id> --authorize-isolated-restore
+
+No ejecutar sin aprobación expresa ni utilizar el resultado como permiso
+de transición. La evidencia no se conserva automáticamente; no acredita
+una barrera de escritores ni el estado de la base después de la copia.
