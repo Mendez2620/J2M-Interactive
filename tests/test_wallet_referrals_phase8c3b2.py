@@ -122,7 +122,7 @@ class WalletReferralsPhase8C3B2TestCase(unittest.TestCase):
     def test_wallet_referral_worker_drains_events_without_enqueuing_secrets(self):
         from app.models import GoogleWalletReferralJob
         from app.models.google_wallet_referral_job import utcnow
-        from app.services.google_wallet_referral_queue import process_wallet_referral_jobs
+        from app.services.google_wallet_referral_queue import process_wallet_referral_jobs, wallet_referral_queue_counts
         from app.services.referral_participant_service import configure_customer_ambassador
 
         self.assertEqual(self._activate().status_code, 302)
@@ -160,6 +160,7 @@ class WalletReferralsPhase8C3B2TestCase(unittest.TestCase):
         self.assertEqual(process_wallet_referral_jobs(service=Provider()), 1)
         self.assertEqual(process_wallet_referral_jobs(service=Provider()), 1)
         self.assertEqual(calls, [True, False, False])
+        self.assertEqual(wallet_referral_queue_counts(self.business.id)["completed"], 3)
 
     def test_activation_in_either_remote_surface_is_preserved_until_expiry(self):
         from datetime import timedelta

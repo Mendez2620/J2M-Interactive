@@ -43,6 +43,7 @@ def process_wallet_referral_jobs(*, service=None, limit=10):
         owned = (Job.id == job_id, Job.status == "processing", Job.token == token)
         values = dict(token=None, locked_at=None, status="completed", outcome="confirmed")
         if customer_id is None:
+            values["outcome"] = "expanded"
             page = db.session.scalars(select(ReferralParticipant.customer_id).where(
                 ReferralParticipant.business_id == business_id,
                 ReferralParticipant.customer_id > cursor,
@@ -105,7 +106,8 @@ def wallet_referral_queue_counts(business_id=None):
     for status, outcome, business_event, expiry, count in db.session.execute(
         query.group_by(Job.status, Job.outcome, Job.customer_id.is_(None), Job.scheduled_expiry)
     ):
-        counts[status] += count
+        if not (business_event and status == "completed"):
+            counts[status] += count
         if status in {"pending", "processing"}:
             counts["business_pending"] += count if business_event else 0
             counts["expiry_pending"] += count if expiry else 0
