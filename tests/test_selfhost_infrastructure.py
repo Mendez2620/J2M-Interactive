@@ -132,7 +132,9 @@ class SelfHostInfrastructureTestCase(unittest.TestCase):
         self.assertIn("$ApprovedSha -eq $previousSha", deploy)
         self.assertIn("Test-J2MLocalHttps", deploy)
         self.assertIn("--expected-revision", deploy)
-        self.assertIn("-LegacyBootstrapRollback:$bootstrapLegacy", deploy)
+        gate = 'Confirm-J2MLocalProxy $LocalHttpsOrigin $previousImage -VerifyOnly'
+        self.assertLess(deploy.index(gate), deploy.index("docker build"))
+        self.assertLess(deploy.index(gate), deploy.index("set_selfhost_image_pin.ps1"))
         self.assertIn("--verify-only", deploy)
         self.assertIn('Headers["X-J2M-Revision"]', deploy)
         self.assertIn("selfhost_proxy_recovery.py", deploy)
