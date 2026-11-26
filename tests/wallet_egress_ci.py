@@ -1,5 +1,6 @@
 """Exercise the exact Squid policy with synthetic TLS peers on internal networks."""
 import json
+import subprocess
 import tempfile
 import time
 import uuid
@@ -25,6 +26,7 @@ def main():
             run("docker", "network", "create", "--internal", network)
         with tempfile.TemporaryDirectory() as temporary:
             folder = Path(temporary)
+            folder.chmod(0o755)  # Allow the unprivileged client to read the synthetic public CA.
             ca, _, _ = write_certificates(folder, hostnames=TARGETS)
             (folder / "policy.conf").write_bytes((ROOT / "tests/fixtures/wallet-egress-squid.conf").read_bytes())
             (folder / "nginx.conf").write_text("""
@@ -91,8 +93,10 @@ except OSError:
 else:
     raise AssertionError('direct connection bypassed the proxy')
 """
-            run("docker", "run", "--rm", "--network", inbound, *mount,
-                "j2m-interactive:wallet-demo-synthetic", "python", "-c", client)
+            # Use a separate container so no client process runs in the proxy namespace.
+            subprocess.run(["docker", "run", "--rm", "--network", inbound, *mount,
+                            "j2m-interactive:wallet-demo-synthetic", "python", "-c", client],
+                           check=True, timeout=30)
         print("Squid exact CONNECT ACL, end-to-end TLS and direct-route isolation verified.")
     finally:
         for name in (proxy, target):
