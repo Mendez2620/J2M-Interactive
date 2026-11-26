@@ -4,6 +4,7 @@ import unittest
 import zipfile
 
 from app import create_app
+from tests.admin_session_fixture import issue_for
 from app.extensions import db
 from app.models import Business, Customer, PlatformAdmin
 from app.services.apple_wallet import AppleWalletService
@@ -28,6 +29,7 @@ class WalletPersonalizationPhase77BTestCase(unittest.TestCase):
         self.admin_id = admin.id
         with self.client.session_transaction() as browser:
             browser["platform_admin_id"] = admin.id
+            browser["platform_admin_session"] = issue_for(browser["platform_admin_id"])
 
     def tearDown(self):
         db.session.remove(); db.drop_all(); self.context.pop()

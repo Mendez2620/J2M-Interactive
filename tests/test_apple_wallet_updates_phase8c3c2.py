@@ -13,6 +13,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
 from app import create_app
+from tests.admin_session_fixture import issue_for
 from app.extensions import db
 from app.models import (
     AppleDevice, ApplePassCredential, AppleWalletPublication, AppleWalletPushJob,
@@ -56,6 +57,7 @@ class AppleWalletUpdatesPhase8C3C2TestCase(unittest.TestCase):
         db.session.commit()
         with self.client.session_transaction() as browser:
             browser["platform_admin_id"] = self.admin.id
+            browser["platform_admin_session"] = issue_for(browser["platform_admin_id"])
             browser["csrf_token"] = "apple-publish-csrf"
 
     def tearDown(self):

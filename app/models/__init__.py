@@ -43,6 +43,7 @@ from app.models.customer_auth import (
 )
 
 from . import google_wallet_write_reservation
+from .platform_admin_session import PlatformAdminSession
 
 __all__ = [
     "db",

@@ -10,6 +10,7 @@ from pathlib import Path
 from PIL import Image
 
 from app import create_app
+from tests.admin_session_fixture import issue_for
 from app.extensions import db
 from app.media_storage import LocalMediaStorage, MediaStorageError
 from app.models import Business, PlatformAdmin
@@ -100,6 +101,7 @@ class PersistentMediaTestCase(unittest.TestCase):
         self.admin_id = admin.id
         with self.client.session_transaction() as session:
             session["platform_admin_id"] = self.admin_id
+            session["platform_admin_session"] = issue_for(session["platform_admin_id"])
 
     def tearDown(self):
         db.session.remove()
@@ -356,6 +358,7 @@ class PersistentMediaTestCase(unittest.TestCase):
                 client = app.test_client()
                 with client.session_transaction() as session:
                     session["platform_admin_id"] = admin_id
+                    session["platform_admin_session"] = issue_for(session["platform_admin_id"])
                 response = client.post(
                     f"/admin/business/{business_id}/update",
                     data={"logo_file": (io.BytesIO(image_bytes(size=size)), "brand.png")},

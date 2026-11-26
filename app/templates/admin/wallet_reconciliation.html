@@ -31,6 +31,22 @@
   <section aria-labelledby="candidate-preview" class="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
     <h2 id="candidate-preview" class="font-bold">Vista previa de candidaturas</h2>
     <p class="text-sm">{{ preview.scanned }} clientes inspeccionados en esta página.</p>
+    {% set reasons = {
+      'no_transactions': 'Sin movimientos', 'missing_baseline': 'Línea base ausente',
+      'invalid_ledger': 'Historial contable inconsistente', 'incomplete_ledger': 'Historial contable incompleto',
+      'balance_mismatch': 'El saldo y el historial no coinciden', 'invalid_linkage': 'Relaciones de datos inconsistentes',
+      'worker_pending': 'Sincronización pendiente o en curso', 'already_covered': 'Último movimiento ya cubierto',
+      'history_limit': 'Límite de historial alcanzado', 'unknown_job_status': 'Estado de sincronización desconocido',
+      'invalid_program': 'Programa de lealtad no válido'
+    } %}
+    {% if preview.counts.keys() | reject('equalto', 'eligible') | list %}
+    <h3 class="text-sm font-semibold">Motivos de exclusión en esta página</h3>
+    <ul class="space-y-1 text-sm">
+      {% for reason, count in preview.counts.items() if reason != 'eligible' %}
+      <li>{{ reasons.get(reason, 'Motivo no reconocido') }}: {{ count }}</li>
+      {% endfor %}
+    </ul>
+    {% endif %}
     {% if preview.candidates %}
     <ul class="space-y-2 text-sm">
       {% for candidate in preview.candidates %}

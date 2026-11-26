@@ -3,6 +3,7 @@ import unittest
 from datetime import timedelta
 
 from app import create_app
+from tests.admin_session_fixture import issue_for
 from app.extensions import db
 from app.models import (
     Business, Customer, GoogleWalletSyncJob, LoyaltyLedgerEntry, PlatformAdmin,
@@ -258,6 +259,7 @@ class Phase75TestCase(unittest.TestCase):
         self.assertIsNotNone(job.next_attempt_at)
         with self.client.session_transaction() as session:
             session["platform_admin_id"] = self.admin.id
+            session["platform_admin_session"] = issue_for(session["platform_admin_id"])
         dashboard = self.https_get("/admin").get_data(as_text=True)
         self.assertIn("1 reintentando", dashboard)
         self.assertIn("Último intento", dashboard)

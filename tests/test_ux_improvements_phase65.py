@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from urllib.parse import parse_qs, urlparse
 
 from app import create_app
+from tests.admin_session_fixture import issue_for
 from app.extensions import db
 from app.models import Business, Customer, PlatformAdmin, Staff, Transaction
 
@@ -22,7 +23,9 @@ class UXImprovementsPhase65TestCase(unittest.TestCase):
         db.session.remove(); db.drop_all(); self.ctx.pop()
 
     def admin_login(self):
-        with self.client.session_transaction() as browser: browser["platform_admin_id"] = self.admin_id
+        with self.client.session_transaction() as browser:
+            browser["platform_admin_id"] = self.admin_id
+            browser["platform_admin_session"] = issue_for(browser["platform_admin_id"])
 
     def manager(self, business, username, email, password="ManagerPassword123!"):
         staff = Staff(business_id=business.id, username=username, email=email, role="manager", is_active=True,

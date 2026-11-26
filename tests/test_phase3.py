@@ -2,6 +2,7 @@ import json
 import unittest
 from datetime import date
 from app import create_app
+from tests.admin_session_fixture import issue_for
 from app.extensions import db
 from app.models import Business, Customer, PlatformAdmin, Staff, Transaction
 
@@ -99,6 +100,7 @@ class Phase3TestCase(unittest.TestCase):
         db.session.commit()
         with self.client.session_transaction() as sess:
             sess["platform_admin_id"] = admin.id
+            sess["platform_admin_session"] = issue_for(sess["platform_admin_id"])
         return admin
 
     def _scanner_staff(self, business, username):

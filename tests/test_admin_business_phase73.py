@@ -3,6 +3,7 @@ import io
 import unittest
 
 from app import create_app
+from tests.admin_session_fixture import issue_for
 from app.extensions import db
 from app.models import Business, BusinessCategory, PlatformAdmin
 
@@ -26,6 +27,7 @@ class AdminBusinessPhase73TestCase(unittest.TestCase):
         self.admin_id = admin.id
         with self.client.session_transaction() as session:
             session["platform_admin_id"] = self.admin_id
+            session["platform_admin_session"] = issue_for(session["platform_admin_id"])
 
     def tearDown(self):
         db.session.remove()
