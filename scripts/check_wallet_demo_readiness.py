@@ -78,8 +78,9 @@ def runtime():
                 raise ValueError("Unexpected app configuration")
     docker("exec", found["app"], "python", "-c",
            "from sqlalchemy import create_engine,text; import os;"
+           "from app.config import normalize_database_url;"
            "from scripts.check_wallet_referral_schema import validate_schema;"
-           "c=create_engine(os.environ['DATABASE_URL']).connect();"
+           "c=create_engine(normalize_database_url(os.environ['DATABASE_URL'])).connect();"
            "c.execute(text('SET TRANSACTION READ ONLY'));"
            "raise SystemExit(bool(validate_schema(c)))")
 

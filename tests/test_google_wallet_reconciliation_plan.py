@@ -670,13 +670,43 @@ class ReconciliationPreviewPostgresTests(ReconciliationPreviewCases, unittest.Te
         self.assertEqual(Transaction.query.count(), 0)
         self.assertEqual(LoyaltyLedgerEntry.query.count(), 0)
 
-        first = inspect_history(db.session, self.business_id, limit=2)
-        second = inspect_history(db.session, self.business_id, limit=2, after=first["next_after"])
+        from datetime import timedelta
+        from app.models import CustomerReferralActivation
+        now = datetime.now(timezone.utc)
+        participant = ReferralParticipant.query.filter_by(customer_id=expected[0]).one()
+        for index, (expires, consumed) in enumerate([
+            (now + timedelta(days=1), None),
+            (now - timedelta(days=1), now - timedelta(days=2)),
+            (now - timedelta(days=1), None),
+        ]):
+            db.session.add(CustomerReferralActivation(
+                business_id=self.business_id, participant_id=participant.id,
+                expires_at=expires, consumed_at=consumed, token_hash=str(index) * 64,
+            ))
+        db.session.commit()
+        commands = []
+
+        def record(_conn, _cursor, statement, _params, _context, _executemany):
+            commands.append(statement.lstrip().split(None, 1)[0])
+
+        event.listen(engine, "before_cursor_execute", record)
+        try:
+            first = inspect_history(db.session, self.business_id, limit=2)
+            second = inspect_history(db.session, self.business_id, limit=2,
+                                     after=first["next_after"],
+                                     capability_after=first["next_capability_after"])
+            other_history = inspect_history(db.session, self.other_id)
+        finally:
+            event.remove(engine, "before_cursor_execute", record)
+        self.assertEqual(set(commands), {"SELECT"})
         self.assertEqual([p["state"] for p in first["participants"]], ["active", "revoked"])
         self.assertGreater(second["participants"][0]["id"], first["next_after"])
         self.assertNotIn(foreign_participant_id, [p["id"] for p in first["participants"] + second["participants"]])
-        self.assertEqual(inspect_history(db.session, self.other_id)["participants"],
-                         [{"id": foreign_participant_id, "state": "no_consent"}])
+        self.assertEqual(other_history["participants"], [{"id": foreign_participant_id, "state": "no_consent"}])
+        self.assertEqual(other_history["capabilities"], [])
+        self.assertEqual([item["state"] for item in first["capabilities"] + second["capabilities"]],
+                         ["current", "consumed", "expired"])
+        self.assertNotIn("token_hash", str(first))
 
     def test_referral_revocation_waits_for_inflight_write_and_removes_only_owned_links(self):
         self.check_referral_revocation_during_write(uncertain=False)
