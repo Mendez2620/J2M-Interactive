@@ -29,6 +29,7 @@ def admin_login():
         if reservation is None:
             return render_template("admin/login.html", error="Demasiados intentos. Intenta más tarde."), 429
         admin = PlatformAdmin.query.filter_by(email=email).first()
+        verified_password_hash = admin.password_hash if admin else None
         if not admin or not admin.check_password(password):
             error = "Credenciales inválidas."
         elif not admin.is_active:
@@ -37,10 +38,12 @@ def admin_login():
             clear_auth_attempts("admin", reservation)
             try:
                 revoke(session.get("platform_admin_id"), session.get("platform_admin_session"))
-                token = issue(admin)
+                token = issue(admin, verified_password_hash=verified_password_hash)
             except SQLAlchemyError:
                 db.session.rollback()
                 return render_template("admin/login.html", error="Inicio de sesión temporalmente no disponible."), 503
+            if token is None:
+                return render_template("admin/login.html", error="Credenciales inválidas."), 401
             session.clear()
             session["platform_admin_id"] = admin.id
             session["platform_admin_session"] = token

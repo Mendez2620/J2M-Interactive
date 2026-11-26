@@ -172,7 +172,7 @@ def _inspect_customer(connection, business, customer):
     )
 
 
-def preview_google_wallet_reconciliation(business_id, *, limit=50, after_customer_id=0):
+def preview_google_wallet_reconciliation(business_id, *, limit=50, after_customer_id=0, customer_ids=None):
     """Inspect a keyset page of customers on one consistent local DB snapshot.
 
     Uses a dedicated connection; callers must not share a SQLite in-memory
@@ -185,6 +185,12 @@ def preview_google_wallet_reconciliation(business_id, *, limit=50, after_custome
         raise ValueError("Límite de clientes inválido.")
     if type(after_customer_id) is not int or after_customer_id < 0:
         raise ValueError("Cursor inválido.")
+    if customer_ids is not None and (
+        not 1 <= len(customer_ids) <= MAX_EXECUTION_BATCH
+        or any(type(item) is not int or item < 1 for item in customer_ids)
+        or len(set(customer_ids)) != len(customer_ids)
+    ):
+        raise ValueError("Selección inválida.")
     b, c = Business.__table__, Customer.__table__
     with db.engine.connect() as connection:
         dialect = connection.dialect.name
@@ -206,10 +212,13 @@ def preview_google_wallet_reconciliation(business_id, *, limit=50, after_custome
                 raise ValueError("Negocio no encontrado.")
             if not business["is_active"]:
                 return ReconciliationPreview(False, 0, {}, (), None)
-            customers = connection.execute(select(
+            selection = select(
                 c.c.id, c.c.current_points, c.c.current_stamps,
-            ).where(c.c.business_id == business_id, c.c.id > after_customer_id)
-             .order_by(c.c.id).limit(limit + 1)).mappings().all()
+            ).where(c.c.business_id == business_id)
+            selection = selection.where(
+                c.c.id > after_customer_id if customer_ids is None else c.c.id.in_(customer_ids)
+            )
+            customers = connection.execute(selection.order_by(c.c.id).limit(limit + 1)).mappings().all()
             counts = Counter()
             candidates = []
             for customer in customers[:limit]:

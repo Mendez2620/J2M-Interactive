@@ -5,13 +5,17 @@ from unittest.mock import patch
 from app import create_app
 from tests.admin_session_fixture import issue_for
 from app.extensions import db
-from app.models import AccessAudit, Business, PlatformAdmin
+from app.models import AccessAudit, Business, Customer, PlatformAdmin, Transaction
+from app.models.platform_admin_session import AdminWalletReview
+from app.services.google_wallet_sync_service import run_google_wallet_sync_worker
+from app.services.loyalty_transaction_service import process_loyalty_transaction
 from app.services.google_wallet_reconciliation_plan import ReconciliationCandidate, ReconciliationPreview
 
 
 class AdminWalletReconciliationTests(unittest.TestCase):
     def setUp(self):
         app = create_app("testing")
+        self.app = app
         context = app.app_context()
         context.push()
         self.addCleanup(context.pop)
@@ -110,3 +114,54 @@ class AdminWalletReconciliationTests(unittest.TestCase):
         self.assertEqual(self.client.get(response.location).status_code, 200)
         self.authenticate()
         self.assertEqual(self.client.get(response.location).status_code, 404)
+
+    def test_confirmed_review_runs_once_through_existing_worker(self):
+        self.authenticate()
+        business = db.session.get(Business, self.business_id)
+        business.loyalty_type = "stamps"
+        customer = Customer(business_id=business.id, full_name="Synthetic customer")
+        db.session.add(customer)
+        db.session.commit()
+        customer_id = customer.id
+        self.app.config["GOOGLE_WALLET_MODE"] = "disabled"
+        process_loyalty_transaction(
+            business=business, customer_id=customer_id, staff_id=None, action="earn_stamp",
+            tx_type="earn", points_amount=0, stamps_amount=1, purchase_amount=0,
+            request_id="synthetic-review", fingerprint="synthetic-review",
+        )
+        db.session.remove()
+        self.client.get(self.path)
+        with self.client.session_transaction() as session:
+            csrf = session["csrf_token"]
+        review = self.client.post(self.path + "/reviews", data={"candidate": str(customer_id), "csrf_token": csrf})
+        self.assertEqual(review.status_code, 303)
+        confirmation = review.location + "/confirm"
+        form = {"csrf_token": csrf, "confirm": "yes"}
+        self.assertEqual(self.client.post(confirmation, data=form).status_code, 403)
+        self.app.config.update(GOOGLE_WALLET_MODE="real", GOOGLE_WALLET_RECONCILIATION_ENABLED=True)
+        for _ in range(2):
+            self.assertEqual(self.client.post(confirmation, data=form).status_code, 303)
+        calls = []
+
+        class Provider:
+            mode = "real"
+
+            def reconcile_existing_loyalty_balance(self, record, *, business_id):
+                calls.append((record.id, business_id))
+                return {"status": "success", "reason": "balance_updated"}
+
+        run_google_wallet_sync_worker(service=Provider(), max_cycles=2, sleep_fn=lambda _seconds: None)
+        self.assertEqual(calls, [(customer_id, self.business_id)])
+        self.assertEqual(Transaction.query.count(), 1)
+        self.assertEqual(AdminWalletReview.query.one().state, "finished")
+        self.assertEqual(self.client.post(confirmation, data=form).status_code, 303)
+        self.assertIn("Confirmadas: 1", self.client.get(review.location).get_data(as_text=True))
+
+    def test_old_password_verification_cannot_issue_a_session(self):
+        from app.services.platform_admin_session import issue
+
+        admin = db.session.get(PlatformAdmin, self.admin_id)
+        previously_verified = admin.password_hash
+        admin.set_password("ChangedSyntheticPassword123")
+        db.session.commit()
+        self.assertIsNone(issue(admin, verified_password_hash=previously_verified))

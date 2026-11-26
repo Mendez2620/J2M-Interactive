@@ -185,7 +185,10 @@ class PromotersPhase78TestCase(unittest.TestCase):
         denied = self.client.get(f"/admin/business/{self.business.id}/promoters/{other_promoter.id}/qr.svg")
         self.assertEqual(denied.status_code, 404)
         serializer = self.app.session_interface.get_signing_serializer(self.app)
-        self.client.set_cookie("session", serializer.dumps({"platform_admin_id":self.admin_id}), domain="attacker.example")
+        self.client.set_cookie("session", serializer.dumps({
+            "platform_admin_id": self.admin_id,
+            "platform_admin_session": issue_for(self.admin_id),
+        }), domain="attacker.example")
         response = self.client.get(
             f"/admin/business/{self.business.id}/promoters", base_url="http://attacker.example"
         )

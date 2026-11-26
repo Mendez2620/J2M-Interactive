@@ -3,13 +3,37 @@
 {% block content %}
 <main class="mx-auto max-w-5xl space-y-4 px-4 py-8 text-slate-900">
   <h1 class="text-2xl font-bold">Revisión de candidaturas</h1>
-  <p>{{ business.name }} · {{ count }} clientes seleccionados</p>
-  {% if expired %}
+  <p>{{ business.name }} · {{ review.snapshot | length }} clientes seleccionados</p>
+  <ul class="space-y-2 text-sm">
+  {% for item in review.snapshot %}
+    <li>Cliente n.º {{ item.customer_id }} · {{ item.stamps if item.loyalty_type == 'stamps' else item.points }} {{ 'sellos' if item.loyalty_type == 'stamps' else 'puntos' }}</li>
+  {% endfor %}
+  </ul>
+  {% if review.state == 'expired' or (review.state == 'prepared' and expired) %}
   <p role="status">La revisión venció. Genera una selección nueva.</p>
+  {% elif review.state == 'prepared' %}
+    <p role="status">Revisión preparada. La selección vence cinco minutos después de su creación.</p>
+    {% if execution_enabled and business.is_active %}
+    <form method="post" action="{{ url_for('admin.confirm_business_wallet_review', business_id=business.id, review_id=review.id) }}" class="space-y-3">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <p>Solo se reconciliarán tarjetas existentes. Los movimientos y saldos locales se conservan.</p>
+      <label class="block"><input type="checkbox" name="confirm" value="yes" required> Confirmo esta selección y los saldos revisados.</label>
+      <button class="btn btn-secondary" type="submit">Encolar reconciliación</button>
+    </form>
+    {% else %}
+    <p>La ejecución está deshabilitada.</p>
+    {% endif %}
+  {% elif review.state == 'queued' %}
+  <p role="status">Solicitud encolada.</p>
+  {% elif review.state == 'running' %}
+  <p role="status">Solicitud reclamada. El resultado aún no está confirmado. Si se interrumpe el worker, no se repite automáticamente.</p>
+  {% elif review.state == 'finished' %}
+  <p role="status">Solicitud finalizada. Procesadas: {{ review.result.processed }} · Restantes: {{ review.result.remaining }} · Confirmadas: {{ review.result.counts.get('success', 0) }}.</p>
+  {% elif review.state == 'rejected' %}
+  <p role="status">La selección o la autorización cambió. Genera una revisión nueva.</p>
   {% else %}
-  <p role="status">Revisión preparada. La selección vence cinco minutos después de su creación.</p>
+  <p role="status">Resultado inconcluso. La solicitud no se repetirá automáticamente.</p>
   {% endif %}
-  <p>La ejecución está bloqueada. Esta revisión no modifica tarjetas, movimientos ni saldos.</p>
   <a class="underline" href="{{ url_for('admin.business_wallet_reconciliation', business_id=business.id) }}">Volver al diagnóstico</a>
 </main>
 {% endblock %}

@@ -267,10 +267,12 @@ def run_google_wallet_sync_worker(*, stop_event=None, sleep_fn=time.sleep, servi
                 process_pending_wallet_publications, wallet_publication_metrics,
             )
             published = process_pending_wallet_publications(limit=batch_size, service=service)
+            from app.services.admin_wallet_review import process_one_admin_wallet_review
+            reviewed = process_one_admin_wallet_review(service=service)
             publication_metrics = wallet_publication_metrics()
             metrics = google_wallet_sync_metrics()
             logger.info("google_wallet_worker_metrics %s", json.dumps({
-                "processed": processed, "published": published,
+                "processed": processed, "published": published, "reviews_processed": reviewed,
                 "publications": publication_metrics, **metrics,
             }, sort_keys=True))
             backlog = metrics["pending"] + metrics["processing"]

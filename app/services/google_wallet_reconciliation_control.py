@@ -81,7 +81,7 @@ def _existing(connection, business_id, key, admin_id, fingerprint):
 
 
 def run_reviewed_reconciliation(candidates, *, business_id, admin_id, request_id,
-                                confirm, service):
+                                confirm, service, authorize=None):
     """Record a bounded, explicitly confirmed selection and each attempt.
 
     This entrypoint is internal only. The feature flag defaults to false and
@@ -141,6 +141,9 @@ def run_reviewed_reconciliation(candidates, *, business_id, admin_id, request_id
             processed = 0
             stop_reason = None
             for candidate in ordered:
+                if authorize is not None and not authorize():
+                    stop_reason = "authorization_expired"
+                    break
                 references = {"customer_id": candidate.customer_id,
                               "transaction_id": candidate.transaction_id,
                               "ledger_id": candidate.ledger_id}
