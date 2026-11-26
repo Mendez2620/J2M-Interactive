@@ -77,3 +77,35 @@ inicial. Revalida el conjunto y el tag al finalizar.
 No ejecutar sin aprobación expresa ni utilizar el resultado como permiso
 de transición. La evidencia no se conserva automáticamente; no acredita
 una barrera de escritores ni el estado de la base después de la copia.
+
+## Atestación HTTPS de solo lectura
+
+Añada `--attest-legacy-https` al preflight para comprobar health y ready
+en el origen local por TLS verificado. La comprobación requiere que Nginx
+registre en stdout el nonce de `X-J2M-Probe`, `$uri`,
+`$upstream_addr` y `$upstream_status` en ese orden. Verifica las identidades
+de web, worker y proxy y sus IP antes y después de cada petición, y
+rechaza una respuesta sin un registro único correlacionado. Si los logs
+operativos aún no exponen el formato, la comprobación queda bloqueada.
+Este comando no recarga ni reconfigura Nginx.
+
+## Barrera operativa requerida
+
+La futura ventana exige un control mantenido en PostgreSQL que impida
+reconectar o escribir a los roles usados por web, worker y otros clientes,
+incluidos los procesos que compartan su credencial. Use una identidad de
+migración separada y pruebe que una sesión nueva con un rol escritor queda
+denegada durante toda la ventana. Si la identidad operativa compartida
+también es la única que puede migrar, separe primero esas identidades bajo
+una autorización específica. Identifique los consumidores externos y el
+comportamiento de las conexiones ya abiertas antes de aplicar el control.
+
+Tras autorizar la ventana, bloquee el ingreso HTTP y directo, desactive el
+reinicio de escritores, suspenda tareas y drene transacciones. Mantenga
+la barrera hasta comprobar revisión, esquema, datos, identidad HTTPS y una
+aprobación separada de reapertura. Use el bloqueo compartido de respaldo
+para que el conjunto no compita con copia, restauración ni retención.
+Si la exclusión no se puede demostrar, no hay migración. Una inspección
+puntual de Docker, del Programador o de pg_stat_activity no acredita
+esa barrera. El procedimiento desplegable aún debe integrar la barrera,
+el diario y la recuperación con comprobaciones en vivo.

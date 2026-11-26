@@ -11,10 +11,12 @@ import json
 from pathlib import Path
 import re
 import shutil
+import ssl
 import subprocess
+from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
 
 from scripts import selfhost_backup as backup
-from scripts.historical_transition_evidence import IMAGE_ID, LEGACY_SHA, TARGET_SHA
+from scripts.historical_transition_evidence import Backend, IMAGE_ID, LEGACY_SHA, TARGET_SHA, prove_https
 
 PROJECT = "j2m-cutover-ready"
 NETWORK = PROJECT + "_j2m-private"
@@ -42,7 +44,12 @@ def read_config(path):
         key, sep, val = line.partition("=")
         if not sep or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) or key in values:
             raise ValueError("Ambiguous environment file")
-        values[key] = val.strip().strip("\"'")
+        val = val.strip()
+        if val.startswith(('"', "'")):
+            if len(val) < 2 or val[-1] != val[0]:
+                raise ValueError("Unclosed environment value")
+            val = val[1:-1]
+        values[key] = val
     return values
 
 
@@ -50,6 +57,14 @@ def disabled(values):
     return (values.get("GOOGLE_WALLET_MODE") == "disabled"
             and values.get("APPLE_WALLET_MODE") == "disabled"
             and values.get("GOOGLE_WALLET_RECONCILIATION_ENABLED", "false") == "false")
+
+
+def file_identity(path):
+    try:
+        metadata = path.stat()
+    except FileNotFoundError:
+        return None
+    return metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns
 
 
 def inspect_backup(index, key_file, *, now=None, max_age_seconds=5400):
@@ -70,6 +85,7 @@ def inspect_backup(index, key_file, *, now=None, max_age_seconds=5400):
     if not isinstance(components, list) or len(components) != 2:
         raise ValueError("Expected exactly two components")
     names = set()
+    fingerprints = {}
     for component in components:
         name = component["filename"]
         if not isinstance(name, str) or Path(name).name != name or name in names:
@@ -78,7 +94,12 @@ def inspect_backup(index, key_file, *, now=None, max_age_seconds=5400):
         if path.is_symlink() or not path.is_file():
             raise ValueError("Expected regular backup component")
         names.add(name)
-    if not backup.verify_integral_set(index, key_file) or backup._hash_file(index) != before:
+        for artifact in (path, backup._manifest(path), backup._sidecar(path)):
+            if artifact.is_symlink():
+                raise ValueError("Unexpected linked backup artifact")
+            fingerprints[artifact] = file_identity(artifact)
+    if (not backup.verify_integral_set(index, key_file) or backup._hash_file(index) != before
+            or any(file_identity(path) != identity for path, identity in fingerprints.items())):
         raise RuntimeError("Integral backup authentication failed or index changed")
     return {"backup_id": match[1], "index_sha256": before,
             "created_at": created.astimezone(timezone.utc).isoformat(),
@@ -117,7 +138,7 @@ def loopback_bindings(item, *, required):
     return bool(actual) == required and all(b["HostIp"] == "127.0.0.1" for b in actual)
 
 
-def inspect_runtime(config):
+def inspect_runtime(config, *, include_addresses=False):
     """Observe existing containers only; cannot establish external exclusion."""
     if config.get("J2M_IMAGE") != LEGACY_TAG or not disabled(config):
         raise ValueError("Unexpected operational pin or Wallet mode")
@@ -150,7 +171,11 @@ def inspect_runtime(config):
                     or not disabled(values)
                     or values.get("DATABASE_URL") != config["DATABASE_URL"]):
                 raise RuntimeError("Unexpected application identity or configuration")
+        if not IMAGE_ID.fullmatch(item["Image"]) or not networks[NETWORK].get("IPAddress"):
+            raise RuntimeError("Missing immutable image or network address")
         observed[role] = {"container_id": item["Id"], "image_id": item["Image"]}
+        if include_addresses:
+            observed[role]["address"] = networks[NETWORK]["IPAddress"]
     workers = command("docker", "ps", "-q", "--no-trunc", "--filter",
                       "label=com.docker.compose.service=google-wallet-worker").splitlines()
     if workers != [observed["google-wallet-worker"]["container_id"]]:
@@ -158,6 +183,35 @@ def inspect_runtime(config):
     if image_id(LEGACY_TAG) != legacy:
         raise RuntimeError("Legacy tag changed")
     return observed
+
+
+class RejectRedirect(HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def attest_legacy_https(config):
+    """Correlate loopback HTTPS with logs from the same inspected proxy instance."""
+    expected = inspect_runtime(config, include_addresses=True)
+    web = expected["web"]
+    proxy = expected["proxy"]["container_id"]
+    opener = build_opener(ProxyHandler({}), HTTPSHandler(context=ssl.create_default_context()),
+                         RejectRedirect())
+
+    def snapshot():
+        if inspect_runtime(config, include_addresses=True) != expected:
+            raise RuntimeError("Docker identities changed during attestation")
+        return Backend(web["image_id"], web["container_id"], web["address"])
+
+    def request(route, nonce):
+        url = f"https://localhost:8443/api/{route}"
+        with opener.open(Request(url, headers={"X-J2M-Probe": nonce}), timeout=5) as response:
+            if response.geturl() != url:
+                raise RuntimeError("Unexpected HTTPS destination")
+            return response.status, response.headers.get("X-J2M-Revision")
+
+    prove_https(snapshot, request, lambda: command("docker", "logs", "--since", "60s", proxy))
+    return {"https_routes": 2, "legacy_backend_correlated": True}
 
 
 def inspect_checkout(approved_sha):
@@ -185,6 +239,7 @@ def main():
     parser.add_argument("--env-file", type=Path, default=Path(".env.selfhost"))
     parser.add_argument("--backup-dir", type=Path, default=Path("selfhost-backups/hourly"))
     parser.add_argument("--key-file", type=Path, required=True)
+    parser.add_argument("--attest-legacy-https", action="store_true")
     args = parser.parse_args()
     report = {
         "checkout": observation(lambda: inspect_checkout(args.approved_sha)),
@@ -200,6 +255,8 @@ def main():
                       "scheduled task coordination", "pooler affinity", "transition authorization"],
         "transition_authorized": False,
     }
+    if args.attest_legacy_https:
+        report["legacy_https"] = observation(lambda: attest_legacy_https(read_config(args.env_file)))
     print(json.dumps(report, indent=2))
     # This command is inventory only. Even complete observations are not GO.
     return 2 if all(report[k]["status"] == "observed" for k in (

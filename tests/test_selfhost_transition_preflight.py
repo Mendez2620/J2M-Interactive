@@ -59,11 +59,50 @@ class TransitionPreflightTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     p.inspect_backup(index, root / "key", now=now)
 
+    def test_rejects_changed_component_while_verifying(self):
+        now = datetime.now(timezone.utc)
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            index = root / ("j2m-set-" + "a" * 32 + ".j2mbackup")
+            index.write_bytes(b"index")
+            db = root / "db"
+            db.write_bytes(b"synthetic")
+            (root / "media").write_bytes(b"synthetic")
+            payload = {"backup_id": "a" * 32, "created_at": now.isoformat(),
+                       "consistency": "database-first-append-only-media",
+                       "components": [{"filename": "db"}, {"filename": "media"}]}
+
+            def change(*args):
+                db.write_bytes(b"changed component")
+                return True
+
+            with patch.object(p.backup, "load_dpapi_key", return_value=b"k" * 32), \
+                    patch.object(p.backup, "_decrypt_json_bundle", return_value=payload), \
+                    patch.object(p.backup, "verify_integral_set", side_effect=change):
+                with self.assertRaises(RuntimeError):
+                    p.inspect_backup(index, root / "key", now=now)
+
+    def test_legacy_https_rejects_change_to_the_worker_or_proxy(self):
+        base = {role: {"container_id": "a" * 64, "image_id": "sha256:" + "1" * 64,
+                       "address": "172.20.0.2"}
+                for role in ("web", "google-wallet-worker", "proxy")}
+        for role in ("google-wallet-worker", "proxy"):
+            with self.subTest(role=role):
+                changed = {**base, role: {**base[role], "container_id": "b" * 64}}
+                with patch.object(p, "inspect_runtime", side_effect=[base, changed]), \
+                        patch.object(p, "build_opener") as opener:
+                    with self.assertRaisesRegex(RuntimeError, "identities changed"):
+                        p.attest_legacy_https({})
+                    opener.return_value.open.assert_not_called()
+
     def test_rejects_ambiguous_config_and_modes(self):
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "env"
             path.write_text("GOOGLE_WALLET_MODE=disabled\nGOOGLE_WALLET_MODE=real\n")
             with self.assertRaises(ValueError):
+                p.read_config(path)
+            path.write_text("GOOGLE_WALLET_MODE='disabled\n")
+            with self.assertRaisesRegex(ValueError, "Unclosed"):
                 p.read_config(path)
         self.assertFalse(p.disabled({"GOOGLE_WALLET_MODE": "disabled",
                                      "APPLE_WALLET_MODE": "disabled",
