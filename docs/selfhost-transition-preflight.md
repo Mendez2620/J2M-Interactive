@@ -40,3 +40,23 @@ rutas de archivos privados.
   el flujo operativo antes de habilitar cualquier comando de transición.
   Mantener el bloqueo general de la imagen legada. No se autoriza una
   excepción mediante un JSON o un argumento genérico.
+
+
+## Sonda de afinidad independiente (no ejecutada)
+
+El propietario debe confirmar primero que la URL privada corresponde al
+Session pooler (puerto 5432), el hostname exacto y la referencia del
+proyecto, y autorizar expresamente dos conexiones TLS y un lock de
+diagnóstico de sesión. No ejecutar como parte del preflight.
+
+    python -m scripts.probe_authorized_pooler --env-file .env.selfhost --expected-host <hostname-session-pooler> --expected-project-ref <project-ref> --authorize-session-lock-probe
+
+Se rechazan otros destinos, puertos, parámetros de conexión inesperados
+y variables PG heredadas. Se exige CA local y verify-full. Se usa una
+clave bigint negativa aleatoria, no los namespaces de dos enteros de
+la aplicación. No se escriben tablas. Se comprueban los dos PID tras
+COMMIT, exclusión y liberación. En caso de pérdida de afinidad, error
+de transporte o liberación no confirmada, se cierran las conexiones y
+se informa NO-GO; un lock de diagnóstico podría permanecer en una sesión
+del pooler hasta que esta termine. No se matan sesiones ni se libera
+ninguna otra clave. El resultado positivo no autoriza el despliegue.
