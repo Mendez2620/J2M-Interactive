@@ -51,6 +51,13 @@ jobs:
       - run: python -m pip check
       - run: flask --app run.py staging-preflight --help
       - run: python -m scripts.probe_wallet_session_affinity
+      - name: Verify transition inventory, exact restore and pooler guards
+        run: |
+          python -m unittest discover tests -p 'test_selfhost_transition_preflight.py' -v
+          python -m unittest discover tests -p 'test_probe_authorized_pooler.py' -v
+          python -m unittest discover tests -p 'test_verify_transition_restore.py' -v
+          python -m compileall -q scripts tests
+          git diff --check HEAD^ HEAD
       - run: python -m unittest discover tests -v
       - run: docker compose --env-file .env.selfhost.example -f compose.selfhost.yml config --quiet
         env:
