@@ -25,13 +25,14 @@ class WalletReservationTests(unittest.TestCase):
         with self.engine.begin() as connection:
             connection.exec_driver_sql("CREATE TABLE businesses (id integer PRIMARY KEY)")
             connection.exec_driver_sql(
-                "CREATE TABLE customers (id integer PRIMARY KEY, business_id integer NOT NULL)"
+                "CREATE TABLE customers (id integer PRIMARY KEY, business_id integer NOT NULL, "
+                "UNIQUE (business_id, id))"
             )
             connection.exec_driver_sql("INSERT INTO businesses VALUES (1), (2)")
             connection.exec_driver_sql("INSERT INTO customers VALUES (11, 1), (22, 2)")
             with Operations.context(MigrationContext.configure(connection)):
                 migration.upgrade()
-        self.resource = dict(kind="loyaltyObject", issuer="issuer", resource_id="issuer.card",
+        self.resource = dict(kind="loyaltyObject", issuer="issuer", resource_id="issuer.business_1_customer_11",
                              business_id=1, customer_id=11)
 
     def test_uncertainty_blocks_other_operations_until_owner_completes(self):
@@ -39,7 +40,8 @@ class WalletReservationTests(unittest.TestCase):
         self.assertTrue(transition(self.engine, owner, previous="reserved", state="started"))
         self.assertTrue(transition(self.engine, owner, previous="started", state="uncertain"))
         self.assertIsNone(reserve(self.engine, **self.resource))
-        other = reserve(self.engine, **dict(self.resource, resource_id="issuer.other"))
+        other = reserve(self.engine, **dict(self.resource, resource_id="issuer.business_2_customer_22",
+                                            business_id=2, customer_id=22))
         self.assertIsNotNone(other)
         forged = Reservation(owner.operation_id, other.owner_token)
         self.assertFalse(transition(self.engine, forged, previous="uncertain", state="confirmed"))
@@ -50,14 +52,22 @@ class WalletReservationTests(unittest.TestCase):
 
     def test_rejects_cross_tenant_customer(self):
         with self.assertRaises(ValueError):
-            reserve(self.engine, **dict(self.resource, customer_id=22))
+            reserve(self.engine, **dict(self.resource, customer_id=22,
+                                        resource_id="issuer.business_1_customer_22"))
+
+    def test_rejects_noncanonical_resource_and_missing_business(self):
+        with self.assertRaisesRegex(ValueError, "resource"):
+            reserve(self.engine, **dict(self.resource, resource_id="issuer.other"))
+        with self.assertRaisesRegex(ValueError, "ownership"):
+            reserve(self.engine, kind="loyaltyClass", issuer="issuer",
+                    resource_id="issuer.business_3", business_id=3)
 
 
 @unittest.skipUnless(os.getenv("TEST_POSTGRES_URL"), "synthetic PostgreSQL not configured")
 class PostgresWalletReservationTests(WalletReservationTests):
     def setUp(self):
         url = make_url(os.environ["TEST_POSTGRES_URL"]).set(drivername="postgresql+psycopg2")
-        if url.host not in {"localhost", "127.0.0.1", "::1"}:
+        if url.host not in {"localhost", "127.0.0.1", "::1"} or url.database != "j2m_test" or url.query:
             self.fail("Reservation regression requires local synthetic PostgreSQL")
         schema = "wallet_reservation_" + uuid4().hex
         control = create_engine(url, poolclass=NullPool)
