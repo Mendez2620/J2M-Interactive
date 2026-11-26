@@ -12,6 +12,7 @@ from app.extensions import db
 from app.models import Customer, GoogleWalletSyncJob, Transaction
 from app.models.google_wallet_write_reservation import table as reservation_table
 from app.services.google_wallet import GoogleWalletService
+from app.services.google_wallet_write_reservation import authorize_wallet_writes
 
 
 _SQLITE_LOCKS = {}
@@ -173,8 +174,20 @@ def process_pending_google_wallet_jobs(limit=50, service=None):
                 invalid_ids = [job_id for job_id in job_ids if job_id not in valid_set]
                 db.session.commit()
                 if valid_ids:
+                    def still_owns_claim():
+                        with db.engine.connect() as connection:
+                            return connection.scalar(
+                                db.select(func.count()).select_from(GoogleWalletSyncJob).where(
+                                    GoogleWalletSyncJob.id.in_(valid_ids),
+                                    GoogleWalletSyncJob.status == "processing",
+                                    GoogleWalletSyncJob.claim_token == claim,
+                                )
+                            ) == len(valid_ids)
+
                     try:
-                        result = service.update_loyalty_object(customer)
+                        with authorize_wallet_writes(still_owns_claim):
+                            result = (service.update_loyalty_object(customer) if still_owns_claim()
+                                      else {"status": "retry"})
                     except Exception:
                         result = {"status": "retry", "status_code": None}
                     _record_result(valid_ids, result, _now(), claim=claim)

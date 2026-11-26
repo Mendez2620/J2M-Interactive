@@ -192,8 +192,13 @@ class GoogleWalletService:
                     f"{customer.current_stamps} / {customer.business.stamps_reward_limit}"}}
         return {"label": customer.business.wallet_balance_label or "Puntos", "balance": {"string": f"{customer.current_points:.0f} pts"}}
 
-    def _invitation_url(self, customer):
+    def _invitation_url(self, customer, *, existing_activation=None):
         from app.models import ReferralParticipant
+        from app.services.referral_participant_service import resolve_customer_activation
+        from app.services.platform_admin_session import now
+
+        if not customer.business.is_active or not customer.business.referrals_enabled:
+            return None
         base = str(self._config("PUBLIC_BASE_URL", "") or "").rstrip("/")
         parsed = urlparse(base)
         if parsed.scheme != "https" or not parsed.netloc:
@@ -207,7 +212,17 @@ class GoogleWalletService:
             return None
         if participant.currently_eligible():
             return f"{base}/invite/{participant.invitation_code}"
-        return getattr(customer, "_referral_wallet_invitation_url", None)
+        # Only the issuance flow can supply a private activation capability.
+        # Recheck its authoritative record instead of trusting the cached URL.
+        activation_url = existing_activation or getattr(customer, "_referral_wallet_invitation_url", None)
+        if not self._is_owned_referral_uri(activation_url) or not urlparse(activation_url).path.startswith("/invite/activate/"):
+            return None
+        activation = resolve_customer_activation(urlparse(activation_url).path.rsplit("/", 1)[-1])
+        if (activation is not None and activation.business_id == customer.business_id
+                and activation.participant_id == participant.id and activation.consumed_at is None
+                and activation.expires_at > now() and participant.consented_at is None):
+            return activation_url
+        return None
 
     def create_loyalty_object(self, customer):
         self._require_enabled()
@@ -373,6 +388,11 @@ class GoogleWalletService:
             existing_text if isinstance(existing_text, list) else [],
             desired.get("textModulesData", []), controlled_text,
         )}
+        patch_body.update(self._referral_links_patch(existing, desired))
+        return patch_body
+
+    def _referral_links_patch(self, existing, desired):
+        patch_body = {}
         existing_links = existing.get("linksModuleData") if isinstance(existing, dict) else None
         desired_links = desired.get("linksModuleData")
         merged_links = copy.deepcopy(existing_links) if isinstance(existing_links, dict) else {}
@@ -390,10 +410,59 @@ class GoogleWalletService:
                 current_uri = current_app_link["webAppLinkInfo"]["appTarget"]["targetUri"]["uri"]
             except (KeyError, TypeError):
                 current_uri = ""
-            base = str(self._config("PUBLIC_BASE_URL", "") or "").rstrip("/")
-            if base and isinstance(current_uri, str) and current_uri.startswith(f"{base}/invite/"):
+            if self._is_owned_referral_uri(current_uri):
                 patch_body["appLinkData"] = None
         return patch_body
+
+    def _is_owned_referral_uri(self, uri):
+        if not isinstance(uri, str):
+            return False
+        try:
+            parsed = urlparse(uri)
+        except ValueError:
+            return False
+        origins = [self._config("PUBLIC_BASE_URL", "") or ""]
+        origins.extend(str(self._config("GOOGLE_WALLET_REFERRAL_HISTORICAL_ORIGINS", "") or "").split(","))
+        return (parsed.scheme == "https" and not parsed.query and not parsed.fragment
+                and f"https://{parsed.netloc}" in {str(origin).strip().rstrip("/") for origin in origins}
+                and re.fullmatch(r"/invite/(?:activate/)?[A-Za-z0-9_-]{16,128}", parsed.path) is not None)
+
+    @_coordinate()
+    def publish_referral_links(self, customer):
+        """Refresh only J2M referral surfaces. Never create a missing object."""
+        if self.mode != "real":
+            return {"status": "disabled"}
+        db.session.refresh(customer)
+        db.session.refresh(customer.business)
+        object_id = self.get_object_id(customer)
+        class_id = self.get_class_id(customer.business)
+        resource = f"loyaltyObject/{quote(object_id, safe='')}"
+        try:
+            existing = self._request("GET", resource)
+            if not isinstance(existing, dict) or existing.get("id") != object_id or existing.get("classId") != class_id:
+                return {"status": "error", "reason": "remote_identity_mismatch"}
+            body = self.create_loyalty_object(customer)
+            try:
+                current_uri = existing["appLinkData"]["webAppLinkInfo"]["appTarget"]["targetUri"]["uri"]
+            except (KeyError, TypeError):
+                current_uri = None
+            if "appLinkData" not in body and current_uri and self._invitation_url(
+                customer, existing_activation=current_uri,
+            ) == current_uri:
+                return {"status": "success"}
+            patch_body = {
+                key: value for key, value in self._referral_links_patch(existing, body).items()
+                if existing.get(key) != value
+            }
+            if existing.get("appLinkData") and not self._is_owned_referral_uri(current_uri):
+                patch_body.pop("appLinkData", None)
+            if patch_body:
+                self._verified_mutation("PATCH", "loyaltyObject", object_id, patch_body, class_id=class_id)
+            return {"status": "success"}
+        except GoogleWalletAPIError as exc:
+            if exc.status_code == 404:
+                return {"status": "skipped", "reason": "not_issued"}
+            return {"status": "retry" if exc.retryable else "error", "status_code": exc.status_code}
 
     @_coordinate(class_only=True)
     def publish_loyalty_class(self, business, prepared=None):

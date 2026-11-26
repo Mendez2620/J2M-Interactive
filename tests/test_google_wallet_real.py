@@ -66,7 +66,8 @@ class GoogleWalletRealTestCase(unittest.TestCase):
         self.app.config.update(PUBLIC_BASE_URL="https://staging.example.test", GOOGLE_ISSUER_ID="3388000000023203929")
         self.context = self.app.app_context(); self.context.push(); db.create_all()
         self.business = Business(name="Café Seguro", slug="cafe-seguro", logo_url="https://cdn.example.test/logo.png",
-                                 loyalty_type="stamps", stamps_reward_limit=8, primary_color="#123456")
+                                 loyalty_type="stamps", stamps_reward_limit=8, primary_color="#123456",
+                                 referrals_enabled=True)
         db.session.add(self.business); db.session.commit()
         self.customer = Customer(business_id=self.business.id, full_name="Persona Privada",
                                  email="private@example.test", phone="+525500000000", current_stamps=2)
@@ -422,6 +423,35 @@ class GoogleWalletRealTestCase(unittest.TestCase):
         process_pending_google_wallet_jobs(service=service)
         db.session.refresh(job)
         self.assertEqual(job.status, "pending")
+
+    def test_referral_only_update_removes_historical_link_without_publishing_design(self):
+        self.app.config["GOOGLE_WALLET_REFERRAL_HISTORICAL_ORIGINS"] = "https://old.example.test"
+        service = self.service([])
+        existing = self._existing_balance_object(service, balance="2 / 8")
+        existing.update(
+            textModulesData=[{"id": "terms", "body": "Published design"}],
+            barcode={"value": "remote-qr"},
+            linksModuleData={"uris": [
+                {"id": "invite_friends", "uri": "https://old.example.test/invite/" + "a" * 24},
+                {"id": "support", "uri": "https://foreign.example.test/invite/" + "b" * 24},
+            ]},
+            appLinkData={"webAppLinkInfo": {"appTarget": {"targetUri": {
+                "uri": "https://old.example.test/invite/" + "a" * 24,
+            }}}},
+        )
+        self.business.referrals_enabled = False
+        db.session.commit()
+        service.http.responses = [FakeResponse(200, existing), EchoMutation()]
+        self.assertEqual(service.publish_referral_links(self.customer)["status"], "success")
+        self.assertEqual(service.http.calls[-1][2], {
+            "linksModuleData": {"uris": [existing["linksModuleData"]["uris"][1]]},
+            "appLinkData": None,
+        })
+
+    def test_referral_only_update_never_issues_missing_card(self):
+        service = self.service([FakeResponse(404)])
+        self.assertEqual(service.publish_referral_links(self.customer)["reason"], "not_issued")
+        self.assertEqual([call[0] for call in service.http.calls], ["GET"])
 
     def _existing_balance_object(self, service, *, balance="1 / 8", **overrides):
         return {

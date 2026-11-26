@@ -533,12 +533,20 @@ class ReconciliationPreviewPostgresTests(ReconciliationPreviewCases, unittest.Te
         self.assertEqual((row.status, row.claim_token), ("completed", None))
 
     def test_delayed_reconciliation_cannot_overtake_new_purchase_after_lock_loss(self):
+        self.check_delayed_wallet_write(redeem=False)
+
+    def test_delayed_worker_write_does_not_cover_later_redemption_after_lock_loss(self):
+        self.check_delayed_wallet_write(redeem=True)
+
+    def check_delayed_wallet_write(self, *, redeem):
         from app.services.google_wallet import GoogleWalletService
         from app.services.google_wallet_sync_service import process_pending_google_wallet_jobs
 
         customer = self.customer(current_stamps=4)
+        if redeem:
+            self.app.config["GOOGLE_WALLET_MODE"] = "real"
         first_tx = self.movement(customer)
-        candidate, = self.preview().candidates
+        candidate = None if redeem else self.preview().candidates[0]
         business_id = self.business_id
         self.app.config.update(GOOGLE_WALLET_MODE="real", GOOGLE_ISSUER_ID="123456")
         credentials = {
@@ -590,6 +598,8 @@ class ReconciliationPreviewPostgresTests(ReconciliationPreviewCases, unittest.Te
 
         def reconcile():
             with self.app.app_context():
+                if redeem:
+                    return process_pending_google_wallet_jobs(service=service())
                 return execute_google_wallet_reconciliation(candidate, business_id=business_id, service=service())
 
         with ThreadPoolExecutor(max_workers=1) as executor:
@@ -606,7 +616,7 @@ class ReconciliationPreviewPostgresTests(ReconciliationPreviewCases, unittest.Te
                     self.assertTrue(connection.execute(text(
                         "SELECT pg_terminate_backend(:pid, 5000)"
                     ), {"pid": pid}).scalar_one())
-                later_tx = self.movement(customer)
+                later_tx = self.movement(customer, tx_type="redeem" if redeem else "earn")
                 later_job = GoogleWalletSyncJob.query.filter_by(transaction_id=later_tx).one().id
                 independent = self.customer()
                 independent_tx = self.movement(independent)
@@ -621,18 +631,27 @@ class ReconciliationPreviewPostgresTests(ReconciliationPreviewCases, unittest.Te
                 self.assertEqual(len(writes), 2)
             finally:
                 release.set()
-            self.assertEqual(future.result(timeout=15)["reason"], "changed_during_provider_call")
+            initial_result = future.result(timeout=15)
+            if redeem:
+                self.assertEqual(initial_result, 1)
+            else:
+                self.assertEqual(initial_result["reason"], "changed_during_provider_call")
 
         db.session.expire_all()
         job = db.session.get(GoogleWalletSyncJob, later_job)
         self.assertEqual(job.status, "pending")
-        self.assertIsNone(GoogleWalletSyncJob.query.filter_by(transaction_id=first_tx).first())
+        first_job = GoogleWalletSyncJob.query.filter_by(transaction_id=first_tx).first()
+        if redeem:
+            self.assertEqual(first_job.status, "completed")
+        else:
+            self.assertIsNone(first_job)
         job.next_attempt_at = None
         db.session.commit()
         process_pending_google_wallet_jobs(service=service())
-        self.assertEqual(balances[target]["balance"]["string"], "6 / 8")
+        self.assertEqual(balances[target]["balance"]["string"], "4 / 8" if redeem else "6 / 8")
         self.assertEqual(Transaction.query.filter_by(customer_id=customer).count(), 2)
-        self.assertEqual(GoogleWalletSyncJob.query.filter_by(customer_id=customer).count(), 1)
+        self.assertEqual(GoogleWalletSyncJob.query.filter_by(customer_id=customer).count(), 2 if redeem else 1)
+        self.assertEqual(LoyaltyLedgerEntry.query.filter_by(customer_id=customer).count(), 3)
         self.assertEqual(db.session.get(GoogleWalletSyncJob, later_job).status, "completed")
 
     def make_app(self):

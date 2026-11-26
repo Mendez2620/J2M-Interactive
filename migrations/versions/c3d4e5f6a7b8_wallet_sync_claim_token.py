@@ -10,9 +10,13 @@ depends_on = None
 
 
 def upgrade():
-    columns = {item["name"] for item in sa.inspect(op.get_bind()).get_columns("google_wallet_sync_jobs")}
+    columns = {item["name"]: item for item in sa.inspect(op.get_bind()).get_columns("google_wallet_sync_jobs")}
     if "claim_token" not in columns:
         op.add_column("google_wallet_sync_jobs", sa.Column("claim_token", sa.String(32), nullable=True))
+    elif (not isinstance(columns["claim_token"]["type"], sa.String)
+          or columns["claim_token"]["type"].length != 32
+          or not columns["claim_token"]["nullable"]):
+        raise RuntimeError("Existing Wallet claim token column is incompatible")
 
 
 def downgrade():

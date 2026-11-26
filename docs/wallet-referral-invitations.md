@@ -17,3 +17,17 @@ Esto no demuestra que todos los pases ya instalados reciban el enlace. Google re
 ## Integración controlada
 
 Las migraciones son aditivas: `6a7b8c9d0e1f` relaja el check para identidades inactivas y `7b8c9d0e1f2a` crea la tabla tenant-scoped de capacidades, con RLS en PostgreSQL. El downgrade nuevo se bloquea si existe historial de capacidades. Para staging: verificar respaldo y head `5f6a7b8c9d0e`, fijar el migrador al SHA aprobado, ejecutar una sola vez `flask --app run.py db upgrade 7b8c9d0e1f2a`, validar tabla, FKs, índices, RLS, constraint y recuentos, y después desplegar web y worker. No relajar `EXPECTED_ALEMBIC_HEAD` ni ejecutar migraciones desde procesos de aplicación.
+# Actualización acotada de Google Wallet
+
+La actualización interna de referidos en una tarjeta existente se limita a
+`appLinkData` y a la entrada `invite_friends`. Un 404 no crea una tarjeta.
+Los orígenes HTTPS anteriores se reconocen únicamente cuando se declaran
+explícitamente en `GOOGLE_WALLET_REFERRAL_HISTORICAL_ORIGINS` (separados por coma)
+y la URL tiene la estructura conocida de invitación. El enlace de acción
+ajeno a J2M se conserva.
+
+La autorización local sigue siendo inmediata. Eliminar un enlace de una
+tarjeta no elimina copias ya compartidas. La ejecución automática desde
+cambios de consentimiento, configuración o vencimientos requiere todavía
+conectar el mecanismo durable de eventos; esta operación interna no
+garantiza por sí sola la propagación automática.
