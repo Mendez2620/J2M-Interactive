@@ -42,6 +42,8 @@ from app.models.customer_auth import (
     CustomerLinkingEnrollment, CustomerSession,
 )
 
+from . import google_wallet_write_reservation
+
 __all__ = [
     "db",
     "BusinessCategory",
