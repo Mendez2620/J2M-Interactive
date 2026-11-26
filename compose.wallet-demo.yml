@@ -5,7 +5,7 @@ x-demo-app: &demo-app
   image: j2m-interactive:wallet-demo-synthetic
   pull_policy: never
   env_file: .env.wallet-demo.example
-  environment:
+  environment: &demo-env
     DATABASE_URL: postgresql://j2m_test:j2m-demo-synthetic-only@db:5432/j2m_test
     GOOGLE_WALLET_MODE: disabled
     GOOGLE_WALLET_RECONCILIATION_ENABLED: "false"
@@ -38,6 +38,15 @@ services:
     command: [flask, --app, run.py, db, upgrade]
     healthcheck:
       disable: true
+  worker:
+    <<: *demo-app
+    command: [flask, --app, run.py, run-google-wallet-sync-worker]
+    environment:
+      <<: *demo-env
+      J2M_PROCESS_TYPE: google-wallet-worker
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
   app:
     <<: *demo-app
     depends_on:

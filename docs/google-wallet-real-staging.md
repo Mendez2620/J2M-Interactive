@@ -39,6 +39,16 @@ y el acceso de publicación comercial son decisiones independientes.
    red y credenciales. No reutilice workers, volúmenes ni recursos Wallet
    operativos. No solicite publicación comercial, cambie DNS o abra un túnel.
 
+El Compose incluye web y worker. Ambos esperan al migrador y la red interna
+bloquea el acceso a los proveedores. El comando
+`python -m scripts.check_wallet_demo_readiness` inspecciona el Compose en
+ejecucion y su esquema. Para revisar una propuesta futura, recibe por el
+entorno `J2M_DEMO_CREDENTIALS_FILE`, `J2M_DEMO_ISSUER`,
+`J2M_OPERATIONAL_ISSUER` y `J2M_DEMO_HTTPS_ORIGIN`. El archivo privado se
+lee localmente y no se monta. El codigo 1 exige corregir evidencia tecnica.
+El codigo 2 indica que los requisitos externos siguen pendientes. Ninguno de
+los resultados habilita Wallet.
+
 ## Afinidad y recuperación
 
 Ejecute `python -m scripts.probe_wallet_session_affinity` con
@@ -62,6 +72,12 @@ El diagnóstico de esquema ejecutable es `python -m scripts.check_wallet_referra
 Usa TLS con verificación de host y una transacción de solo lectura.
 
 ## Tarjetas e invitaciones históricas
+
+Ejecute `python -m scripts.inspect_wallet_referral_history --business-id ID`
+con `DATABASE_URL` en el entorno privado. La herramienta usa TLS verificado
+y una transaccion de solo lectura. Avance con `--after` y
+`--capability-after` segun los cursores devueltos. Use `--limit` entre 1
+y 100. La salida excluye credenciales, codigos y datos personales.
 
 Use el diagnóstico local de reconciliación por negocio y sus páginas de
 reservas y trabajos. Consulte el estado del participante y la vigencia de

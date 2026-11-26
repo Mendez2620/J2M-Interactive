@@ -65,7 +65,7 @@ def _https_ready(origin: str, context: ssl.SSLContext, timeout: float,
 
 
 def _verify_runtime(expected_image: str, web_container: str, worker_service: str,
-                    project: str, proxy_container: str, network_name: str, *, verify_image_id: bool = False) -> None:
+                    project: str, proxy_container: str, network_name: str) -> None:
     web = json.loads(_docker("inspect", web_container))[0]
     web_labels = web.get("Config", {}).get("Labels", {}) or {}
     web_network = (web.get("NetworkSettings", {}).get("Networks", {}) or {}).get(network_name, {})
@@ -85,15 +85,17 @@ def _verify_runtime(expected_image: str, web_container: str, worker_service: str
         raise RuntimeError("Debe existir exactamente un worker autorizado.")
     worker = json.loads(_docker("inspect", worker_ids[0]))[0]
     labels = worker.get("Config", {}).get("Labels", {}) or {}
+    worker_network = (worker.get("NetworkSettings", {}).get("Networks", {}) or {}).get(network_name, {})
     if (labels.get("com.docker.compose.project") != project
+            or labels.get("com.docker.compose.service") != worker_service
+            or not worker_network.get("IPAddress")
             or not worker.get("State", {}).get("Running")):
         raise RuntimeError("El worker activo no pertenece al proyecto autorizado.")
 
-    if verify_image_id:
-        image_id = _docker("image", "inspect", "--format", "{{.Id}}", expected_image).strip()
-        if (not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id)
-                or web.get("Image") != image_id or worker.get("Image") != image_id):
-            raise RuntimeError("La imagen inmutable no corresponde a web y worker.")
+    image_id = _docker("image", "inspect", "--format", "{{.Id}}", expected_image).strip()
+    if (not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id)
+            or web.get("Image") != image_id or worker.get("Image") != image_id):
+        raise RuntimeError("La imagen inmutable no corresponde a web y worker.")
 
     proxy = json.loads(_docker("inspect", proxy_container))[0]
     proxy_network = (proxy.get("NetworkSettings", {}).get("Networks", {}) or {}).get(network_name, {})
@@ -117,7 +119,7 @@ def recover_proxy(*, origin: str, expected_image: str, expected_revision: str,
     context = ssl.create_default_context(cafile=str(ca_file) if ca_file else None)
     actual_network = network_name or f"{project}_j2m-private"
     _verify_runtime(expected_image, web_container, worker_service, project, proxy_container,
-                    actual_network, verify_image_id=verify_only)
+                    actual_network)
 
     if _https_ready(safe_origin, context, request_timeout, expected_revision):
         print("Proxy HTTPS ya sirve la revisión aprobada; no fue necesario recargarlo.")

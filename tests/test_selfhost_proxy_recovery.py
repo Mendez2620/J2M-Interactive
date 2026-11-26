@@ -37,8 +37,12 @@ class SelfHostProxyRecoveryTests(unittest.TestCase):
     @staticmethod
     def _docker_result(*arguments, **_kwargs):
         network_info = {NETWORK: {"IPAddress": "172.23.0.3"}}
+        image_id = "sha256:" + "1" * 64
+        if arguments[:2] == ("image", "inspect"):
+            return image_id
         if arguments[:2] == ("inspect", "web"):
             return json.dumps([{
+                "Image": image_id,
                 "Config": {
                     "Image": "approved",
                     "Labels": {
@@ -53,7 +57,10 @@ class SelfHostProxyRecoveryTests(unittest.TestCase):
             return "worker-id"
         if arguments[:2] == ("inspect", "worker-id"):
             return json.dumps([{
-                "Config": {"Labels": {"com.docker.compose.project": "project"}},
+                "Image": image_id,
+                "Config": {"Labels": {"com.docker.compose.project": "project",
+                                      "com.docker.compose.service": "worker-service"}},
+                "NetworkSettings": {"Networks": network_info},
                 "State": {"Running": True},
             }])
         if arguments[:2] == ("inspect", "proxy"):
@@ -78,6 +85,22 @@ class SelfHostProxyRecoveryTests(unittest.TestCase):
             retry_seconds=0,
             request_timeout=1,
         )
+
+    def test_mutable_tag_cannot_hide_wrong_web_or_worker_image(self):
+        for container in ("web", "worker-id"):
+            def wrong_image(*arguments):
+                result = self._docker_result(*arguments)
+                if arguments[:2] == ("inspect", container):
+                    payload = json.loads(result)
+                    payload[0]["Image"] = "sha256:" + "2" * 64
+                    return json.dumps(payload)
+                return result
+
+            with self.subTest(container=container), patch.object(recovery, "_docker", side_effect=wrong_image), \
+                    patch.object(recovery, "_https_ready") as ready:
+                with self.assertRaisesRegex(RuntimeError, "imagen inmutable"):
+                    self._recover()
+                ready.assert_not_called()
 
     @patch.object(recovery, "_https_ready", return_value=True)
     @patch.object(recovery, "_docker")

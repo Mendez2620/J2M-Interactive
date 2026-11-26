@@ -356,6 +356,33 @@ class SelfHostInfrastructureTestCase(unittest.TestCase):
             self.assertIn(f"J2M_IMAGE=j2m-interactive:{previous}", env_file.read_text(encoding="utf-8"))
 
     @unittest.skipUnless(os.name == "nt", "PowerShell deploy integration only runs on Windows")
+    def test_unverified_rollback_stops_before_deployment_mutations(self):
+        previous, requested = "9" * 40, "a" * 40
+        with tempfile.TemporaryDirectory() as temporary:
+            env_file = Path(temporary) / ".env.selfhost"
+            original = f"J2M_IMAGE=j2m-interactive:{previous}\n"
+            env_file.write_text(original, encoding="utf-8")
+            deploy = ROOT / "scripts" / "selfhost_deploy_approved.ps1"
+            command = (
+                f"$newSha='{requested}'; $global:mutations=0; "
+                "function global:git { if ($args[0] -eq 'rev-parse') { Write-Output $newSha }; $global:LASTEXITCODE=0 }; "
+                "function global:docker { if ($args -contains 'up' -or $args -contains 'build') { $global:mutations++ }; "
+                "$global:LASTEXITCODE=0 }; "
+                "function global:python { if ($args -notcontains '--verify-only') { $global:mutations++ }; $global:LASTEXITCODE=1 }; "
+                f"try {{ & '{deploy}' -ApprovedSha $newSha -EnvFile '{env_file}' }} catch {{ "
+                "Write-Output ('MUTATIONS=' + $global:mutations); "
+                "Write-Output $_.Exception.Message; exit 7 }"
+            )
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+                capture_output=True, text=True, timeout=30, cwd=ROOT,
+            )
+            self.assertEqual(result.returncode, 7, result.stdout + result.stderr)
+            self.assertIn("MUTATIONS=0", result.stdout)
+            self.assertIn("No se pudo confirmar", result.stdout)
+            self.assertEqual(env_file.read_text(encoding="utf-8"), original)
+
+    @unittest.skipUnless(os.name == "nt", "PowerShell deploy integration only runs on Windows")
     def test_successful_deploy_requires_both_local_https_checks(self):
         previous = "9" * 40
         requested = "a" * 40

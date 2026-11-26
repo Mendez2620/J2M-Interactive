@@ -68,6 +68,7 @@ jobs:
           docker compose -f compose.wallet-demo.yml config --quiet
           trap 'docker compose -f compose.wallet-demo.yml down' EXIT
           docker compose -f compose.wallet-demo.yml up -d --wait --wait-timeout 120
+          python -c 'from scripts.check_wallet_demo_readiness import runtime; runtime()'
           docker compose -f compose.wallet-demo.yml exec -T app python -c "from urllib.request import urlopen; assert urlopen('http://127.0.0.1:8000/api/ready', timeout=5).status == 200"
       - name: Verify isolated Nginx upstream recovery and rollback
         run: python tests/nginx_recovery_ci.py
