@@ -48,11 +48,17 @@
     </ul>
     {% endif %}
     {% if preview.candidates %}
-    <ul class="space-y-2 text-sm">
+    <form method="post" action="{{ url_for('admin.review_business_wallet_reconciliation', business_id=business.id) }}" class="space-y-3 text-sm">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="after" value="{{ cursor }}">
+      <fieldset class="space-y-2">
+      <legend>Selecciona hasta 25 clientes para revisar.</legend>
       {% for candidate in preview.candidates %}
-      <li class="rounded-lg border border-slate-200 p-3">Cliente n.º {{ candidate.customer_id }} · {{ candidate.stamps if candidate.loyalty_type == 'stamps' else candidate.points }} {{ 'sellos' if candidate.loyalty_type == 'stamps' else 'puntos' }}</li>
+      <label class="block rounded-lg border border-slate-200 p-3"><input type="checkbox" name="candidate" value="{{ candidate.customer_id }}"> Cliente n.º {{ candidate.customer_id }} · {{ candidate.stamps if candidate.loyalty_type == 'stamps' else candidate.points }} {{ 'sellos' if candidate.loyalty_type == 'stamps' else 'puntos' }}</label>
       {% endfor %}
-    </ul>
+      </fieldset>
+      <button class="btn btn-secondary" type="submit">Revisar selección</button>
+    </form>
     {% else %}
     <p class="text-sm">No hay candidaturas elegibles en esta página.</p>
     {% endif %}

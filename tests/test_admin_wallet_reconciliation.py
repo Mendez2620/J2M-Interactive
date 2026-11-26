@@ -1,10 +1,12 @@
 import unittest
+from decimal import Decimal
 from unittest.mock import patch
 
 from app import create_app
 from tests.admin_session_fixture import issue_for
 from app.extensions import db
 from app.models import AccessAudit, Business, PlatformAdmin
+from app.services.google_wallet_reconciliation_plan import ReconciliationCandidate, ReconciliationPreview
 
 
 class AdminWalletReconciliationTests(unittest.TestCase):
@@ -87,3 +89,24 @@ class AdminWalletReconciliationTests(unittest.TestCase):
         self.assertIn("Resultado inconcluso", body)
         for private in ("Solicitados: 17", "private-request-key", "private-fingerprint"):
             self.assertNotIn(private, body)
+
+    def test_review_requires_csrf_and_is_bound_to_the_issuing_session(self):
+        self.authenticate()
+        target = self.path + "/reviews"
+        self.assertEqual(self.client.post(target, data={"candidate": "42"}).status_code, 400)
+        self.client.get(self.path)
+        with self.client.session_transaction() as session:
+            csrf = session["csrf_token"]
+        candidate = ReconciliationCandidate(
+            self.business_id, 42, 10, 20, None, Decimal("0"), 5, "stamps", 8, None,
+        )
+        preview = ReconciliationPreview(True, 1, {"eligible": 1}, (candidate,), None)
+        with patch("app.services.google_wallet_reconciliation_plan.preview_google_wallet_reconciliation",
+                   return_value=preview):
+            invalid = self.client.post(target, data={"candidate": "43", "csrf_token": csrf})
+            self.assertEqual(invalid.status_code, 409)
+            response = self.client.post(target, data={"candidate": "42", "csrf_token": csrf})
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(self.client.get(response.location).status_code, 200)
+        self.authenticate()
+        self.assertEqual(self.client.get(response.location).status_code, 404)

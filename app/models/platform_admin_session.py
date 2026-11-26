@@ -14,6 +14,19 @@ class PlatformAdminSession(db.Model):
     revoked_at = db.Column(db.DateTime)
 
 
+class AdminWalletReview(db.Model):
+    __tablename__ = "admin_wallet_reviews"
+
+    id = db.Column(db.String(32), primary_key=True)
+    session_digest = db.Column(db.String(64), db.ForeignKey("platform_admin_sessions.token_digest"),
+                               nullable=False)
+    business_id = db.Column(db.Integer, db.ForeignKey("businesses.id"), nullable=False, index=True)
+    candidate_ids = db.Column(db.JSON, nullable=False)
+    fingerprint = db.Column(db.String(64), nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False)
+    expires_at = db.Column(db.DateTime, nullable=False)
+
+
 @event.listens_for(PlatformAdmin, "after_update")
 def revoke_sessions_on_admin_security_change(mapper, connection, admin):
     state = inspect(admin)

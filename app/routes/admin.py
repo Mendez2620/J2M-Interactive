@@ -1,5 +1,5 @@
 from datetime import date, datetime
-from flask import Blueprint, abort, jsonify, make_response, render_template, request, send_file, redirect, current_app
+from flask import Blueprint, abort, jsonify, make_response, render_template, request, send_file, redirect, current_app, session, url_for
 from io import BytesIO
 import math
 import re
@@ -857,8 +857,68 @@ def business_wallet_reconciliation(business_id):
         status = 503
     response = make_response(render_template(
         "admin/wallet_reconciliation.html", business=business, audit=audit,
-        preview=preview, reservations=counts, history=history, available=status == 200,
+        preview=preview, reservations=counts, history=history, available=status == 200, cursor=int(cursor),
     ), status)
+    response.headers["Cache-Control"] = "no-store, private"
+    return response
+
+
+@admin_bp.post("/business/<int:business_id>/wallet/reconciliation/reviews")
+@platform_admin_required
+def review_business_wallet_reconciliation(business_id):
+    from dataclasses import asdict
+    from datetime import timedelta
+    from json import dumps
+    from uuid import uuid4
+    from app.models.platform_admin_session import AdminWalletReview
+    from app.security import validate_csrf
+    from app.services.google_wallet_reconciliation_plan import preview_google_wallet_reconciliation
+    from app.services.platform_admin_session import digest, now
+
+    if not validate_csrf():
+        abort(400)
+    raw_ids = request.form.getlist("candidate")
+    raw_cursor = request.form.get("after", "0")
+    if not 1 <= len(raw_ids) <= 25 or any(
+        not item.isascii() or not item.isdecimal() or len(item) > 10 or int(item) > 2147483647
+        for item in [raw_cursor, *raw_ids]
+    ):
+        abort(400)
+    ids = {int(item) for item in raw_ids}
+    if 0 in ids or len(ids) != len(raw_ids):
+        abort(400)
+    if db.session.get(Business, business_id) is None:
+        abort(404)
+    preview = preview_google_wallet_reconciliation(business_id, limit=25, after_customer_id=int(raw_cursor))
+    selected = [item for item in preview.candidates if item.customer_id in ids]
+    if not preview.business_active or len(selected) != len(ids):
+        abort(409, "La selección ya no está disponible. Actualiza la vista previa.")
+    created = now()
+    review = AdminWalletReview(
+        id=uuid4().hex, business_id=business_id,
+        session_digest=digest(session["platform_admin_session"]),
+        candidate_ids=sorted(ids),
+        fingerprint=digest(dumps([asdict(item) for item in selected], sort_keys=True, default=str)),
+        created_at=created, expires_at=created + timedelta(minutes=5),
+    )
+    db.session.add(review)
+    db.session.commit()
+    return redirect(url_for("admin.get_business_wallet_review", business_id=business_id, review_id=review.id), 303)
+
+
+@admin_bp.get("/business/<int:business_id>/wallet/reconciliation/reviews/<review_id>")
+@platform_admin_required
+def get_business_wallet_review(business_id, review_id):
+    from app.models.platform_admin_session import AdminWalletReview
+    from app.services.platform_admin_session import digest, now
+
+    review = AdminWalletReview.query.filter_by(
+        id=review_id, business_id=business_id,
+        session_digest=digest(session["platform_admin_session"]),
+    ).first_or_404()
+    business = db.session.get(Business, business_id)
+    response = make_response(render_template("admin/wallet_review.html", business=business,
+                                             count=len(review.candidate_ids), expired=review.expires_at <= now()))
     response.headers["Cache-Control"] = "no-store, private"
     return response
 
