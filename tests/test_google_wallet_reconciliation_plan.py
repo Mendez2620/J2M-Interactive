@@ -4,6 +4,8 @@ import os
 import tempfile
 import unittest
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
@@ -496,14 +498,117 @@ class ReconciliationPreviewSQLiteTests(ReconciliationPreviewCases, unittest.Test
 
 @unittest.skipUnless(os.getenv("TEST_POSTGRES_URL"), "synthetic PostgreSQL CI not configured")
 class ReconciliationPreviewPostgresTests(ReconciliationPreviewCases, unittest.TestCase):
+    def test_delayed_reconciliation_cannot_overtake_new_purchase_after_lock_loss(self):
+        from app.services.google_wallet import GoogleWalletService
+        from app.services.google_wallet_sync_service import process_pending_google_wallet_jobs
+
+        customer = self.customer(current_stamps=4)
+        first_tx = self.movement(customer)
+        candidate, = self.preview().candidates
+        business_id = self.business_id
+        self.app.config.update(GOOGLE_WALLET_MODE="real", GOOGLE_ISSUER_ID="123456")
+        credentials = {
+            "type": "service_account", "project_id": "synthetic",
+            "client_email": "wallet@synthetic.iam.gserviceaccount.com",
+            "private_key": GoogleWalletService._generate_dev_private_key(),
+            "token_uri": "https://example.invalid/token",
+        }
+        started, release = Event(), Event()
+        writes = []
+        balances = {}
+        engine = db.engine
+
+        class Response:
+            status_code = 200
+            content = b"synthetic"
+
+            def __init__(self, body):
+                self.body = body
+
+            def json(self):
+                return self.body
+
+        class Provider:
+            def request(self, method, url, *, json, timeout, **kwargs):
+                identifier = url.rsplit("/", 1)[-1]
+                if method == "PATCH":
+                    balance = json["loyaltyPoints"]["balance"]["string"]
+                    writes.append((identifier, balance))
+                    if balance == "5 / 8":
+                        started.set()
+                        if not release.wait(20):
+                            raise RuntimeError("Synthetic provider timed out")
+                    balances[identifier] = json["loyaltyPoints"]
+                elif method != "GET":
+                    raise AssertionError("Reconciliation must not issue a card")
+                return Response({
+                    "id": identifier, "classId": f"123456.business_{business_id}",
+                    "state": "active",
+                    "loyaltyPoints": balances.get(identifier, {
+                        "label": "Sellos", "balance": {"string": "4 / 8"},
+                    }),
+                })
+
+        provider = Provider()
+
+        def service():
+            return GoogleWalletService(mode="real", credentials_info=credentials, http_session=provider)
+
+        def reconcile():
+            with self.app.app_context():
+                return execute_google_wallet_reconciliation(candidate, business_id=business_id, service=service())
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(reconcile)
+            try:
+                self.assertTrue(started.wait(15), future.exception() if future.done() else None)
+                with engine.begin() as connection:
+                    pid = connection.execute(text(
+                        "SELECT locks.pid FROM pg_locks AS locks JOIN pg_stat_activity AS activity "
+                        "ON activity.pid=locks.pid WHERE locktype='advisory' AND granted "
+                        "AND classid=1246907724 AND objid=:customer AND objsubid=2 "
+                        "AND activity.datname=current_database() AND activity.application_name=:app"
+                    ), {"customer": customer, "app": self.synthetic_schema}).scalar_one()
+                    self.assertTrue(connection.execute(text(
+                        "SELECT pg_terminate_backend(:pid, 5000)"
+                    ), {"pid": pid}).scalar_one())
+                later_tx = self.movement(customer)
+                job = GoogleWalletSyncJob.query.filter_by(transaction_id=later_tx).one_or_none()
+                later_job = job.id if job else self.job(customer, later_tx, "pending")
+                independent = self.customer()
+                independent_tx = self.movement(independent)
+                if not GoogleWalletSyncJob.query.filter_by(transaction_id=independent_tx).first():
+                    self.job(independent, independent_tx, "pending")
+                db.session.remove()
+                process_pending_google_wallet_jobs(service=service())
+                target = f"123456.business_{business_id}_customer_{customer}"
+                self.assertEqual([value for key, value in writes if key == target], ["5 / 8"])
+                self.assertEqual(len(writes), 2)
+            finally:
+                release.set()
+            self.assertEqual(future.result(timeout=15)["reason"], "changed_during_provider_call")
+
+        db.session.expire_all()
+        job = db.session.get(GoogleWalletSyncJob, later_job)
+        self.assertEqual(job.status, "pending")
+        self.assertIsNone(GoogleWalletSyncJob.query.filter_by(transaction_id=first_tx).first())
+        job.next_attempt_at = None
+        db.session.commit()
+        process_pending_google_wallet_jobs(service=service())
+        self.assertEqual(balances[target]["balance"]["string"], "6 / 8")
+        self.assertEqual(Transaction.query.filter_by(customer_id=customer).count(), 2)
+        self.assertEqual(GoogleWalletSyncJob.query.filter_by(customer_id=customer).count(), 1)
+        self.assertEqual(db.session.get(GoogleWalletSyncJob, later_job).status, "completed")
+
     def make_app(self):
         url = make_url(os.environ["TEST_POSTGRES_URL"])
         if (url.get_backend_name() != "postgresql" or url.host not in {"127.0.0.1", "localhost"}
-                or url.database != "j2m_test"):
+                or url.database != "j2m_test" or url.query):
             self.skipTest("requires the dedicated loopback j2m_test PostgreSQL service")
         # SQLAlchemy 2.1 defaults to psycopg 3; the project pins psycopg2.
         url = url.set(drivername="postgresql+psycopg2")
         schema = "wallet_preview_" + uuid.uuid4().hex
+        self.synthetic_schema = schema
         admin = create_engine(url)
         self.addCleanup(admin.dispose)
         with admin.begin() as connection:
@@ -512,7 +617,7 @@ class ReconciliationPreviewPostgresTests(ReconciliationPreviewCases, unittest.Te
             with admin.begin() as connection:
                 connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
         self.addCleanup(remove_schema)
-        options = {"connect_args": {"options": f"-csearch_path={schema}"}}
+        options = {"connect_args": {"options": f"-csearch_path={schema}", "application_name": schema}}
         with patch.object(TestingConfig, "SQLALCHEMY_DATABASE_URI", url.render_as_string(hide_password=False)), \
              patch.object(TestingConfig, "SQLALCHEMY_ENGINE_OPTIONS", options):
             return create_app("testing")

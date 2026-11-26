@@ -315,11 +315,12 @@ class GoogleWalletRealTestCase(unittest.TestCase):
 
     def test_issuance_and_worker_interleaving_leaves_balance_to_worker_only(self):
         service = self.service([
-            FakeResponse(200, {"updated": True}),
+            FakeResponse(200, self._existing_balance_object(self.service([]), balance="3 / 8")),
             FakeResponse(200, {"id": "class"}), FakeResponse(200, {"id": "class"}),
             FakeResponse(200, {"id": "object"}), FakeResponse(200, {"id": "object"}),
         ])
         self.customer.current_stamps = 3
+        db.session.commit()
         worker_result = service.update_loyalty_object(self.customer)
         service.create_jwt_pass(self.customer)
         self.assertEqual(worker_result["status"], "success")
@@ -342,11 +343,12 @@ class GoogleWalletRealTestCase(unittest.TestCase):
         self.assertNotEqual(service.get_object_id(self.customer), service.get_object_id(other_customer))
 
     def test_updates_points_stamps_and_classifies_api_failures(self):
-        success = self.service([FakeResponse(200, {"ok": True})])
+        success = self.service([FakeResponse(200, self._existing_balance_object(self.service([]), balance="2 / 8"))])
         result = success.update_loyalty_object(self.customer)
         self.assertEqual(result["status"], "success")
         self.assertEqual(success.http.calls[0][2]["loyaltyPoints"]["balance"]["string"], "2 / 8")
         self.business.loyalty_type = "points"; self.customer.current_points = 50
+        db.session.commit()
         points = self.service([FakeResponse(200, {"ok": True})]); points.update_loyalty_object(self.customer)
         self.assertEqual(points.http.calls[0][2]["loyaltyPoints"]["balance"]["string"], "50 pts")
         for status, expected in ((400, "error"), (401, "error"), (403, "error"), (429, "retry")):
@@ -376,6 +378,28 @@ class GoogleWalletRealTestCase(unittest.TestCase):
         second = self.service([])
         self.assertEqual(second.publish_loyalty_object_metadata(self.customer)["status"], "retry")
         self.assertEqual(second.http.calls, [])
+
+    def test_class_uncertainty_does_not_block_existing_object_balance(self):
+        from app.services.google_wallet_write_reservation import authorized_write
+
+        service = self.service([])
+        with service.write_scope(self.business, class_only=True):
+            authorized_write(db.engine, f"loyaltyClass/{service.get_class_id(self.business)}")
+        service.http.responses = [
+            FakeResponse(200, self._existing_balance_object(service, balance="2 / 8")),
+        ]
+        self.assertEqual(service.update_loyalty_object(self.customer)["status"], "success")
+        self.assertEqual([call[0] for call in service.http.calls], ["PATCH"])
+
+    def test_worker_rejects_success_for_another_resource(self):
+        job = self._job("wrong-provider-resource")
+        service = self.service([])
+        service.http.responses = [FakeResponse(200, self._existing_balance_object(
+            service, id="123456.business_1_customer_999", balance="2 / 8",
+        ))]
+        process_pending_google_wallet_jobs(service=service)
+        db.session.refresh(job)
+        self.assertEqual(job.status, "pending")
 
     def _existing_balance_object(self, service, *, balance="1 / 8", **overrides):
         return {
@@ -491,7 +515,7 @@ class GoogleWalletRealTestCase(unittest.TestCase):
             FakeResponse(200, {"id": "class"}),
             FakeResponse(404),
             FakeResponse(200, {"id": "object"}),
-            FakeResponse(200, {"updated": True}),
+            FakeResponse(200, self._existing_balance_object(self.service([]), balance="2 / 8")),
         ])
         result = service.update_loyalty_object(self.customer)
         self.assertEqual(result["status"], "success")
@@ -607,7 +631,7 @@ class GoogleWalletRealTestCase(unittest.TestCase):
         db.session.flush()
         invalid.business_id = other_business.id
         db.session.commit()
-        service = self.service([FakeResponse(200, {"updated": True})])
+        service = self.service([FakeResponse(200, self._existing_balance_object(self.service([]), balance="2 / 8"))])
         self.assertEqual(process_pending_google_wallet_jobs(service=service), 2)
         db.session.refresh(valid)
         db.session.refresh(invalid)

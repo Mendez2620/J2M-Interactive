@@ -11,7 +11,7 @@ depends_on = None
 TABLE = "google_wallet_write_reservations"
 
 
-def upgrade():
+def _create_table():
     op.create_table(
         TABLE,
         sa.Column("operation_id", sa.String(32), primary_key=True),
@@ -45,6 +45,29 @@ def upgrade():
         ),
     )
     op.create_index("ix_wallet_reservation_business_state", TABLE, ["business_id", "state", "updated_at"])
+
+
+def upgrade():
+    inspector = sa.inspect(op.get_bind())
+    if not inspector.has_table(TABLE):
+        _create_table()
+    else:
+        # Older bootstrap migrations can start from current db.create_all().
+        # Verify its constraints instead of accepting an unrelated partial table.
+        columns = {column["name"] for column in inspector.get_columns(TABLE)}
+        checks = {check["name"] for check in inspector.get_check_constraints(TABLE)}
+        uniques = {tuple(item["column_names"]) for item in inspector.get_unique_constraints(TABLE)}
+        foreign_keys = {item["name"] for item in inspector.get_foreign_keys(TABLE)}
+        indexes = {item["name"] for item in inspector.get_indexes(TABLE)}
+        if (columns != {"operation_id", "owner_token", "issuer", "kind", "resource_id",
+                        "business_id", "customer_id", "state", "active_slot", "created_at",
+                        "updated_at", "started_at", "remote_resolved_at", "remote_status"}
+                or not {"ck_wallet_reservation_subject", "ck_wallet_reservation_active",
+                        "ck_wallet_reservation_status_code"} <= checks
+                or ("issuer", "kind", "resource_id", "active_slot") not in uniques
+                or "fk_wallet_reservation_customer_tenant" not in foreign_keys
+                or "ix_wallet_reservation_business_state" not in indexes):
+            raise RuntimeError("Existing Wallet reservation schema is incomplete")
     if op.get_bind().dialect.name == "postgresql":
         op.execute(f"ALTER TABLE {TABLE} ENABLE ROW LEVEL SECURITY")
         op.execute(f"REVOKE ALL ON TABLE {TABLE} FROM PUBLIC")

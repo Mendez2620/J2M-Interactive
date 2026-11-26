@@ -9,6 +9,7 @@ from app.extensions import db
 from app.models import Business, Customer, GoogleWalletPublication, GoogleWalletPublicationJob
 from app.services.google_wallet import GoogleWalletService
 from app.services.google_wallet_sync_service import _business_class_lock, _customer_lock, _now
+from app.services.google_wallet_write_reservation import WalletWriteBlocked
 
 
 LEASE_SECONDS = 300
@@ -247,6 +248,7 @@ def _publication_is_owned(publication_id, token, design_version):
         GoogleWalletPublication.active_key == "active",
         GoogleWalletPublication.lease_token == token,
         Business.wallet_design_version == design_version,
+        Business.is_active.is_(True),
     ).first() is not None
 
 
@@ -262,6 +264,7 @@ def _job_is_owned(job_id, token, publication_id, publication_token):
         GoogleWalletPublication.status == "processing",
         GoogleWalletPublication.lease_token == publication_token,
         GoogleWalletPublication.active_key == "active",
+        GoogleWalletPublicationJob.business_id == GoogleWalletPublication.business_id,
     ).first() is not None
 
 
@@ -379,10 +382,11 @@ def process_pending_wallet_publications(limit=50, service=None):
                         publication_id_value, publication_token, design_version_value,
                     )
                 )
-                prepared_class = (
-                    service.create_or_update_class(business)
-                    if owned and isinstance(service, GoogleWalletService) else None
-                )
+                def prepare_class():
+                    db.session.expire_all()
+                    if not _publication_is_owned(publication_id_value, publication_token, design_version_value):
+                        raise WalletWriteBlocked("Publication is no longer current")
+                    return service.create_or_update_class(business)
                 db.session.rollback()
                 if not owned:
                     if business is None or current_design_version != design_version_value:
@@ -390,8 +394,8 @@ def process_pending_wallet_publications(limit=50, service=None):
                         db.session.commit()
                     continue
                 result = (
-                    service.publish_loyalty_class(business, prepared=prepared_class)
-                    if prepared_class is not None else service.publish_loyalty_class(business)
+                    service.publish_loyalty_class(business, prepared=prepare_class)
+                    if isinstance(service, GoogleWalletService) else service.publish_loyalty_class(business)
                 )
                 if result.get("status") in {"success", "mock"}:
                     GoogleWalletPublication.query.filter(
@@ -436,18 +440,24 @@ def process_pending_wallet_publications(limit=50, service=None):
                              synchronize_session=False)
                     db.session.commit(); continue
                 customer = db.session.get(Customer, job.customer_id)
-                prepared_object = (
-                    service.create_loyalty_object(customer)
-                    if customer is not None and isinstance(service, GoogleWalletService) else None
-                )
+                owner_publication_id, owner_version = publication.id, publication.design_version
+
+                def prepare_object():
+                    db.session.expire_all()
+                    if (not _job_is_owned(job_id, job_token, owner_publication_id, publication_token)
+                            or not _publication_is_owned(owner_publication_id, publication_token, owner_version)
+                            or customer.business_id != job.business_id):
+                        raise WalletWriteBlocked("Publication job is no longer current")
+                    return service.create_loyalty_object(customer)
+
                 owned = _job_is_owned(job.id, job_token, publication.id, publication_token)
                 db.session.rollback()
                 if not owned:
                     db.session.rollback(); continue
                 if customer is None:
                     result = {"status": "error", "status_code": None}
-                elif prepared_object is not None:
-                    result = service.publish_loyalty_object_metadata(customer, prepared=prepared_object)
+                elif isinstance(service, GoogleWalletService):
+                    result = service.publish_loyalty_object_metadata(customer, prepared=prepare_object)
                 else:
                     result = service.publish_loyalty_object_metadata(customer)
                 _store_remote_result(GoogleWalletPublicationJob, job.id, job_token, result)

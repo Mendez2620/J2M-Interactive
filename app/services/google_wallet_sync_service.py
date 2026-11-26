@@ -2,7 +2,7 @@ import json
 import logging
 import threading
 import time
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import case, func, or_, text
@@ -92,8 +92,11 @@ def _business_class_lock(business_id):
     return _resource_lock(_CLASS_ADVISORY_NAMESPACE, business_id)
 
 
-def _record_result(job_ids, result, now):
+def _record_result(job_ids, result, now, *, claim=None):
     status = result.get("status")
+    query = GoogleWalletSyncJob.query.filter(GoogleWalletSyncJob.id.in_(job_ids))
+    if claim is not None:
+        query = query.filter_by(status="processing", locked_at=claim)
     values = {"locked_at": None, "last_status_code": result.get("status_code")}
     if status == "success":
         values.update(status="completed", last_status_code=None, next_attempt_at=None)
@@ -107,9 +110,7 @@ def _record_result(job_ids, result, now):
         delay = min(3600, 30 * (2 ** min(max_attempts + 1, 6)))
         values.update(status="pending", attempts=GoogleWalletSyncJob.attempts + 1,
                       next_attempt_at=now + timedelta(seconds=delay))
-    GoogleWalletSyncJob.query.filter(GoogleWalletSyncJob.id.in_(job_ids)).update(
-        values, synchronize_session=False
-    )
+    query.update(values, synchronize_session=False)
 
 
 def process_pending_google_wallet_jobs(limit=50, service=None):
@@ -159,15 +160,15 @@ def process_pending_google_wallet_jobs(limit=50, service=None):
                 valid_set = set(valid_ids)
                 invalid_ids = [job_id for job_id in job_ids if job_id not in valid_set]
                 if valid_ids:
+                    GoogleWalletSyncJob.query.filter(
+                        GoogleWalletSyncJob.id.in_(valid_ids), *_eligible(now),
+                    ).update({"status": "processing", "locked_at": now}, synchronize_session=False)
+                    db.session.commit()
                     try:
-                        scope = (service.write_scope(customer, include_class=True)
-                                 if isinstance(service, GoogleWalletService) else nullcontext())
-                        with scope:
-                            db.session.refresh(customer)
-                            result = service.update_loyalty_object(customer)
+                        result = service.update_loyalty_object(customer)
                     except Exception:
                         result = {"status": "retry", "status_code": None}
-                    _record_result(valid_ids, result, now)
+                    _record_result(valid_ids, result, now, claim=now)
                 if invalid_ids:
                     _record_result(invalid_ids, {"status": "error", "status_code": None}, now)
                     logging.getLogger(__name__).warning(

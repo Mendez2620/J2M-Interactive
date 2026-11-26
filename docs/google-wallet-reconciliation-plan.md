@@ -50,3 +50,7 @@ Before a rollout or restore, disable Google Wallet and drain every writer
 running older code. Keep Google Wallet disabled after restoring an older
 database until the remote state and any potentially lost reservations have been
 reviewed. There is no administrative override for uncertain writes.
+
+Reservation history references its business and, for objects, its customer.
+The foreign keys prevent physically deleting those records while reservation
+history exists. Suspension and ordinary loyalty transactions remain available.

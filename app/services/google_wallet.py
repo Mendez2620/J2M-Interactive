@@ -15,6 +15,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from flask import current_app, has_app_context
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import inspect
 from app.extensions import db
 from app.services.google_wallet_write_reservation import WalletWriteBlocked, authorized_write, writing
 from app.media_storage import absolute_branding_url
@@ -201,7 +202,7 @@ class GoogleWalletService:
             business_id=customer.business_id,
             customer_id=customer.id,
             participant_type="customer_ambassador",
-        ).first()
+        ).populate_existing().first()
         if not participant or participant.revoked_at is not None:
             return None
         if participant.currently_eligible():
@@ -388,7 +389,7 @@ class GoogleWalletService:
         """Publish shared design without changing the stable class identity."""
         if self.mode == "disabled":
             return {"status": "error", "status_code": None}
-        body = prepared or self.create_or_update_class(business)
+        body = (prepared() if callable(prepared) else prepared) or self.create_or_update_class(business)
         if self.mode == "mock":
             return {"status": "mock", "class_id": body["id"], "patch_body": body}
         try:
@@ -402,7 +403,7 @@ class GoogleWalletService:
         """Publish J2M-owned metadata while preserving balance, barcode and foreign modules."""
         if self.mode == "disabled":
             return {"status": "error", "status_code": None}
-        desired = prepared or self.create_loyalty_object(customer)
+        desired = (prepared() if callable(prepared) else prepared) or self.create_loyalty_object(customer)
         object_id = desired["id"]
         if self.mode == "mock":
             return {"status": "mock", "object_id": object_id}
@@ -426,6 +427,12 @@ class GoogleWalletService:
     def ensure_resources(self, customer):
         if self.mode != "real":
             return
+        state = inspect(customer, raiseerr=False)
+        if state is not None and state.persistent:
+            db.session.refresh(customer)
+            db.session.refresh(customer.business)
+        if not customer.business.is_active:
+            raise GoogleWalletConfigurationError("El negocio no está activo.")
         loyalty_class = self.create_or_update_class(customer.business)
         if "programLogo" not in loyalty_class:
             raise GoogleWalletConfigurationError("Google Wallet real requiere un logotipo HTTPS público.")
@@ -528,29 +535,38 @@ class GoogleWalletService:
             # A malformed response is not proof that a remote write succeeded.
             return {"status": "retry", "reason": "invalid_provider_response"}
 
-    @_coordinate(include_class=True)
-    def update_loyalty_object(self, customer):
+    @_coordinate()
+    def _update_existing_balance(self, customer):
         if self.mode == "disabled":
             return {"status": "disabled"}
+        state = inspect(customer, raiseerr=False)
+        if self.mode == "real" and state is not None and state.persistent:
+            db.session.refresh(customer)
+            db.session.refresh(customer.business)
         patch_body = {"loyaltyPoints": self._loyalty_points(customer)}
         if self.mode == "mock":
             return {"status": "mock", "object_id": self.get_object_id(customer), "patch_body": patch_body}
         try:
             object_id = self.get_object_id(customer)
             result = self._request("PATCH", f"loyaltyObject/{quote(object_id, safe='')}", body=patch_body)
+            if (result.get("id") != object_id
+                    or result.get("classId") != self.get_class_id(customer.business)
+                    or result.get("loyaltyPoints") != patch_body["loyaltyPoints"]):
+                return {"status": "retry", "reason": "balance_unconfirmed"}
             return {"status": "success", "object_id": object_id, "data": result}
         except GoogleWalletAPIError as exc:
-            if exc.status_code == 404:
-                try:
-                    self.ensure_resources(customer)
-                    object_id = self.get_object_id(customer)
-                    result = self._request(
-                        "PATCH", f"loyaltyObject/{quote(object_id, safe='')}",
-                        body=patch_body,
-                    )
-                    return {"status": "success", "object_id": object_id, "data": result}
-                except GoogleWalletAPIError as recovery_error:
-                    exc = recovery_error
-                except GoogleWalletConfigurationError:
-                    return {"status": "error", "status_code": None}
             return {"status": "retry" if exc.retryable else "error", "status_code": exc.status_code}
+
+    def update_loyalty_object(self, customer):
+        result = self._update_existing_balance(customer)
+        if result.get("status_code") != 404:
+            return result
+        # The definitive 404 closed the object-only scope. Recovery acquires
+        # class then object, and reads the object again before attempting creation.
+        try:
+            self.ensure_resources(customer)
+        except GoogleWalletAPIError as exc:
+            return {"status": "retry" if exc.retryable else "error", "status_code": exc.status_code}
+        except GoogleWalletConfigurationError:
+            return {"status": "error", "status_code": None}
+        return self._update_existing_balance(customer)
