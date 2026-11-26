@@ -76,6 +76,8 @@ jobs:
           after=$("${demo[@]}" exec -T db psql -U j2m_test -d j2m_test -Atc 'SELECT system_identifier FROM pg_control_system()')
           test -n "$before" && test "$before" = "$after"
           "${demo[@]}" exec -T app python -c "from urllib.request import urlopen; assert urlopen('http://127.0.0.1:8000/api/ready', timeout=5).status == 200"
+      - name: Verify restricted Wallet egress against synthetic TLS endpoints
+        run: python tests/wallet_egress_ci.py
       - name: Verify isolated Nginx upstream recovery and rollback
         run: python tests/nginx_recovery_ci.py
       - name: Verify joint PostgreSQL and media restoration in isolated Docker resources
