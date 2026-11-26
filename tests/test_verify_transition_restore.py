@@ -39,3 +39,11 @@ class TransitionRestoreTests(unittest.TestCase):
             restore.return_value = v.backup.RestoreReport("unexpected", 1, 6, 1, 2)
             with self.assertRaises(RuntimeError):
                 v.verify_exact_restore(index, key, digest, image)
+
+
+    def test_rejects_docker_destination_override_before_inspecting(self):
+        with patch.dict(v.os.environ, {"DOCKER_HOST": "tcp://example.invalid:2376"}), \
+                patch.object(v, "command") as docker:
+            with self.assertRaisesRegex(ValueError, "Docker environment override"):
+                v.verify_exact_restore(Path("unread"), Path("unread"), "b" * 64, "sha256:" + "c" * 64)
+            docker.assert_not_called()

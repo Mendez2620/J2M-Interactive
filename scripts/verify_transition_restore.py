@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -19,6 +20,9 @@ from scripts.selfhost_transition_preflight import LEGACY_TAG, inspect_backup, im
 def verify_exact_restore(index, key_file, expected_hash, expected_image):
     if not re.fullmatch(r"[0-9a-f]{64}", expected_hash) or not IMAGE_ID.fullmatch(expected_image):
         raise ValueError("Invalid expected identities")
+    if any(os.environ.get(name) for name in ("DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_TLS",
+                                               "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "DOCKER_CONFIG")):
+        raise ValueError("Unexpected Docker environment override")
     if command("docker", "context", "show") != "desktop-linux":
         raise ValueError("Expected local Docker Desktop")
     if index.parent.name != "hourly" or index.parent.parent.name != "selfhost-backups":
@@ -41,6 +45,8 @@ def verify_exact_restore(index, key_file, expected_hash, expected_image):
             "image_id": expected_image, "revision": report.alembic_revision,
             "businesses": report.businesses, "customers": report.customers,
             "staff": report.staff, "transactions": report.transactions,
+            "ledger_entries": report.ledger_entries, "wallet_sync_jobs": report.wallet_sync_jobs,
+            "media_files_verified": report.media_files_verified,
             "transition_authorized": False}
 
 

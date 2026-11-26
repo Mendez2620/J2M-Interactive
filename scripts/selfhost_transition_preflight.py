@@ -259,8 +259,10 @@ def main():
         report["legacy_https"] = observation(lambda: attest_legacy_https(read_config(args.env_file)))
     print(json.dumps(report, indent=2))
     # This command is inventory only. Even complete observations are not GO.
-    return 2 if all(report[k]["status"] == "observed" for k in (
-        "checkout", "runtime", "target_image", "integral_backup", "disk")) else 1
+    required = ["checkout", "runtime", "target_image", "integral_backup", "disk"]
+    if args.attest_legacy_https:
+        required.append("legacy_https")
+    return 2 if all(report[key]["status"] == "observed" for key in required) else 1
 
 
 if __name__ == "__main__":

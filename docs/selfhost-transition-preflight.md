@@ -109,3 +109,35 @@ Si la exclusión no se puede demostrar, no hay migración. Una inspección
 puntual de Docker, del Programador o de pg_stat_activity no acredita
 esa barrera. El procedimiento desplegable aún debe integrar la barrera,
 el diario y la recuperación con comprobaciones en vivo.
+
+## Hallazgos de la comprobación autorizada
+
+El 26 de noviembre de 2026, se cotejaron en memoria las variables locales y
+los respaldos DPAPI de Railway. El web, el worker y el migrador históricos
+usaban el mismo usuario y contraseña de base que la configuración local.
+El preflight acredita que web y worker locales usan esa misma conexión.
+Esto no prueba el estado actual de servicios externos. Debe verificarse
+por separado qué rol usa la tarea efectiva de respaldo y cada consumidor
+externo. No se puede bloquear la identidad compartida y seguir migrando
+con ella. Tampoco se debe revocar un rol administrado sin un plan aprobado.
+
+Para diseñar la barrera, solicite una inspección de solo lectura de
+`pg_roles` (propiedades y capacidad de login), `pg_auth_members` (membresías),
+privilegios efectivos sobre esquema/tablas y agregados por rol en
+`pg_stat_activity` (sin texto SQL, IP ni datos personales). Coteje localmente
+la identidad de conexión usada por cada tarea y confirme por separado si
+Railway conserva escritores. Separe primero escritores y migrador con
+roles y permisos mínimos. La pausa debe impedir conexiones nuevas de
+escritores y drenar las existentes, incluidas las persistentes del pooler.
+Hasta demostrar ambas condiciones, no existe una barrera efectiva.
+
+### Nginx
+
+`selfhost-legacy-attestation.nginx.conf` contiene el formato candidato.
+Instale el mapa y formato en `http` y añada el access_log condicional
+al servidor HTTPS. Mantenga el registro existente. Valide el archivo con
+`nginx -t`, conserve la configuración anterior para recuperación,
+recargue de forma graciosa solo con autorización y ejecute el preflight de
+atestación. Si no se vincula el nonce al upstream en ambas rutas, restaure
+la configuración original y valide antes de recargar. El log adicional usa
+la ruta sin query y carece de cookies, cuerpos y tokens.

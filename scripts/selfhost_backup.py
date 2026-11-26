@@ -1198,6 +1198,10 @@ class RestoreReport:
     staff: int
     transactions: int
 
+    ledger_entries: int | None = None
+    wallet_sync_jobs: int | None = None
+    media_files_verified: int | None = None
+
 
 def _psql(name: str, sql: str, timeout: int = 30) -> str:
     result = subprocess.run(["docker", "exec", name, "psql", "-U", "j2m_restore", "-d",
@@ -1463,7 +1467,18 @@ def restore_integral_isolated(index: Path, key_file: Path, image: str,
                     not secrets.compare_digest(_hash_file(index), expected_index_sha256)
                     or not verify_integral_set(index, key_file)):
                 raise RuntimeError("El conjunto cambió durante la restauración.")
-            return RestoreReport(revision, *counts)
+            integrity = [int(value) for value in _psql(pg_name, """
+                SELECT (SELECT count(*) FROM loyalty_ledger_entries)||','||
+                       (SELECT count(*) FROM google_wallet_sync_jobs)||','||
+                       (SELECT count(*) FROM google_wallet_sync_jobs j
+                        LEFT JOIN customers c ON (j.customer_id,j.business_id)=(c.id,c.business_id)
+                        LEFT JOIN transactions t ON (j.transaction_id,j.customer_id,j.business_id)
+                                                   =(t.id,t.customer_id,t.business_id)
+                        WHERE c.id IS NULL OR t.id IS NULL)
+            """).split(",")]
+            if integrity[2]:
+                raise RuntimeError("El respaldo contiene trabajos Wallet con referencias inconsistentes.")
+            return RestoreReport(revision, *counts, *integrity[:2], len(authorized))
         finally:
             for container in (app_name, pg_name):
                 subprocess.run(["docker", "rm", "-f", container], stdout=subprocess.DEVNULL,

@@ -41,11 +41,13 @@ def connection_parameters(config, expected_host, expected_project_ref):
             "user": unquote(url.username), "password": unquote(url.password),
             "sslmode": "verify-full", "sslrootcert": str(ca.resolve()),
             "connect_timeout": 5, "application_name": "j2m-affinity-diagnostic",
-            "options": "-c statement_timeout=5000 -c lock_timeout=1000 -c idle_in_transaction_session_timeout=15000"}
+            "tcp_user_timeout": 10000, "keepalives_idle": 5,
+            "keepalives_interval": 2, "keepalives_count": 3}
 
 
 def scalar(conn, sql, parameters=()):
     with conn.cursor() as cur:
+        cur.execute("SET LOCAL statement_timeout = '5s'")
         cur.execute(sql, parameters)
         return cur.fetchone()[0]
 

@@ -116,3 +116,56 @@ class TransitionPreflightTests(unittest.TestCase):
                                    "--key-file", "private"]), patch("builtins.print") as output:
             self.assertEqual(p.main(), 2)
             self.assertFalse(json.loads(output.call_args.args[0])["transition_authorized"])
+
+
+    def test_requested_attestation_participates_in_exit_code(self):
+        argv = ["preflight", "--approved-sha", "a" * 40, "--key-file", "private",
+                "--attest-legacy-https"]
+        for expected, status in ((1, "blocked"), (2, "observed")):
+            with self.subTest(status=status), patch("sys.argv", argv), \
+                    patch.object(p, "observation", side_effect=[{"status": "observed"}] * 5 + [
+                        {"status": status}
+                    ]), patch("builtins.print") as output:
+                self.assertEqual(p.main(), expected)
+                self.assertFalse(json.loads(output.call_args.args[0])["transition_authorized"])
+
+    def test_attestation_rejects_redirect_and_ambiguous_or_missing_logs(self):
+        from unittest.mock import MagicMock
+        from urllib.error import HTTPError
+
+        base = {role: {"container_id": "a" * 64, "image_id": "sha256:" + "1" * 64,
+                       "address": "172.20.0.2"}
+                for role in ("web", "google-wallet-worker", "proxy")}
+        self.assertIsNone(p.RejectRedirect().redirect_request(None, None, 302, "", {},
+                                                               "https://example.invalid"))
+        for defect in ("redirect", "missing", "ambiguous", "web_identity"):
+            with self.subTest(defect=defect):
+                response = MagicMock()
+                response.__enter__.return_value = response
+                response.status = 200
+                response.headers = {}
+                response.geturl.return_value = "https://localhost:8443/api/health"
+                calls = []
+
+                def open_response(request, **kwargs):
+                    nonce = request.get_header("X-j2m-probe")
+                    calls.append(f"{nonce} /api/health 172.20.0.2:8000 200")
+                    if defect == "redirect":
+                        raise HTTPError(request.full_url, 302, "redirect", {}, None)
+                    return response
+
+                def inspect(*args, **kwargs):
+                    if defect == "web_identity" and calls:
+                        return {**base, "web": {**base["web"], "container_id": "b" * 64}}
+                    return base
+
+                def logs(*args):
+                    if defect == "missing":
+                        return ""
+                    return "\n".join(calls * (2 if defect == "ambiguous" else 1))
+
+                with patch.object(p, "inspect_runtime", side_effect=inspect), \
+                        patch.object(p, "build_opener") as opener, patch.object(p, "command", side_effect=logs):
+                    opener.return_value.open.side_effect = open_response
+                    with self.assertRaises((RuntimeError, HTTPError)):
+                        p.attest_legacy_https({})
