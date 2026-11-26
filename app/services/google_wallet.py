@@ -286,6 +286,15 @@ class GoogleWalletService:
         logger.warning("google_wallet_api_error status_code=%s retryable=%s", response.status_code, retryable)
         raise GoogleWalletAPIError(response.status_code, retryable)
 
+    def _verified_mutation(self, method, kind, resource_id, body, *, class_id=None):
+        resource = kind if method == "POST" else f"{kind}/{quote(resource_id, safe='')}"
+        result = self._request(method, resource, body=body)
+        if (result.get("id") != resource_id
+                or (class_id is not None and result.get("classId") != class_id)
+                or any(result.get(key) != value for key, value in body.items())):
+            raise GoogleWalletAPIError(retryable=True)
+        return result
+
     def _upsert(self, kind, resource_id, body):
         resource = f"{kind}/{quote(resource_id, safe='')}"
         try:
@@ -294,11 +303,11 @@ class GoogleWalletService:
             if exc.status_code != 404:
                 raise
             try:
-                return self._request("POST", kind, body=body)
+                return self._verified_mutation("POST", kind, resource_id, body)
             except GoogleWalletAPIError as create_error:
                 if create_error.status_code != 409:
                     raise
-        return self._request("PATCH", resource, body=body)
+        return self._verified_mutation("PATCH", kind, resource_id, body)
 
     @_coordinate(raises=True)
     def _ensure_loyalty_object(self, customer):
@@ -315,7 +324,8 @@ class GoogleWalletService:
             if exc.status_code != 404:
                 raise
             try:
-                return self._request("POST", "loyaltyObject", body=body)
+                return self._verified_mutation("POST", "loyaltyObject", body["id"], body,
+                                               class_id=body["classId"])
             except GoogleWalletAPIError as create_error:
                 if create_error.status_code != 409:
                     raise
@@ -327,7 +337,8 @@ class GoogleWalletService:
         for key in ("textModulesData", "linksModuleData", "appLinkData"):
             metadata.pop(key, None)
         metadata.update(self._owned_metadata_patch(existing, body))
-        return self._request("PATCH", resource, body=metadata)
+        return self._verified_mutation("PATCH", "loyaltyObject", body["id"], metadata,
+                                       class_id=body["classId"])
 
     @staticmethod
     def _merge_items(existing, desired, controlled_ids):
@@ -418,7 +429,8 @@ class GoogleWalletService:
 
         patch_body = self._owned_metadata_patch(existing, desired)
         try:
-            self._request("PATCH", resource, body=patch_body)
+            self._verified_mutation("PATCH", "loyaltyObject", object_id, patch_body,
+                                    class_id=desired["classId"])
             return {"status": "success", "object_id": object_id}
         except GoogleWalletAPIError as exc:
             return {"status": "retry" if exc.retryable else "error", "status_code": exc.status_code}

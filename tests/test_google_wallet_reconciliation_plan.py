@@ -573,12 +573,13 @@ class ReconciliationPreviewPostgresTests(ReconciliationPreviewCases, unittest.Te
                         "SELECT pg_terminate_backend(:pid, 5000)"
                     ), {"pid": pid}).scalar_one())
                 later_tx = self.movement(customer)
-                job = GoogleWalletSyncJob.query.filter_by(transaction_id=later_tx).one_or_none()
-                later_job = job.id if job else self.job(customer, later_tx, "pending")
+                later_job = GoogleWalletSyncJob.query.filter_by(transaction_id=later_tx).one().id
                 independent = self.customer()
                 independent_tx = self.movement(independent)
-                if not GoogleWalletSyncJob.query.filter_by(transaction_id=independent_tx).first():
-                    self.job(independent, independent_tx, "pending")
+                self.assertEqual(
+                    GoogleWalletSyncJob.query.filter_by(transaction_id=independent_tx).one().status,
+                    "pending",
+                )
                 db.session.remove()
                 process_pending_google_wallet_jobs(service=service())
                 target = f"123456.business_{business_id}_customer_{customer}"

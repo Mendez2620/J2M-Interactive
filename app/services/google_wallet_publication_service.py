@@ -256,6 +256,11 @@ def _job_is_owned(job_id, token, publication_id, publication_token):
     return db.session.query(GoogleWalletPublicationJob.id).join(
         GoogleWalletPublication,
         GoogleWalletPublication.id == GoogleWalletPublicationJob.publication_id,
+    ).join(
+        Business, Business.id == GoogleWalletPublication.business_id,
+    ).join(
+        Customer, and_(Customer.id == GoogleWalletPublicationJob.customer_id,
+                       Customer.business_id == GoogleWalletPublicationJob.business_id),
     ).filter(
         GoogleWalletPublicationJob.id == job_id,
         GoogleWalletPublicationJob.status == "processing",
@@ -265,6 +270,9 @@ def _job_is_owned(job_id, token, publication_id, publication_token):
         GoogleWalletPublication.lease_token == publication_token,
         GoogleWalletPublication.active_key == "active",
         GoogleWalletPublicationJob.business_id == GoogleWalletPublication.business_id,
+        GoogleWalletPublicationJob.design_version == GoogleWalletPublication.design_version,
+        Business.wallet_design_version == GoogleWalletPublication.design_version,
+        Business.is_active.is_(True),
     ).first() is not None
 
 

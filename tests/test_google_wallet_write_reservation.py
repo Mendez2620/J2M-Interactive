@@ -62,6 +62,20 @@ class WalletReservationTests(unittest.TestCase):
             reserve(self.engine, kind="loyaltyClass", issuer="issuer",
                     resource_id="issuer.business_3", business_id=3)
 
+    def test_downgrade_preserves_reservation_history(self):
+        migration = importlib.import_module(
+            "migrations.versions.a1b2c3d4e5f6_wallet_write_reservations"
+        )
+        owner = reserve(self.engine, **self.resource)
+        self.assertTrue(transition(self.engine, owner, previous="reserved", state="not_sent"))
+        with self.engine.begin() as connection:
+            with Operations.context(MigrationContext.configure(connection)):
+                with self.assertRaisesRegex(RuntimeError, "history prevents downgrade"):
+                    migration.downgrade()
+            self.assertEqual(connection.exec_driver_sql(
+                "SELECT COUNT(*) FROM google_wallet_write_reservations"
+            ).scalar_one(), 1)
+
 
 @unittest.skipUnless(os.getenv("TEST_POSTGRES_URL"), "synthetic PostgreSQL not configured")
 class PostgresWalletReservationTests(WalletReservationTests):

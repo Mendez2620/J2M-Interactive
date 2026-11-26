@@ -24,6 +24,10 @@ from app.services.referral_participant_service import (
 from app.services.loyalty_transaction_service import process_loyalty_transaction
 
 
+class EchoMutation:
+    """Return the resource with the fields accepted by this simulated provider."""
+
+
 class FakeResponse:
     def __init__(self, status_code, payload=None):
         self.status_code = status_code
@@ -42,6 +46,15 @@ class FakeSession:
     def request(self, method, url, **kwargs):
         self.calls.append((method, url, kwargs.get("json")))
         response = self.responses.pop(0)
+        if isinstance(response, EchoMutation) and method != "GET":
+            body = kwargs.get("json") or {}
+            identifier = body.get("id") or url.rsplit("/", 1)[-1]
+            payload = {"id": identifier, **body}
+            if "_customer_" in identifier:
+                payload.setdefault("classId", identifier.split("_customer_", 1)[0])
+            return FakeResponse(200, payload)
+        if isinstance(response, EchoMutation):
+            return FakeResponse(200, {"id": url.rsplit("/", 1)[-1]})
         if isinstance(response, Exception):
             raise response
         return response
@@ -85,8 +98,8 @@ class GoogleWalletRealTestCase(unittest.TestCase):
 
     def test_real_mode_creates_resources_and_signs_existing_object_jwt(self):
         session = FakeSession([
-            FakeResponse(404), FakeResponse(200, {"id": "class"}),
-            FakeResponse(404), FakeResponse(200, {"id": "object"}),
+            FakeResponse(404), EchoMutation(),
+            FakeResponse(404), EchoMutation(),
         ])
         service = GoogleWalletService(mode="real", credentials_info=self.credentials, http_session=session)
         token, save_url = service.create_jwt_pass(self.customer)
@@ -115,7 +128,7 @@ class GoogleWalletRealTestCase(unittest.TestCase):
 
     def test_conflict_is_idempotently_resolved_and_identity_is_stable(self):
         original = self.customer.qr_code_token
-        service = self.service([FakeResponse(404), FakeResponse(409), FakeResponse(200, {"id": "ok"})])
+        service = self.service([FakeResponse(404), FakeResponse(409), EchoMutation()])
         class_body = service.create_or_update_class(self.business)
         with service.write_scope(self.business, class_only=True):
             service._upsert("loyaltyClass", class_body["id"], class_body)
@@ -130,8 +143,8 @@ class GoogleWalletRealTestCase(unittest.TestCase):
     def test_existing_object_issuance_updates_metadata_without_balance(self):
         _, invitation_url = prepare_customer_wallet_invitation(self.customer)
         session = FakeSession([
-            FakeResponse(200, {"id": "class"}), FakeResponse(200, {"id": "class"}),
-            FakeResponse(200, {"id": "object"}), FakeResponse(200, {"id": "object"}),
+            EchoMutation(), EchoMutation(),
+            EchoMutation(), EchoMutation(),
         ])
         service = GoogleWalletService(
             mode="real", credentials_info=self.credentials, http_session=session,
@@ -161,8 +174,8 @@ class GoogleWalletRealTestCase(unittest.TestCase):
             ],
         }}
         session = FakeSession([
-            FakeResponse(200, existing), FakeResponse(200, {"id": "object"}),
-            FakeResponse(200, existing), FakeResponse(200, {"id": "object"}),
+            FakeResponse(200, existing), EchoMutation(),
+            FakeResponse(200, existing), EchoMutation(),
         ])
         service = GoogleWalletService(
             mode="real", credentials_info=self.credentials, http_session=session,
@@ -202,7 +215,7 @@ class GoogleWalletRealTestCase(unittest.TestCase):
                 {"id": "menu", "uri": "https://example.test/menu"},
             ]},
         }
-        session = FakeSession([FakeResponse(200, existing), FakeResponse(200, {"id": "object"})])
+        session = FakeSession([FakeResponse(200, existing), EchoMutation()])
         service = GoogleWalletService(
             mode="real", credentials_info=self.credentials, http_session=session,
         )
@@ -245,7 +258,7 @@ class GoogleWalletRealTestCase(unittest.TestCase):
             "appLinkData": {"webAppLinkInfo": {"appTarget": {"targetUri": {"uri": old_url}}}},
         }
         self.business.reward_description = None
-        service = self.service([FakeResponse(200, existing), FakeResponse(200, existing)])
+        service = self.service([FakeResponse(200, existing), EchoMutation()])
         service._ensure_loyalty_object(self.customer)
         body = service.http.calls[-1][2]
         self.assertEqual(body["textModulesData"][0], external_text)
@@ -268,8 +281,8 @@ class GoogleWalletRealTestCase(unittest.TestCase):
             "linksModuleData": {"uris": [{"id": "foreign", "uri": "https://example.test"}]},
         }
         service = self.service([
-            FakeResponse(200, existing), FakeResponse(200, existing),
-            FakeResponse(200, existing), FakeResponse(200, existing),
+            FakeResponse(200, existing), EchoMutation(),
+            FakeResponse(200, existing), EchoMutation(),
         ])
         service._ensure_loyalty_object(self.customer)
         issuance = service.http.calls[-1][2]
@@ -302,7 +315,7 @@ class GoogleWalletRealTestCase(unittest.TestCase):
             FakeResponse(200, {"linksModuleData": {"uris": [{
                 "id": "support", "uri": "https://example.test/support",
             }]}}),
-            FakeResponse(200, {"id": "object"}),
+            EchoMutation(),
         ])
         service._ensure_loyalty_object(self.customer)
         self.assertEqual([call[0] for call in service.http.calls], ["GET", "POST", "GET", "PATCH"])
@@ -316,8 +329,8 @@ class GoogleWalletRealTestCase(unittest.TestCase):
     def test_issuance_and_worker_interleaving_leaves_balance_to_worker_only(self):
         service = self.service([
             FakeResponse(200, self._existing_balance_object(self.service([]), balance="3 / 8")),
-            FakeResponse(200, {"id": "class"}), FakeResponse(200, {"id": "class"}),
-            FakeResponse(200, {"id": "object"}), FakeResponse(200, {"id": "object"}),
+            EchoMutation(), EchoMutation(),
+            EchoMutation(), EchoMutation(),
         ])
         self.customer.current_stamps = 3
         db.session.commit()
@@ -370,6 +383,15 @@ class GoogleWalletRealTestCase(unittest.TestCase):
             with self.assertRaises(WalletWriteBlocked):
                 service._request("PATCH", resource, body={})
         self.assertEqual(service.http.calls, [])
+
+    def test_publication_and_issuance_reject_incomplete_success_response(self):
+        service = self.service([])
+        class_id = service.get_class_id(self.business)
+        service.http.responses = [FakeResponse(404), FakeResponse(200, {"id": class_id})]
+        self.assertEqual(service.publish_loyalty_class(self.business)["status"], "retry")
+        service.http.responses = [FakeResponse(404), FakeResponse(200, {"id": "another-class"})]
+        with self.assertRaises(GoogleWalletAPIError):
+            service.create_jwt_pass(self.customer)
 
     def test_transport_timeout_blocks_the_next_writer_without_retrying_http(self):
         first = self.service([requests.Timeout()])
@@ -511,10 +533,10 @@ class GoogleWalletRealTestCase(unittest.TestCase):
     def test_missing_object_is_recreated_before_reporting_sync_success(self):
         service = self.service([
             FakeResponse(404),
-            FakeResponse(200, {"id": "class"}),
-            FakeResponse(200, {"id": "class"}),
+            EchoMutation(),
+            EchoMutation(),
             FakeResponse(404),
-            FakeResponse(200, {"id": "object"}),
+            EchoMutation(),
             FakeResponse(200, self._existing_balance_object(self.service([]), balance="2 / 8")),
         ])
         result = service.update_loyalty_object(self.customer)
