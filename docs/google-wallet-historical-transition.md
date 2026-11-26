@@ -65,3 +65,47 @@ redirecciones y reintentos. No instale certificados de interceptación.
 Antes de abrir egreso, demuestre en el entorno real la ausencia de otras
 interfaces, rutas directas y acceso del gateway hacia Supabase. Una
 red interna de ensayo no certifica la topología operativa.
+
+## Ensayo ejecutable y límites de operación
+
+Con ambas imágenes disponibles localmente, desde el checkout limpio:
+
+```powershell
+$revision = (git rev-parse HEAD).Trim()
+docker build --label "org.opencontainers.image.revision=$revision" -t "j2m-interactive:transition-$revision" .
+python tests/legacy_wallet_transition_docker.py --preflight-only
+python tests/legacy_wallet_transition_docker.py --journal (Join-Path $env:TEMP "j2m-transition-$revision.jsonl")
+```
+
+El script usa una red interna nueva y PostgreSQL 16 efímero. Crea un
+dump sintético en memoria, lo restaura en otra base de la instancia aislada,
+verifica la revisión inicial y exige que solo el contenedor de PostgreSQL
+permanezca conectado antes de migrar. El flujo comprueba el esquema final,
+prueba ambos backends y simula la pérdida del backend objetivo antes de
+recuperar la imagen legada sin bajar la revisión de la base. Su diario
+registra las etapas e identidades. Un archivo previo no se reutiliza.
+La validación del diario comprueba la secuencia, procedencia y vigencia.
+No es una autorización, firma ni sustituto de pruebas directas.
+
+### Condiciones aún exigidas para operación
+
+El flujo operativo y el pin no cambian en este PR. Antes de solicitar una
+ventana real, integre el preflight con `verify_integral_set` y una
+restauración integral aislada del mismo conjunto reciente, incluida la
+revisión del respaldo, cifrado, manifiesto, medios, clave DPAPI y capacidad
+de disco. El dump ficticio del ensayo no demuestra todo eso.
+
+Acredite una pausa de todos los escritores, incluido acceso directo al
+web, servicios externos, migradores y tareas de respaldo. Ante PostgreSQL
+inaccesible, estado Alembic incierto, fallo del proxy o interrupción,
+mantenga mantenimiento. Revalide revisión e integridad antes de decidir si
+recuperar el legado con el esquema nuevo o corregir hacia adelante. No
+reanude a partir del diario, no haga downgrade y no restaure una copia
+antigua sobre movimientos posteriores.
+
+Para la futura afinidad del pooler, autorice una sonda separada que use dos
+conexiones independientes con TLS. Compare la identidad de sesión antes y
+después de COMMIT y pruebe exclusión y liberación con una clave reservada
+para esa sonda. Cierre ambas conexiones aunque falle y no termine sesiones
+ajenas. La sonda existente solo admite PostgreSQL sintético. En esta fase no
+se ejecuta esa prueba sobre Supabase.
