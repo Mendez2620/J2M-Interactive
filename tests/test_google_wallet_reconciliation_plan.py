@@ -498,13 +498,47 @@ class ReconciliationPreviewSQLiteTests(ReconciliationPreviewCases, unittest.Test
 
 @unittest.skipUnless(os.getenv("TEST_POSTGRES_URL"), "synthetic PostgreSQL CI not configured")
 class ReconciliationPreviewPostgresTests(ReconciliationPreviewCases, unittest.TestCase):
+    def test_referral_business_cursor_survives_worker_restart(self):
+        from app.models import GoogleWalletReferralJob
+        from app.services.google_wallet_referral_queue import process_wallet_referral_jobs
+        from app.services.referral_participant_service import ensure_customer_invitation
+        from app.services.referral_program_service import configure_referral_program
+
+        self.app.config["GOOGLE_WALLET_MODE"] = "real"
+        expected = []
+        for _ in range(51):
+            customer_id = self.customer()
+            expected.append(customer_id)
+            ensure_customer_invitation(db.session.get(Customer, customer_id))
+        db.session.commit()
+        business = db.session.get(Business, self.business_id)
+        configure_referral_program(
+            business=business, enabled=True, actor_type="platform_admin", actor_id=1,
+            reason="Synthetic pagination", request_id="synthetic-pagination",
+        )
+        job = GoogleWalletReferralJob.query.filter_by(customer_id=None).one()
+        job_id = job.id
+        self.assertEqual(process_wallet_referral_jobs(limit=1), 1)
+        self.assertEqual(db.session.get(GoogleWalletReferralJob, job_id).cursor, expected[24])
+        db.session.remove()
+        self.assertEqual(process_wallet_referral_jobs(limit=1), 1)
+        self.assertEqual(db.session.get(GoogleWalletReferralJob, job_id).cursor, expected[49])
+        db.session.remove()
+        self.assertEqual(process_wallet_referral_jobs(limit=1), 1)
+        self.assertEqual(db.session.get(GoogleWalletReferralJob, job_id).status, "completed")
+        children = GoogleWalletReferralJob.query.filter(GoogleWalletReferralJob.customer_id.is_not(None))
+        self.assertEqual(sorted(job.customer_id for job in children), expected)
+
     def test_referral_revocation_waits_for_inflight_write_and_removes_only_owned_links(self):
         self.check_referral_revocation_during_write(uncertain=False)
 
     def test_uncertain_referral_write_blocks_remote_removal_after_local_revocation(self):
         self.check_referral_revocation_during_write(uncertain=True)
 
-    def check_referral_revocation_during_write(self, *, uncertain):
+    def test_existing_independent_card_is_patched_while_other_referral_is_uncertain(self):
+        self.check_referral_revocation_during_write(uncertain=True, independent_exists=True)
+
+    def check_referral_revocation_during_write(self, *, uncertain, independent_exists=False):
         from datetime import timedelta
         from requests import Timeout
         from app.models import GoogleWalletReferralJob
@@ -533,6 +567,8 @@ class ReconciliationPreviewPostgresTests(ReconciliationPreviewCases, unittest.Te
         started, release = Event(), Event()
         calls = []
         independent_reads = []
+        independent_writes = []
+        independent_remote = {}
         foreign = {"id": "menu", "uri": "https://foreign.example/menu"}
         remote = {"id": target, "classId": target.split("_customer_")[0],
                   "barcode": {"value": "unchanged"}, "loyaltyPoints": {"label": "Sellos"},
@@ -543,12 +579,23 @@ class ReconciliationPreviewPostgresTests(ReconciliationPreviewCases, unittest.Te
             status_code = 200
             content = b"synthetic"
 
+            def __init__(self, payload=None):
+                self.payload = payload
+
             def json(self):
-                return dict(remote)
+                return dict(remote if self.payload is None else self.payload)
 
         class Transport:
             def request(self, method, url, *, json, **kwargs):
                 if not url.endswith(target):
+                    if independent_exists:
+                        if method == "PATCH":
+                            independent_writes.append(method)
+                            independent_remote.update(json)
+                        else:
+                            self_test.assertEqual(method, "GET")
+                            independent_reads.append(True)
+                        return Response(independent_remote)
                     self_test.assertEqual(method, "GET")
                     independent_reads.append(True)
                     return type("MissingResponse", (), {"status_code": 404})()
@@ -584,6 +631,10 @@ class ReconciliationPreviewPostgresTests(ReconciliationPreviewCases, unittest.Te
                 self.assertTrue(started.wait(10))
                 change(False)
                 independent_id = self.customer()
+                independent_remote.update(
+                    id=f"{target.split('_customer_')[0]}_customer_{independent_id}",
+                    classId=target.split("_customer_")[0],
+                )
                 change(True, independent_id)
                 with engine.begin() as connection:
                     pid = connection.execute(text(
@@ -599,7 +650,7 @@ class ReconciliationPreviewPostgresTests(ReconciliationPreviewCases, unittest.Te
                 self.assertEqual(len(calls), 1)
                 self.assertEqual(independent_reads, [True])
                 self.assertEqual(GoogleWalletReferralJob.query.filter_by(customer_id=independent_id).one().status,
-                                 "missing")
+                                 "completed" if independent_exists else "missing")
                 self.assertEqual(GoogleWalletReferralJob.query.filter_by(status="pending").count(), 1)
             finally:
                 release.set()
@@ -610,6 +661,9 @@ class ReconciliationPreviewPostgresTests(ReconciliationPreviewCases, unittest.Te
             self.assertEqual(len(calls), 1)
             self.assertEqual(GoogleWalletReferralJob.query.filter_by(status="pending", outcome="blocked").count(), 2)
             self.assertIsNotNone(remote["appLinkData"])
+            if independent_exists:
+                self.assertEqual(independent_writes, ["PATCH"])
+                self.assertIn("appLinkData", independent_remote)
         else:
             self.assertEqual(remote["linksModuleData"]["uris"], [foreign])
             self.assertIsNone(remote["appLinkData"])
