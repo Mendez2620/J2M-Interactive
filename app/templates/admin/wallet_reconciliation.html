@@ -1,5 +1,8 @@
 {% extends "base.html" %}
 {% block title %}Reconciliación de Google Wallet{% endblock %}
+{% block scripts %}
+<script defer src="{{ url_for('static', filename='js/wallet-reconciliation.js') }}"></script>
+{% endblock %}
 {% block content %}
 <main class="mx-auto max-w-5xl space-y-6 px-4 py-8 text-slate-900">
   <a class="text-sm font-semibold underline" href="{{ url_for('admin.get_business_details', business_id=business.id) }}">Volver a {{ business.name }}</a>
@@ -67,7 +70,7 @@
     </ul>
     {% endif %}
     {% if preview.candidates %}
-    <form method="post" action="{{ url_for('admin.review_business_wallet_reconciliation', business_id=business.id) }}" class="space-y-3 text-sm">
+    <form method="post" action="{{ url_for('admin.review_business_wallet_reconciliation', business_id=business.id) }}" class="space-y-3 text-sm" data-wallet-review>
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <input type="hidden" name="after" value="{{ cursor }}">
       <fieldset class="space-y-2">
@@ -76,6 +79,7 @@
       <label class="block rounded-lg border border-slate-200 p-3"><input type="checkbox" name="candidate" value="{{ candidate.customer_id }}"> Cliente n.º {{ candidate.customer_id }} · {{ candidate.stamps if candidate.loyalty_type == 'stamps' else candidate.points }} {{ 'sellos' if candidate.loyalty_type == 'stamps' else 'puntos' }}</label>
       {% endfor %}
       </fieldset>
+      <p role="status" data-wallet-selection-count>0 clientes seleccionados de 25.</p>
       <button class="btn btn-secondary" type="submit">Revisar selección</button>
     </form>
     {% else %}
@@ -90,7 +94,14 @@
     {% set states = {'prepared': 'Preparada', 'queued': 'Encolada', 'running': 'Reclamada · resultado sin confirmar', 'finished': 'Finalizada', 'expired': 'Vencida', 'rejected': 'Rechazada', 'inconclusive': 'Inconclusa'} %}
     <ul class="space-y-2 text-sm">
     {% for item in review_statuses %}
-      <li>{{ item.created_at.strftime('%Y-%m-%d %H:%M') }} UTC · {{ states.get(item.state, 'No verificable') }}</li>
+      <li class="rounded-lg border border-slate-200 p-3">
+        <p>{{ item.created_at.strftime('%Y-%m-%d %H:%M') }} UTC · {{ item.admin }} · {{ states.get(item.state, 'No verificable') }}</p>
+        <p>Solicitados: {{ item.requested if item.requested is not none else 'No verificable' }}</p>
+        {% if item.verified %}
+        <p>{{ 'Resultado completo' if item.confirmed == item.requested else 'Resultado parcial' }} · Procesados: {{ item.processed }} · Confirmados: {{ item.confirmed }} · Omisiones: {{ item.skipped }} · Errores o reintentos: {{ item.errors }} · Restantes: {{ item.remaining }}</p>
+        {% if item.stop %}<p>{{ item.stop }}</p>{% endif %}
+        {% endif %}
+      </li>
     {% else %}
       <li>No hay revisiones persistidas en esta página.</li>
     {% endfor %}

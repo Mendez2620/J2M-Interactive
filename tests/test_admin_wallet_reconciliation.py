@@ -125,7 +125,7 @@ class AdminWalletReconciliationTests(unittest.TestCase):
         self.authenticate()
         self.assertEqual(self.client.get(response.location).status_code, 404)
 
-    def queue_review(self):
+    def queue_review(self, *, two=False):
         self.client.get("/admin/login")
         with self.client.session_transaction() as session:
             csrf = session["csrf_token"]
@@ -145,11 +145,22 @@ class AdminWalletReconciliationTests(unittest.TestCase):
             tx_type="earn", points_amount=0, stamps_amount=1, purchase_amount=0,
             request_id="synthetic-review", fingerprint="synthetic-review",
         )
+        ids = [str(customer_id)]
+        if two:
+            second = Customer(business_id=business.id, full_name="Second synthetic customer")
+            db.session.add(second)
+            db.session.commit()
+            ids.append(str(second.id))
+            process_loyalty_transaction(
+                business=business, customer_id=second.id, staff_id=None, action="earn_stamp",
+                tx_type="earn", points_amount=0, stamps_amount=1, purchase_amount=0,
+                request_id="synthetic-review-second", fingerprint="synthetic-review-second",
+            )
         db.session.remove()
         self.client.get(self.path)
         with self.client.session_transaction() as session:
             csrf = session["csrf_token"]
-        review = self.client.post(self.path + "/reviews", data={"candidate": str(customer_id), "csrf_token": csrf})
+        review = self.client.post(self.path + "/reviews", data={"candidate": ids, "csrf_token": csrf})
         self.assertEqual(review.status_code, 303)
         confirmation = review.location + "/confirm"
         form = {"csrf_token": csrf, "confirm": "yes"}
@@ -239,6 +250,98 @@ class AdminWalletReconciliationTests(unittest.TestCase):
 
 @unittest.skipUnless(os.getenv("TEST_POSTGRES_URL"), "synthetic PostgreSQL not configured")
 class PostgresAdminWalletReconciliationTests(AdminWalletReconciliationTests):
+    def check_partial_batch(self, interruption):
+        from datetime import timedelta
+        from sqlalchemy import update
+        from app.models import GoogleWalletSyncJob, LoyaltyLedgerEntry
+        from app.models.platform_admin_session import PlatformAdminSession
+        from app.services import admin_wallet_review, google_wallet_reconciliation_control as control
+        from app.services.google_wallet import GoogleWalletService
+
+        first, location, form = self.queue_review(two=True)
+        review = AdminWalletReview.query.one()
+        session_digest = review.session_digest
+        boundary = admin_wallet_review.now()
+        if interruption == "session":
+            db.session.execute(update(PlatformAdminSession).where(
+                PlatformAdminSession.token_digest == session_digest
+            ).values(expires_at=boundary + timedelta(seconds=2)))
+            db.session.commit()
+        deadline = review.expires_at
+        current = [boundary]
+        self.app.config["GOOGLE_ISSUER_ID"] = "123456"
+        target = f"123456.business_{self.business_id}_customer_{first}"
+        calls = []
+
+        class Response:
+            status_code = 200
+            content = b"synthetic"
+
+            def json(self):
+                return {"id": target, "classId": target.split("_customer_")[0], "state": "active",
+                        "loyaltyPoints": {"label": "Sellos", "balance": {
+                            "string": "1 / 8" if calls[-1][0] == "PATCH" else "0 / 8"}}}
+
+        class Transport:
+            def request(self, method, url, **kwargs):
+                calls.append((method, url.rsplit("/", 1)[-1]))
+                return Response()
+
+        service = GoogleWalletService(mode="real", http_session=Transport(), credentials_info={
+            "type": "service_account", "project_id": "synthetic",
+            "client_email": "wallet@synthetic.iam.gserviceaccount.com",
+            "private_key": GoogleWalletService._generate_dev_private_key(),
+            "token_uri": "https://example.invalid/token",
+        })
+        original_append = control._append
+
+        def interrupt(connection, action, **kwargs):
+            original_append(connection, action, **kwargs)
+            if action != control._ITEM_FINISH:
+                return
+            if interruption == "logout":
+                self.assertEqual(self.client.post("/admin/logout", data={"csrf_token": form["csrf_token"]}).status_code, 302)
+            else:
+                current[0] = deadline if interruption == "review" else boundary + timedelta(seconds=3)
+
+        ledger_count = LoyaltyLedgerEntry.query.count()
+        with patch.object(admin_wallet_review, "now", side_effect=lambda: current[0]), \
+             patch.object(control, "_append", side_effect=interrupt):
+            run_google_wallet_sync_worker(service=service, max_cycles=2, sleep_fn=lambda _seconds: None)
+        self.assertEqual(calls, [("GET", target), ("PATCH", target)])
+        self.assertEqual(GoogleWalletSyncJob.query.one().customer_id, first)
+        self.assertEqual(Transaction.query.count(), 2)
+        self.assertEqual(LoyaltyLedgerEntry.query.count(), ledger_count)
+        persisted = AdminWalletReview.query.one()
+        self.assertEqual(persisted.state, "finished")
+        self.assertEqual(persisted.result["counts"], {"success": 1})
+        self.assertEqual(persisted.result["remaining"], 1)
+        self.assertEqual(persisted.result["stop_reason"], "authorization_expired")
+        self.assertIn("authorization_expired", AccessAudit.query.filter_by(action=control._FINISH).one().new_state)
+        if interruption != "logout":
+            self.assertEqual(self.client.post(location + "/confirm", data=form).status_code, 303)
+            run_google_wallet_sync_worker(service=service, max_cycles=1)
+            self.assertEqual(calls, [("GET", target), ("PATCH", target)])
+        self.authenticate()
+        history = self.client.get(self.path).get_data(as_text=True)
+        self.assertIn("Resultado parcial", history)
+        self.assertIn("Autorización vencida o revocada", history)
+        self.assertEqual(self.client.get(location).status_code, 404)
+        persisted.result = {**persisted.result, "remaining": 0}
+        db.session.commit()
+        corrupt_history = self.client.get(self.path).get_data(as_text=True)
+        self.assertIn("Inconclusa", corrupt_history)
+        self.assertNotIn("Resultado parcial", corrupt_history)
+
+    def test_logout_after_first_customer_preserves_partial_batch(self):
+        self.check_partial_batch("logout")
+
+    def test_review_expiration_preserves_partial_batch(self):
+        self.check_partial_batch("review")
+
+    def test_session_expiration_preserves_partial_batch(self):
+        self.check_partial_batch("session")
+
     def make_app(self):
         from app.config import TestingConfig
 

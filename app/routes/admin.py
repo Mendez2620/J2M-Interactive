@@ -786,7 +786,7 @@ def update_business(business_id: int):
 @platform_admin_required
 def business_wallet_reconciliation(business_id):
     import json
-    from app.models.platform_admin_session import AdminWalletReview
+    from app.models.platform_admin_session import AdminWalletReview, PlatformAdminSession
     from app.services.admin_wallet_review import enabled
     from collections import defaultdict
     from uuid import UUID
@@ -819,11 +819,40 @@ def business_wallet_reconciliation(business_id):
     status = 200
     try:
         audit = google_wallet_reconciliation_audit(business_id)
-        review_statuses = db.session.execute(select(
-            AdminWalletReview.state, AdminWalletReview.created_at,
-        ).where(AdminWalletReview.business_id == business_id)
+        review_rows = db.session.execute(select(
+            AdminWalletReview.state, AdminWalletReview.created_at, AdminWalletReview.result,
+            AdminWalletReview.candidate_ids, PlatformAdmin.name.label("admin"),
+        ).outerjoin(PlatformAdminSession, PlatformAdminSession.token_digest == AdminWalletReview.session_digest)
+          .outerjoin(PlatformAdmin, PlatformAdmin.id == PlatformAdminSession.admin_id)
+          .where(AdminWalletReview.business_id == business_id)
           .order_by(AdminWalletReview.created_at.desc(), AdminWalletReview.id.desc())
           .offset((review_page - 1) * 20).limit(21)).all()
+        for row in review_rows:
+            requested = len(row.candidate_ids) if isinstance(row.candidate_ids, list) else None
+            result = row.result if isinstance(row.result, dict) else {}
+            counts_result = result.get("counts")
+            processed, remaining = result.get("processed"), result.get("remaining")
+            verified = (
+                row.state == "finished" and result.get("status") == "finished"
+                and requested is not None and 1 <= requested <= 25 and result.get("requested") == requested
+                and type(processed) is int and type(remaining) is int
+                and processed >= 0 and remaining >= 0 and processed + remaining == requested
+                and isinstance(counts_result, dict)
+                and set(counts_result) <= {"success", "skipped", "error", "retry", "disabled"}
+                and all(type(n) is int and 0 <= n <= requested for n in counts_result.values())
+                and sum(counts_result.values()) == processed
+            )
+            reason = result.get("stop_reason")
+            review_statuses.append({
+                "state": row.state if row.state != "finished" or verified else "inconclusive",
+                "created_at": row.created_at, "admin": row.admin or "Administrador no disponible",
+                "requested": requested, "verified": verified, "processed": processed,
+                "remaining": remaining, "confirmed": counts_result.get("success", 0) if verified else None,
+                "skipped": counts_result.get("skipped", 0) if verified else None,
+                "errors": sum(counts_result.get(key, 0) for key in ("error", "retry", "disabled")) if verified else None,
+                "stop": ("Autorización vencida o revocada" if reason == "authorization_expired"
+                         else "El procesamiento se detuvo antes de completar el lote" if reason else None),
+            })
         preview = preview_google_wallet_reconciliation(business_id, limit=25, after_customer_id=int(cursor))
         counts = dict(db.session.execute(
             select(table.c.state, func.count()).where(
