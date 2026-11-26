@@ -66,7 +66,8 @@ class GoogleWalletRealTestCase(unittest.TestCase):
         self.app.config.update(PUBLIC_BASE_URL="https://staging.example.test", GOOGLE_ISSUER_ID="3388000000023203929")
         self.context = self.app.app_context(); self.context.push(); db.create_all()
         self.business = Business(name="Café Seguro", slug="cafe-seguro", logo_url="https://cdn.example.test/logo.png",
-                                 loyalty_type="stamps", stamps_reward_limit=8, primary_color="#123456")
+                                 loyalty_type="stamps", stamps_reward_limit=8, primary_color="#123456",
+                                 referrals_enabled=True)
         db.session.add(self.business); db.session.commit()
         self.customer = Customer(business_id=self.business.id, full_name="Persona Privada",
                                  email="private@example.test", phone="+525500000000", current_stamps=2)
@@ -423,6 +424,35 @@ class GoogleWalletRealTestCase(unittest.TestCase):
         db.session.refresh(job)
         self.assertEqual(job.status, "pending")
 
+    def test_referral_only_update_removes_historical_link_without_publishing_design(self):
+        self.app.config["GOOGLE_WALLET_REFERRAL_HISTORICAL_ORIGINS"] = "https://old.example.test"
+        service = self.service([])
+        existing = self._existing_balance_object(service, balance="2 / 8")
+        existing.update(
+            textModulesData=[{"id": "terms", "body": "Published design"}],
+            barcode={"value": "remote-qr"},
+            linksModuleData={"uris": [
+                {"id": "invite_friends", "uri": "https://old.example.test/invite/" + "a" * 24},
+                {"id": "support", "uri": "https://foreign.example.test/invite/" + "b" * 24},
+            ]},
+            appLinkData={"webAppLinkInfo": {"appTarget": {"targetUri": {
+                "uri": "https://old.example.test/invite/" + "a" * 24,
+            }}}},
+        )
+        self.business.referrals_enabled = False
+        db.session.commit()
+        service.http.responses = [FakeResponse(200, existing), EchoMutation()]
+        self.assertEqual(service.publish_referral_links(self.customer)["status"], "success")
+        self.assertEqual(service.http.calls[-1][2], {
+            "linksModuleData": {"uris": [existing["linksModuleData"]["uris"][1]]},
+            "appLinkData": None,
+        })
+
+    def test_referral_only_update_never_issues_missing_card(self):
+        service = self.service([FakeResponse(404)])
+        self.assertEqual(service.publish_referral_links(self.customer)["reason"], "not_issued")
+        self.assertEqual([call[0] for call in service.http.calls], ["GET"])
+
     def _existing_balance_object(self, service, *, balance="1 / 8", **overrides):
         return {
             "id": service.get_object_id(self.customer),
@@ -776,6 +806,54 @@ class GoogleWalletRealTestCase(unittest.TestCase):
         self.assertEqual(job.customer_id, self.customer.id)
         self.assertEqual(job.status, "pending")
         self.assertEqual(result.customer.current_stamps, 3)
+
+    def test_purchase_and_redemption_sync_same_existing_card_without_duplicates(self):
+        self.app.config["GOOGLE_WALLET_MODE"] = "real"
+        self.business.cooldown_minutes = 0
+        db.session.commit()
+        service = self.service([])
+        service.http.responses = [
+            FakeResponse(200, self._existing_balance_object(service, balance=balance))
+            for balance in ("3 / 8", "2 / 8")
+        ]
+        for action, kind in (("earn_stamp", "earn"), ("redeem_stamps", "redeem")):
+            arguments = dict(business=self.business, customer_id=self.customer.id, staff_id=None,
+                             action=action, tx_type=kind, points_amount=0, stamps_amount=1,
+                             purchase_amount=0, request_id=f"wallet-{kind}", fingerprint=kind)
+            first = process_loyalty_transaction(**arguments)
+            replay = process_loyalty_transaction(**arguments)
+            self.assertEqual(first.transaction.id, replay.transaction.id)
+            self.assertEqual(process_pending_google_wallet_jobs(service=service), 1)
+        self.assertEqual(Transaction.query.count(), 2)
+        self.assertEqual(GoogleWalletSyncJob.query.filter_by(status="completed").count(), 2)
+        calls = service.http.calls
+        self.assertEqual([call[0] for call in calls], ["PATCH", "PATCH"])
+        self.assertEqual(calls[0][1], calls[1][1])
+        self.assertEqual([call[2]["loyaltyPoints"]["balance"]["string"] for call in calls],
+                         ["3 / 8", "2 / 8"])
+
+    def test_failed_local_commit_rolls_back_balance_ledger_and_outbox(self):
+        from app.models import LoyaltyLedgerEntry
+
+        self.app.config["GOOGLE_WALLET_MODE"] = "real"
+        business, customer_id = self.business, self.customer.id
+
+        def fail_after_flush():
+            db.session.flush()
+            self.assertEqual(GoogleWalletSyncJob.query.count(), 1)
+            raise RuntimeError("synthetic commit failure")
+
+        with patch.object(db.session, "commit", side_effect=fail_after_flush):
+            with self.assertRaisesRegex(RuntimeError, "synthetic commit failure"):
+                process_loyalty_transaction(
+                    business=business, customer_id=customer_id, staff_id=None,
+                    action="earn_stamp", tx_type="earn", points_amount=0, stamps_amount=1,
+                    purchase_amount=0, request_id="wallet-rollback", fingerprint="wallet-rollback",
+                )
+        self.assertEqual(db.session.get(Customer, customer_id).current_stamps, 2)
+        self.assertEqual(Transaction.query.count(), 0)
+        self.assertEqual(LoyaltyLedgerEntry.query.count(), 0)
+        self.assertEqual(GoogleWalletSyncJob.query.count(), 0)
 
 
 if __name__ == "__main__":

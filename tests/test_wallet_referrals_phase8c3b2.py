@@ -119,6 +119,82 @@ class WalletReferralsPhase8C3B2TestCase(unittest.TestCase):
         self.assertIsNotNone(activation.consumed_at)
         self.assertNotEqual(activation.token_hash, self.activation_token)
 
+    def test_wallet_referral_worker_drains_events_without_enqueuing_secrets(self):
+        from app.models import GoogleWalletReferralJob
+        from app.models.google_wallet_referral_job import utcnow
+        from app.services.google_wallet_referral_queue import process_wallet_referral_jobs, wallet_referral_queue_counts
+        from app.services.referral_participant_service import configure_customer_ambassador
+
+        self.assertEqual(self._activate().status_code, 302)
+        self.assertEqual(self._activate().status_code, 302)
+        tasks = GoogleWalletReferralJob.query.order_by(GoogleWalletReferralJob.id).all()
+        self.assertEqual(len(tasks), 2)
+        self.assertGreater(tasks[0].run_at, utcnow())
+        calls = []
+
+        class Provider:
+            mode = "real"
+
+            def publish_referral_links(_self, customer):
+                calls.append(ReferralParticipant.query.filter_by(customer_id=customer.id).one().currently_eligible())
+                return {"status": "success"}
+
+        self.app.config["GOOGLE_WALLET_MODE"] = "disabled"
+        self.assertEqual(process_wallet_referral_jobs(service=Provider()), 0)
+        self.app.config["GOOGLE_WALLET_MODE"] = "real"
+        self.assertEqual(process_wallet_referral_jobs(service=Provider()), 1)
+        configure_customer_ambassador(
+            customer=self.customer, enabled=False, consent_version=None, consent_evidence=None,
+            actor_type="customer", actor_id=self.customer.id, reason="Revocación de prueba",
+            request_id="wallet-revocation", authorization_verified=True,
+        )
+        self.assertEqual(process_wallet_referral_jobs(service=Provider()), 1)
+        self.assertEqual(calls, [True, False])
+        self.business.referrals_enabled = False
+        db.session.flush()
+        self.assertEqual(GoogleWalletReferralJob.query.filter_by(customer_id=None).count(), 1)
+        db.session.rollback()
+        self.assertEqual(GoogleWalletReferralJob.query.filter_by(customer_id=None).count(), 0)
+        self.business.referrals_enabled = False
+        db.session.commit()
+        self.assertEqual(process_wallet_referral_jobs(service=Provider()), 1)
+        self.assertEqual(process_wallet_referral_jobs(service=Provider()), 1)
+        self.assertEqual(calls, [True, False, False])
+        self.assertEqual(wallet_referral_queue_counts(self.business.id)["completed"], 3)
+
+    def test_activation_in_either_remote_surface_is_preserved_until_expiry(self):
+        from datetime import timedelta
+        from app.models.google_wallet_referral_job import utcnow
+        from app.services.google_wallet_referral_queue import process_wallet_referral_jobs
+
+        _, activation_url = prepare_customer_wallet_invitation(self.customer)
+        self.customer._referral_wallet_invitation_url = None
+        service = GoogleWalletService(mode="mock")
+        surfaces = service._referral_surfaces(activation_url)
+        for key, value in surfaces.items():
+            patched = service._referral_links_patch({key: value}, {}, customer=self.customer)
+            self.assertEqual(patched, surfaces)
+        calls = []
+
+        class Provider:
+            mode = "real"
+
+            def publish_referral_links(_self, customer):
+                calls.append(customer.id)
+                return {"status": "skipped"}
+
+        self.app.config["GOOGLE_WALLET_MODE"] = "real"
+        self.assertEqual(process_wallet_referral_jobs(service=Provider()), 0)
+        activation = CustomerReferralActivation.query.one()
+        after_expiry = activation.expires_at + timedelta(seconds=1)
+        with patch("app.services.platform_admin_session.now", return_value=after_expiry), \
+             patch("app.services.google_wallet_referral_queue.utcnow", return_value=after_expiry):
+            patch_body = service._referral_links_patch(surfaces, {}, customer=self.customer)
+            self.assertEqual(patch_body, {"appLinkData": None, "linksModuleData": {"uris": []}})
+            self.assertEqual(process_wallet_referral_jobs(service=Provider()), 1)
+        self.assertEqual(calls, [self.customer.id])
+        self.assertLess(utcnow(), after_expiry)
+
     def test_share_page_qr_and_join_create_only_pending_attribution(self):
         self.assertEqual(self._activate().status_code, 302)
         page = self.client.get(f"/invite/{self.participant.invitation_code}")

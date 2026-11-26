@@ -14,6 +14,7 @@ class GoogleWalletSyncJob(db.Model):
     attempts = db.Column(db.Integer, nullable=False, default=0, server_default="0")
     next_attempt_at = db.Column(db.DateTime, nullable=True, index=True)
     locked_at = db.Column(db.DateTime, nullable=True)
+    claim_token = db.Column(db.String(32), nullable=True)
     last_status_code = db.Column(db.Integer, nullable=True)
     created_at = db.Column(db.DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, nullable=False, default=lambda: datetime.now(timezone.utc),

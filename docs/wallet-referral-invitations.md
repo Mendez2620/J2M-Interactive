@@ -17,3 +17,25 @@ Esto no demuestra que todos los pases ya instalados reciban el enlace. Google re
 ## Integración controlada
 
 Las migraciones son aditivas: `6a7b8c9d0e1f` relaja el check para identidades inactivas y `7b8c9d0e1f2a` crea la tabla tenant-scoped de capacidades, con RLS en PostgreSQL. El downgrade nuevo se bloquea si existe historial de capacidades. Para staging: verificar respaldo y head `5f6a7b8c9d0e`, fijar el migrador al SHA aprobado, ejecutar una sola vez `flask --app run.py db upgrade 7b8c9d0e1f2a`, validar tabla, FKs, índices, RLS, constraint y recuentos, y después desplegar web y worker. No relajar `EXPECTED_ALEMBIC_HEAD` ni ejecutar migraciones desde procesos de aplicación.
+# Actualización acotada de Google Wallet
+
+La actualización interna de referidos en una tarjeta existente se limita a
+`appLinkData` y a la entrada `invite_friends`. Un 404 no crea una tarjeta.
+Los orígenes HTTPS anteriores se reconocen únicamente cuando se declaran
+explícitamente en `GOOGLE_WALLET_REFERRAL_HISTORICAL_ORIGINS` (separados por coma)
+y la URL tiene la estructura conocida de invitación. El enlace de acción
+ajeno a J2M se conserva.
+
+La autorización local sigue siendo inmediata. Eliminar un enlace de una
+tarjeta no elimina copias ya compartidas. La misma transacción que registra
+consentimiento, revocación, cambios de negocio o una nueva capacidad guarda
+el trabajo. Una capacidad nueva deja un trabajo con fecha de vencimiento.
+El worker vuelve a comprobar ambas superficies de la tarjeta sin regenerar
+secretos ni publicar cambios de diseño.
+
+Los cambios se conservan en modo deshabilitado y simulado. Al habilitar el
+modo real mediante un despliegue autorizado, el worker procesa los eventos
+pendientes y omite las tarjetas que no existen. La migración no programa un
+barrido histórico. Si se necesita revisar tarjetas anteriores, programe una
+revisión controlada por negocio tras validar la configuración y el proveedor.
+La retirada visual en dispositivos físicos requiere validación independiente.
