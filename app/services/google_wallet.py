@@ -245,7 +245,13 @@ class GoogleWalletService:
             result["textModulesData"].append({"id": "contact", "header": "Contacto", "body": business.wallet_contact})
         invitation_url = self._invitation_url(customer)
         if invitation_url:
-            result["appLinkData"] = {
+            result.update(self._referral_surfaces(invitation_url))
+        return result
+
+    @staticmethod
+    def _referral_surfaces(invitation_url):
+        return {
+            "appLinkData": {
                 "webAppLinkInfo": {"appTarget": {"targetUri": {
                     "uri": invitation_url,
                     "description": "Invitación personal del programa de referidos",
@@ -253,17 +259,13 @@ class GoogleWalletService:
                 "displayText": {"defaultValue": {
                     "language": "es-419", "value": "Invitar amigos",
                 }},
-            }
-            # Google documents both object-level surfaces. appLinkData is the
-            # preferred action, while linksModuleData keeps the same personal
-            # URL discoverable in pass details (including clients that do not
-            # render the app link consistently). Never put this URL on Class.
-            result["linksModuleData"] = {"uris": [{
+            },
+            "linksModuleData": {"uris": [{
                 "id": "invite_friends",
                 "uri": invitation_url,
                 "description": "Invitar amigos",
-            }]}
-        return result
+            }]},
+        }
 
     def _request(self, method, resource, *, body=None):
         operation = None
@@ -351,7 +353,7 @@ class GoogleWalletService:
         # as design publication, while still updating the issuance-owned QR.
         for key in ("textModulesData", "linksModuleData", "appLinkData"):
             metadata.pop(key, None)
-        metadata.update(self._owned_metadata_patch(existing, body))
+        metadata.update(self._owned_metadata_patch(existing, body, customer=customer))
         return self._verified_mutation("PATCH", "loyaltyObject", body["id"], metadata,
                                        class_id=body["classId"])
 
@@ -380,7 +382,7 @@ class GoogleWalletService:
                 emitted.add(item_id)
         return merged
 
-    def _owned_metadata_patch(self, existing, desired):
+    def _owned_metadata_patch(self, existing, desired, *, customer=None):
         """Merge owned modules and remove obsolete owned links, preserving foreign data."""
         controlled_text = {"program", "reward", "instructions", "terms", "contact"}
         existing_text = existing.get("textModulesData") if isinstance(existing, dict) else []
@@ -388,30 +390,37 @@ class GoogleWalletService:
             existing_text if isinstance(existing_text, list) else [],
             desired.get("textModulesData", []), controlled_text,
         )}
-        patch_body.update(self._referral_links_patch(existing, desired))
+        patch_body.update(self._referral_links_patch(existing, desired, customer=customer))
         return patch_body
 
-    def _referral_links_patch(self, existing, desired):
+    def _referral_links_patch(self, existing, desired, *, customer=None):
         patch_body = {}
         existing_links = existing.get("linksModuleData") if isinstance(existing, dict) else None
         desired_links = desired.get("linksModuleData")
         merged_links = copy.deepcopy(existing_links) if isinstance(existing_links, dict) else {}
         current_uris = merged_links.get("uris") if isinstance(merged_links.get("uris"), list) else []
+        current_app_link = existing.get("appLinkData") if isinstance(existing, dict) else None
+        try:
+            current_uri = current_app_link["webAppLinkInfo"]["appTarget"]["targetUri"]["uri"]
+        except (KeyError, TypeError):
+            current_uri = None
+        if customer is not None and "appLinkData" not in desired:
+            candidates = [current_uri, *(entry.get("uri") for entry in current_uris
+                            if isinstance(entry, dict) and entry.get("id") == "invite_friends")]
+            for uri in candidates:
+                if uri and self._invitation_url(customer, existing_activation=uri) == uri:
+                    desired = {**desired, **self._referral_surfaces(uri)}
+                    desired_links = desired["linksModuleData"]
+                    break
         wanted_uris = desired_links.get("uris", []) if isinstance(desired_links, dict) else []
         merged_links["uris"] = self._merge_items(current_uris, wanted_uris, {"invite_friends"})
         if merged_links["uris"] or existing_links is not None:
             patch_body["linksModuleData"] = merged_links
 
-        if "appLinkData" in desired:
+        if "appLinkData" in desired and (not current_app_link or self._is_owned_referral_uri(current_uri)):
             patch_body["appLinkData"] = desired["appLinkData"]
-        else:
-            current_app_link = existing.get("appLinkData") if isinstance(existing, dict) else None
-            try:
-                current_uri = current_app_link["webAppLinkInfo"]["appTarget"]["targetUri"]["uri"]
-            except (KeyError, TypeError):
-                current_uri = ""
-            if self._is_owned_referral_uri(current_uri):
-                patch_body["appLinkData"] = None
+        elif "appLinkData" not in desired and self._is_owned_referral_uri(current_uri):
+            patch_body["appLinkData"] = None
         return patch_body
 
     def _is_owned_referral_uri(self, uri):
@@ -442,20 +451,10 @@ class GoogleWalletService:
             if not isinstance(existing, dict) or existing.get("id") != object_id or existing.get("classId") != class_id:
                 return {"status": "error", "reason": "remote_identity_mismatch"}
             body = self.create_loyalty_object(customer)
-            try:
-                current_uri = existing["appLinkData"]["webAppLinkInfo"]["appTarget"]["targetUri"]["uri"]
-            except (KeyError, TypeError):
-                current_uri = None
-            if "appLinkData" not in body and current_uri and self._invitation_url(
-                customer, existing_activation=current_uri,
-            ) == current_uri:
-                return {"status": "success"}
             patch_body = {
-                key: value for key, value in self._referral_links_patch(existing, body).items()
+                key: value for key, value in self._referral_links_patch(existing, body, customer=customer).items()
                 if existing.get(key) != value
             }
-            if existing.get("appLinkData") and not self._is_owned_referral_uri(current_uri):
-                patch_body.pop("appLinkData", None)
             if patch_body:
                 self._verified_mutation("PATCH", "loyaltyObject", object_id, patch_body, class_id=class_id)
             return {"status": "success"}
@@ -496,7 +495,7 @@ class GoogleWalletService:
             else:
                 return {"status": "retry" if exc.retryable else "error", "status_code": exc.status_code}
 
-        patch_body = self._owned_metadata_patch(existing, desired)
+        patch_body = self._owned_metadata_patch(existing, desired, customer=customer)
         try:
             self._verified_mutation("PATCH", "loyaltyObject", object_id, patch_body,
                                     class_id=desired["classId"])

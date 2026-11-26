@@ -295,12 +295,15 @@ def run_google_wallet_sync_worker(*, stop_event=None, sleep_fn=time.sleep, servi
                 process_pending_wallet_publications, wallet_publication_metrics,
             )
             published = process_pending_wallet_publications(limit=batch_size, service=service)
+            from app.services.google_wallet_referral_queue import process_wallet_referral_jobs, wallet_referral_queue_counts
+            referrals = process_wallet_referral_jobs(service=service)
             from app.services.admin_wallet_review import process_one_admin_wallet_review
             reviewed = process_one_admin_wallet_review(service=service)
             publication_metrics = wallet_publication_metrics()
             metrics = google_wallet_sync_metrics()
             logger.info("google_wallet_worker_metrics %s", json.dumps({
                 "processed": processed, "published": published, "reviews_processed": reviewed,
+                "referrals_processed": referrals, "referrals": wallet_referral_queue_counts(),
                 "publications": publication_metrics, **metrics,
             }, sort_keys=True))
             backlog = metrics["pending"] + metrics["processing"]

@@ -51,6 +51,10 @@ def configure_referral_program(*, business, enabled, actor_type, actor_id,
         Business.referrals_enabled.isnot(enabled),
     ).update({Business.referrals_enabled: enabled}, synchronize_session=False)
     previous = (not enabled) if changed else enabled
+    if changed:
+        from app.models.google_wallet_referral_job import GoogleWalletReferralJob
+
+        db.session.add(GoogleWalletReferralJob(business_id=business.id))
     db.session.expire(business, ["referrals_enabled"])
     db.session.add(ReferralProgramAudit(
         business_id=business.id, actor_type=actor_type, actor_id=actor_id,

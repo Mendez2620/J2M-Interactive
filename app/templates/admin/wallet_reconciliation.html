@@ -33,6 +33,15 @@
       {% endfor %}
     </dl>
   </section>
+  <section aria-labelledby="referral-queue" class="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
+    <h2 id="referral-queue" class="font-bold">Enlaces de referidos en Wallet</h2>
+    <p class="text-sm">La revocación local es inmediata. La retirada visual depende del resultado remoto.</p>
+    <dl class="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
+    {% for key, label in [('pending','Pendientes'), ('processing','En proceso'), ('retry','Reintentos'), ('blocked','Reserva no disponible'), ('completed','Confirmados'), ('missing','Tarjetas inexistentes'), ('failed','Fallos permanentes'), ('business_pending','Cambios de negocio pendientes'), ('expiry_pending','Vencimientos pendientes')] %}
+      <div><dt>{{ label }}</dt><dd class="text-lg font-bold">{{ referral_queue[key] }}</dd></div>
+    {% endfor %}
+    </dl>
+  </section>
   <section aria-labelledby="active-reservations" class="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
     <h2 id="active-reservations" class="font-bold">Reservas activas</h2>
     {% set reservation_labels = {'reserved': 'Reservada', 'started': 'Envío iniciado', 'uncertain': 'Incierta', 'confirmed': 'Confirmación remota'} %}

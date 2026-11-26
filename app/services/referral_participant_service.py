@@ -78,6 +78,12 @@ def _historical_state(audit):
 def _audit(participant, actor_type, actor_id, action, reason, request_id, previous,
            fingerprint):
     state = _snapshot(participant)
+    if participant.participant_type == "customer_ambassador":
+        from app.models.google_wallet_referral_job import GoogleWalletReferralJob
+
+        db.session.add(GoogleWalletReferralJob(
+            business_id=participant.business_id, customer_id=participant.customer_id,
+        ))
     db.session.add(ReferralParticipantAudit(
         business_id=participant.business_id, participant_id=participant.id,
         action=action, actor_type=actor_type, actor_id=actor_id, reason=reason,
@@ -301,6 +307,12 @@ def prepare_customer_wallet_invitation(customer):
         ),
     )
     db.session.add(activation)
+    from app.models.google_wallet_referral_job import GoogleWalletReferralJob
+
+    db.session.add(GoogleWalletReferralJob(
+        business_id=participant.business_id, customer_id=participant.customer_id,
+        run_at=activation.expires_at, scheduled_expiry=True,
+    ))
     db.session.commit()
     url = f"{base}/invite/activate/{raw_token}" if base else None
     customer._referral_wallet_invitation_url = url

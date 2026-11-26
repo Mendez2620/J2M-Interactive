@@ -498,6 +498,126 @@ class ReconciliationPreviewSQLiteTests(ReconciliationPreviewCases, unittest.Test
 
 @unittest.skipUnless(os.getenv("TEST_POSTGRES_URL"), "synthetic PostgreSQL CI not configured")
 class ReconciliationPreviewPostgresTests(ReconciliationPreviewCases, unittest.TestCase):
+    def test_referral_revocation_waits_for_inflight_write_and_removes_only_owned_links(self):
+        self.check_referral_revocation_during_write(uncertain=False)
+
+    def test_uncertain_referral_write_blocks_remote_removal_after_local_revocation(self):
+        self.check_referral_revocation_during_write(uncertain=True)
+
+    def check_referral_revocation_during_write(self, *, uncertain):
+        from datetime import timedelta
+        from requests import Timeout
+        from app.models import GoogleWalletReferralJob
+        from app.services.google_wallet import GoogleWalletService
+        from app.services.google_wallet_referral_queue import process_wallet_referral_jobs, utcnow
+        from app.services.referral_participant_service import configure_customer_ambassador
+
+        self.app.config.update(GOOGLE_WALLET_MODE="real", GOOGLE_ISSUER_ID="123456",
+                               PUBLIC_BASE_URL="https://j2m.example")
+        business = db.session.get(Business, self.business_id)
+        business.referrals_enabled = True
+        db.session.commit()
+        process_wallet_referral_jobs(limit=1)
+        customer_id = self.customer()
+        target = f"123456.business_{self.business_id}_customer_{customer_id}"
+
+        def change(enabled, subject_id=customer_id):
+            configure_customer_ambassador(
+                customer=db.session.get(Customer, subject_id), enabled=enabled,
+                consent_version="v1", consent_evidence="synthetic consent",
+                actor_type="customer", actor_id=subject_id, reason="Synthetic choice",
+                request_id=f"referral-{subject_id}-{enabled}", authorization_verified=True,
+            )
+
+        change(True)
+        started, release = Event(), Event()
+        calls = []
+        independent_reads = []
+        foreign = {"id": "menu", "uri": "https://foreign.example/menu"}
+        remote = {"id": target, "classId": target.split("_customer_")[0],
+                  "barcode": {"value": "unchanged"}, "loyaltyPoints": {"label": "Sellos"},
+                  "linksModuleData": {"uris": [foreign]}}
+        engine = db.engine
+
+        class Response:
+            status_code = 200
+            content = b"synthetic"
+
+            def json(self):
+                return dict(remote)
+
+        class Transport:
+            def request(self, method, url, *, json, **kwargs):
+                if not url.endswith(target):
+                    self_test.assertEqual(method, "GET")
+                    independent_reads.append(True)
+                    return type("MissingResponse", (), {"status_code": 404})()
+                if method == "PATCH":
+                    calls.append(json)
+                    if len(calls) == 1:
+                        started.set()
+                        self_test.assertTrue(release.wait(15))
+                    remote.update(json)
+                    if uncertain and len(calls) == 1:
+                        raise Timeout("Synthetic response loss")
+                else:
+                    self_test.assertEqual(method, "GET")
+                return Response()
+
+        self_test = self
+        credentials = {
+            "type": "service_account", "project_id": "synthetic",
+            "client_email": "wallet@synthetic.iam.gserviceaccount.com",
+            "private_key": GoogleWalletService._generate_dev_private_key(),
+            "token_uri": "https://example.invalid/token",
+        }
+
+        def worker():
+            with self.app.app_context():
+                return process_wallet_referral_jobs(service=GoogleWalletService(
+                    mode="real", credentials_info=credentials, http_session=Transport(),
+                ))
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(worker)
+            try:
+                self.assertTrue(started.wait(10))
+                change(False)
+                independent_id = self.customer()
+                change(True, independent_id)
+                with engine.begin() as connection:
+                    pid = connection.execute(text(
+                        "SELECT l.pid FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid "
+                        "WHERE l.locktype='advisory' AND l.granted AND l.objsubid=2 "
+                        "AND l.classid=1246907724 AND l.objid=:id AND a.datname=current_database() "
+                        "AND a.application_name=:app"
+                    ), {"id": customer_id, "app": self.synthetic_schema}).scalar_one()
+                    self.assertTrue(connection.execute(text(
+                        "SELECT pg_terminate_backend(:pid, 5000)"
+                    ), {"pid": pid}).scalar_one())
+                worker()
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(independent_reads, [True])
+                self.assertEqual(GoogleWalletReferralJob.query.filter_by(customer_id=independent_id).one().status,
+                                 "missing")
+                self.assertEqual(GoogleWalletReferralJob.query.filter_by(status="pending").count(), 1)
+            finally:
+                release.set()
+            self.assertEqual(future.result(timeout=15), 1)
+        with patch("app.services.google_wallet_referral_queue.utcnow", return_value=utcnow() + timedelta(hours=2)):
+            worker()
+        if uncertain:
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(GoogleWalletReferralJob.query.filter_by(status="pending", outcome="blocked").count(), 2)
+            self.assertIsNotNone(remote["appLinkData"])
+        else:
+            self.assertEqual(remote["linksModuleData"]["uris"], [foreign])
+            self.assertIsNone(remote["appLinkData"])
+        self.assertEqual(remote["barcode"], {"value": "unchanged"})
+        self.assertEqual(remote["loyaltyPoints"], {"label": "Sellos"})
+        self.assertEqual(Transaction.query.count(), 0)
+        self.assertEqual(LoyaltyLedgerEntry.query.count(), 0)
+
     def test_normal_worker_claims_only_returned_rows_and_fences_stale_owner(self):
         from datetime import timedelta
         from threading import Barrier

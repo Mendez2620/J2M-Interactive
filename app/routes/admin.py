@@ -786,6 +786,7 @@ def update_business(business_id: int):
 @platform_admin_required
 def business_wallet_reconciliation(business_id):
     import json
+    from app.services.google_wallet_referral_queue import wallet_referral_queue_counts
     from app.models.platform_admin_session import AdminWalletReview, PlatformAdminSession
     from app.services.admin_wallet_review import enabled
     from collections import defaultdict
@@ -814,11 +815,13 @@ def business_wallet_reconciliation(business_id):
     audit = preview = None
     counts = {}
     history = []
+    referral_queue = {}
     review_statuses = []
     active_reservations = []
     status = 200
     try:
         audit = google_wallet_reconciliation_audit(business_id)
+        referral_queue = wallet_referral_queue_counts(business_id)
         review_rows = db.session.execute(select(
             AdminWalletReview.state, AdminWalletReview.created_at, AdminWalletReview.result,
             AdminWalletReview.candidate_ids, PlatformAdmin.name.label("admin"),
@@ -953,6 +956,7 @@ def business_wallet_reconciliation(business_id):
         more_reservations=len(active_reservations) > 20 and reservation_page < 1000,
         review_statuses=review_statuses[:20], review_page=review_page,
         more_reviews=len(review_statuses) > 20 and review_page < 1000,
+        referral_queue=referral_queue,
         execution_enabled=enabled() and business.is_active,
     ), status)
     response.headers["Cache-Control"] = "no-store, private"

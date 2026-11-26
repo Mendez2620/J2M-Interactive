@@ -27,7 +27,15 @@ y la URL tiene la estructura conocida de invitación. El enlace de acción
 ajeno a J2M se conserva.
 
 La autorización local sigue siendo inmediata. Eliminar un enlace de una
-tarjeta no elimina copias ya compartidas. La ejecución automática desde
-cambios de consentimiento, configuración o vencimientos requiere todavía
-conectar el mecanismo durable de eventos; esta operación interna no
-garantiza por sí sola la propagación automática.
+tarjeta no elimina copias ya compartidas. La misma transacción que registra
+consentimiento, revocación, cambios de negocio o una nueva capacidad guarda
+el trabajo. Una capacidad nueva deja un trabajo con fecha de vencimiento.
+El worker vuelve a comprobar ambas superficies de la tarjeta sin regenerar
+secretos ni publicar cambios de diseño.
+
+Los cambios se conservan en modo deshabilitado y simulado. Al habilitar el
+modo real mediante un despliegue autorizado, el worker procesa los eventos
+pendientes y omite las tarjetas que no existen. La migración no programa un
+barrido histórico. Si se necesita revisar tarjetas anteriores, programe una
+revisión controlada por negocio tras validar la configuración y el proveedor.
+La retirada visual en dispositivos físicos requiere validación independiente.

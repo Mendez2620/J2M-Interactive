@@ -35,6 +35,13 @@ de la tarjeta o el momento en que un dispositivo recibe el cambio.
 
 ## Métricas y alertas
 
+La cola de referidos del mismo worker procesa hasta diez eventos por ciclo.
+Cada evento de negocio guarda cursor y trabajos de una página de hasta 25
+clientes en una transacción. Los vencimientos se programan por fecha e
+interrogan el índice de trabajos elegibles. Los cambios siguen en cola con
+Wallet deshabilitado o simulado. El diagnóstico separa revocación local de
+retirada remota confirmada y no muestra códigos ni capacidades.
+
 Cada ciclo registra solo agregados: procesados, pendientes, procesando, reintentando, completados, fallidos, antigüedad del trabajo más antiguo y fechas de último intento/éxito. No se registran tokens QR, datos de clientes ni credenciales.
 
 Crear alertas sobre los eventos `google_wallet_worker_backlog` y `google_wallet_worker_cycle_failed`. El contador `uncertain_objects` muestra escrituras iniciadas o inciertas con reserva activa. El outbox aplica espera exponencial acotada. Un reintento local frente a 429, 5xx o pérdida de respuesta no permite reenviar una escritura mientras la reserva siga incierta. Los 401/403 normalmente requieren corregir credenciales o permisos. Un objeto 404 se recupera mediante la creación segura ya implementada.
