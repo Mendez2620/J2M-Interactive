@@ -1201,6 +1201,8 @@ class RestoreReport:
     ledger_entries: int | None = None
     wallet_sync_jobs: int | None = None
     media_files_verified: int | None = None
+    ledger_customers_verified: int | None = None
+    ledger_customers_without_baseline: int | None = None
 
 
 def _psql(name: str, sql: str, timeout: int = 30) -> str:
@@ -1222,9 +1224,12 @@ def _wait_postgres(name: str) -> None:
 
 
 class RestoreProcessError(RuntimeError):
-    def __init__(self, stage, category):
+    def __init__(self, stage, category, *, exit_code=None, stream_finished=False, threads_finished=None):
         self.stage = stage
         self.category = category
+        self.exit_code = exit_code
+        self.stream_finished = stream_finished
+        self.threads_finished = threads_finished
         super().__init__(f"{stage}: {category}")
 
 
@@ -1250,11 +1255,13 @@ def _restore_process(command, archive, key, *, stage, timeout):
                             stderr=subprocess.PIPE)
     categories = set()
     failures = []
+    stream_finished = threading.Event()
 
     def feed():
         try:
             with proc.stdin, archive.open("rb") as source:
                 decrypt_stream(source, proc.stdin, key)
+            stream_finished.set()
         except Exception as exc:
             failures.append("broken_pipe" if isinstance(exc, BrokenPipeError) else "stream")
 
@@ -1283,6 +1290,8 @@ def _restore_process(command, archive, key, *, stage, timeout):
                 failures[0] if failures else "unclassified"))
     except subprocess.TimeoutExpired:
         raise RestoreProcessError(stage, "timeout") from None
+    except RestoreProcessError:
+        raise
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -1293,6 +1302,11 @@ def _restore_process(command, archive, key, *, stage, timeout):
         for worker in threads:
             if worker.ident is not None and worker.is_alive():
                 worker.join(timeout=0.2)
+        error = sys.exc_info()[1]
+        if isinstance(error, RestoreProcessError):
+            error.exit_code = proc.returncode
+            error.stream_finished = stream_finished.is_set()
+            error.threads_finished = all(not worker.is_alive() for worker in threads)
 
 
 def _restore_database_stream(backup: Path, key: bytes, name: str, timeout: int) -> None:
@@ -1408,7 +1422,8 @@ def restore_integral_isolated(index: Path, key_file: Path, image: str,
                               lock_file: Path | None = None,
                               timeout: int = 900, *,
                               expected_image_id: str | None = None,
-                              expected_index_sha256: str | None = None) -> RestoreReport:
+                              expected_index_sha256: str | None = None,
+                              postgres_image: str = "postgres:17-alpine") -> RestoreReport:
     """Restore one authenticated DB/media set and probe its public media in isolation.
 
     Optional identity constraints bind the transition rehearsal to one exact
@@ -1427,6 +1442,8 @@ def restore_integral_isolated(index: Path, key_file: Path, image: str,
             raise RuntimeError("La imagen no coincide con la identidad aprobada.")
         # Every subsequent Docker run uses the immutable ID, not the tag.
         image = expected_image_id
+    if postgres_image != "postgres:17-alpine" and not re.fullmatch(r"sha256:[0-9a-f]{64}", postgres_image):
+        raise ValueError("Identidad PostgreSQL inválida.")
     with exclusive_lock(lock_file or index.parent / ".operations.lock"):
         if expected_index_sha256 is not None and (
                 not re.fullmatch(r"[0-9a-f]{64}", expected_index_sha256)
@@ -1449,7 +1466,7 @@ def restore_integral_isolated(index: Path, key_file: Path, image: str,
                             "--network-alias", "postgres", "--tmpfs",
                             "/var/lib/postgresql/data:rw,noexec,nosuid,size=2g",
                             "-e", "POSTGRES_DB=j2m_restore", "-e", "POSTGRES_USER=j2m_restore",
-                            "-e", f"POSTGRES_PASSWORD={password}", "postgres:17-alpine"],
+                            "-e", f"POSTGRES_PASSWORD={password}", postgres_image],
                            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                            timeout=60)
             _wait_postgres(pg_name)
@@ -1531,7 +1548,30 @@ def restore_integral_isolated(index: Path, key_file: Path, image: str,
             """).split(",")]
             if integrity[2]:
                 raise RuntimeError("El respaldo contiene trabajos Wallet con referencias inconsistentes.")
-            return RestoreReport(revision, *counts, *integrity[:2], len(authorized))
+            verify_ledger = """
+from run import app
+from app.models import Customer
+from app.services.loyalty_transaction_service import reconcile_customer_balance
+with app.app_context():
+    seen = unverified = 0
+    for customer in Customer.query.order_by(Customer.id).yield_per(100):
+        outcome = reconcile_customer_balance(customer)
+        if not outcome["verifiable"]:
+            unverified += 1
+        elif not outcome["consistent"]:
+            raise SystemExit(1)
+        else:
+            seen += 1
+    print(f"{seen},{unverified}")
+"""
+            verdict = subprocess.run(["docker", "exec", app_name, "python", "-c", verify_ledger],
+                                     capture_output=True, text=True, timeout=min(timeout, 180))
+            if verdict.returncode or not re.fullmatch(r"[0-9]+,[0-9]+", verdict.stdout.strip()):
+                raise RuntimeError("La cadena del ledger restaurado no pudo verificarse.")
+            verified, no_baseline = map(int, verdict.stdout.strip().split(","))
+            if verified + no_baseline != counts[1]:
+                raise RuntimeError("El ledger no cubrió el inventario de clientes restaurados.")
+            return RestoreReport(revision, *counts, *integrity[:2], len(authorized), verified, no_baseline)
         finally:
             for container in (app_name, pg_name):
                 subprocess.run(["docker", "rm", "-f", container], stdout=subprocess.DEVNULL,

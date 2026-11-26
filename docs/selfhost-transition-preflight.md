@@ -190,3 +190,27 @@ Mantiene `--exit-on-error` y limita el filtro de TOC al proveedor
 establecida del esquema `vault`. Cualquier dependencia nueva debe
 reproducirse y resolverse en aislamiento. No excluya más objetos por
 coincidencia de nombre ni acepte una restauración parcial.
+
+## Separación de roles y respaldo
+
+`python tests/postgres_role_separation_ci.py` ensaya cinco roles sobre
+PostgreSQL sin red. Comprueba políticas por tenant, permisos de secuencia,
+respaldo mediante `pg_dump --enable-row-security` y comparación del contenido
+restaurado con la fuente. La política SELECT de respaldo se concede
+exclusivamente a esa identidad. Con RLS, `--enable-row-security` por sí solo
+puede omitir filas, por lo que se requiere una comparación exhaustiva y una
+política explícita por objeto. El propietario no tiene login, y el migrador
+puede asumirlo sin entregar ese privilegio a los escritores.
+
+El ensayo combina NOLOGIN, revocación de DML y secuencia, y una barrera de
+bloqueo exclusivo para drenar transacciones. Prueba el rechazo a nuevas
+conexiones y el rechazo de DML desde una conexión que ya existía. La barrera
+queda aplicada al confirmar la transacción. El ensayo no reabre escritores.
+Su modelo de una tabla no sustituye el inventario de grants, funciones,
+políticas, trabajos y caminos efectivos de la aplicación completa. La
+transición no puede depender de trasladar este SQL ficticio a Supabase.
+La reapertura y la implementación de la barrera real requieren autorización.
+
+Referencias: [pg_dump](https://www.postgresql.org/docs/current/app-pgdump.html),
+[RLS de PostgreSQL](https://www.postgresql.org/docs/current/ddl-rowsecurity.html) y
+[roles de Supabase](https://supabase.com/docs/guides/database/postgres/roles).

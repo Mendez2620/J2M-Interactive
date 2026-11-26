@@ -17,7 +17,7 @@ from scripts.historical_transition_evidence import IMAGE_ID, INITIAL_HEAD
 from scripts.selfhost_transition_preflight import LEGACY_TAG, inspect_backup, image_id, command
 
 
-def verify_exact_restore(index, key_file, expected_hash, expected_image):
+def verify_exact_restore(index, key_file, expected_hash, expected_image, *, postgres_image=None):
     if not re.fullmatch(r"[0-9a-f]{64}", expected_hash) or not IMAGE_ID.fullmatch(expected_image):
         raise ValueError("Invalid expected identities")
     if any(os.environ.get(name) for name in ("DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_TLS",
@@ -37,7 +37,8 @@ def verify_exact_restore(index, key_file, expected_hash, expected_image):
     report = backup.restore_integral_isolated(
         index, key_file, LEGACY_TAG,
         lock_file=index.parent.parent / ".operations.lock",
-        expected_image_id=expected_image, expected_index_sha256=expected_hash)
+        expected_image_id=expected_image, expected_index_sha256=expected_hash,
+        **({"postgres_image": postgres_image} if postgres_image is not None else {}))
     after = inspect_backup(index, key_file)
     if before != after or image_id(LEGACY_TAG) != expected_image or report.alembic_revision != INITIAL_HEAD:
         raise RuntimeError("Restore evidence does not match the historical transition")
@@ -47,6 +48,8 @@ def verify_exact_restore(index, key_file, expected_hash, expected_image):
             "staff": report.staff, "transactions": report.transactions,
             "ledger_entries": report.ledger_entries, "wallet_sync_jobs": report.wallet_sync_jobs,
             "media_files_verified": report.media_files_verified,
+            "ledger_customers_verified": report.ledger_customers_verified,
+            "ledger_customers_without_baseline": report.ledger_customers_without_baseline,
             "transition_authorized": False}
 
 
@@ -65,7 +68,9 @@ def main():
         result = verify_exact_restore(args.index, args.key_file, args.expected_index_sha256,
                                       args.expected_legacy_image_id)
     except backup.RestoreProcessError as exc:
-        print(f"Isolated restore blocked: stage={exc.stage}, category={exc.category}.")
+        print(json.dumps({"status": "blocked", "stage": exc.stage, "category": exc.category,
+                          "exit_code": exc.exit_code, "timeout": exc.category == "timeout",
+                          "stream_finished": exc.stream_finished, "threads_finished": exc.threads_finished}))
         return 1
     except Exception as exc:
         print("Isolated restore not verified (" + type(exc).__name__ + ").")
