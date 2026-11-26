@@ -58,6 +58,7 @@ jobs:
           python -m unittest discover tests -p 'test_selfhost_transition_preflight.py' -v
           python -m unittest discover tests -p 'test_probe_authorized_pooler.py' -v
           python -m unittest discover tests -p 'test_verify_transition_restore.py' -v
+          python -m unittest discover tests -p 'test_restore_process_stream.py' -v
           python -m compileall -q scripts tests
           git diff --check HEAD^ HEAD
       - run: python -m unittest discover tests -v

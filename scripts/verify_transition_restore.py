@@ -64,6 +64,9 @@ def main():
     try:
         result = verify_exact_restore(args.index, args.key_file, args.expected_index_sha256,
                                       args.expected_legacy_image_id)
+    except backup.RestoreProcessError as exc:
+        print(f"Isolated restore blocked: stage={exc.stage}, category={exc.category}.")
+        return 1
     except Exception as exc:
         print("Isolated restore not verified (" + type(exc).__name__ + ").")
         return 1

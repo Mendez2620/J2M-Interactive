@@ -141,3 +141,52 @@ recargue de forma graciosa solo con autorización y ejecute el preflight de
 atestación. Si no se vincula el nonce al upstream en ambas rutas, restaure
 la configuración original y valide antes de recargar. El log adicional usa
 la ruta sin query y carece de cookies, cuerpos y tokens.
+
+## Inventario operativo del 26 de noviembre
+
+La configuración candidata se aplicó con recarga graciosa. La atestación
+por nonce acreditó health y ready. La copia exacta anterior queda protegida
+por ACL para recuperación. Web y worker no se reiniciaron.
+
+La inspección de solo lectura observó que el login compartido es propietario
+de las 42 tablas y 30 secuencias de `public`, puede escribir en las 42 tablas,
+puede omitir RLS y tiene nueve membresías directas que puede asumir. Railway
+mostraba los tres servicios fuera de línea, sin trabajos pendientes. Eso no
+impide nuevos despliegues o reconexiones. La instantánea de actividad no
+acredita una barrera y no se modificó ningún rol.
+
+Separe un rol propietario sin login y una identidad de migración autorizada
+para asumirlo. Web y worker deben tener logins distintos sin propiedad,
+BYPASSRLS ni membresías administrativas, limitados a tablas, funciones y
+secuencias que sus flujos usan. El respaldo debe usar una identidad
+separada de lectura con cobertura comprobada de las tablas con RLS y sus
+secuencias. La administración y recuperación se mantienen separadas. Antes
+de autorizar ese cambio, ensaye las políticas y permisos con los cuatro roles
+en una copia sintética. El acceso completo de respaldo requiere un diseño
+explícito compatible con RLS, sin conceder escritura.
+
+La barrera futura debe bloquear nuevos logins de escritores, impedir
+suplantación por membresías y coordinar el drenaje de sesiones ya abiertas
+a través del pooler. Debe conservar al migrador y registrar el estado de
+roles, permisos y servicios para una reversión aprobada. Compruebe intentos
+directos y por pooler con cada escritor mientras la barrera está activa.
+No dependa de un filtro HTTP, del estado offline de Railway, ni de una
+captura única de sesiones. No ejecute cambios de privilegios en el rol
+administrado compartido sin una revisión específica.
+
+### Restauración
+
+Las tres tareas apuntan al checkout operativo `dae140e`. Este espera
+Alembic `9d0e1f2a3b4c`, usa PostgreSQL 17 y valida el snapshot antes de
+publicar un conjunto. El checkout actualizado espera `c3d4e5f6a7b8` y el
+verificador de transición exige explícitamente el head legado. Eso explica
+la diferencia entre contratos de revisión, pero no el fallo previo dentro
+de `pg_restore`. No hay diagnóstico histórico suficiente para atribuirlo a
+extensiones, roles, RLS, dependencias o recursos.
+
+El nuevo proceso drena errores concurrentemente y conserva solo categorías.
+Mantiene `--exit-on-error` y limita el filtro de TOC al proveedor
+`supabase_vault` y su comentario exacto. Se conserva la exclusión
+establecida del esquema `vault`. Cualquier dependencia nueva debe
+reproducirse y resolverse en aislamiento. No excluya más objetos por
+coincidencia de nombre ni acepte una restauración parcial.

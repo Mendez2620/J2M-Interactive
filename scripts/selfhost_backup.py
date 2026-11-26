@@ -1221,40 +1221,94 @@ def _wait_postgres(name: str) -> None:
     raise RuntimeError("PostgreSQL aislado no quedó disponible.")
 
 
+class RestoreProcessError(RuntimeError):
+    def __init__(self, stage, category):
+        self.stage = stage
+        self.category = category
+        super().__init__(f"{stage}: {category}")
+
+
+def _restore_error_categories(chunk):
+    patterns = {
+        "extension": rb"extension.{0,180}(?:not available|does not exist)|extension control file",
+        "role": rb"role.{0,180}(?:does not exist|permission denied)",
+        "rls_policy": rb"row.level security|(?:create|alter) policy",
+        "dependency": rb"(?:schema|relation|function|type).{0,180}does not exist|depend",
+        "version": rb"unsupported version|version mismatch",
+        "archive_format": rb"not a valid archive|not appear to be a valid archive|invalid archive",
+        "space": rb"no space left|disk full",
+        "memory": rb"out of memory|cannot allocate memory",
+    }
+    return {category for category, pattern in patterns.items()
+            if re.search(pattern, chunk, re.IGNORECASE)}
+
+
+def _restore_process(command, archive, key, *, stage, timeout):
+    """Feed authenticated bytes and consume diagnostics without retaining raw output."""
+    expiry = time.monotonic() + timeout
+    proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.PIPE)
+    categories = set()
+    failures = []
+
+    def feed():
+        try:
+            with proc.stdin, archive.open("rb") as source:
+                decrypt_stream(source, proc.stdin, key)
+        except Exception as exc:
+            failures.append("broken_pipe" if isinstance(exc, BrokenPipeError) else "stream")
+
+    def drain():
+        tail = b""
+        try:
+            with proc.stderr:
+                while chunk := proc.stderr.read1(4096):
+                    window = tail + chunk
+                    categories.update(_restore_error_categories(window))
+                    tail = window[-512:]
+        except OSError:
+            failures.append("diagnostic_stream")
+
+    threads = [threading.Thread(target=drain, daemon=True), threading.Thread(target=feed, daemon=True)]
+    try:
+        for worker in threads:
+            worker.start()
+        status = proc.wait(timeout=max(0.01, expiry - time.monotonic()))
+        for worker in threads:
+            worker.join(timeout=max(0, expiry - time.monotonic()))
+        if any(worker.is_alive() for worker in threads):
+            raise RestoreProcessError(stage, "timeout")
+        if status or failures:
+            raise RestoreProcessError(stage, ",".join(sorted(categories)) or (
+                failures[0] if failures else "unclassified"))
+    except subprocess.TimeoutExpired:
+        raise RestoreProcessError(stage, "timeout") from None
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+        for worker in threads:
+            if worker.ident is not None and worker.is_alive():
+                worker.join(timeout=0.2)
+
+
 def _restore_database_stream(backup: Path, key: bytes, name: str, timeout: int) -> None:
-    listing = subprocess.Popen(
+    _restore_process(
         ["docker", "exec", "-i", name, "sh", "-eu", "-c",
          "pg_restore --list > /tmp/all.list; "
-         "grep -v supabase_vault /tmp/all.list > /tmp/j2m-restore.list; "
+         "grep -vE '^[0-9]+; [0-9]+ [0-9]+ (EXTENSION - supabase_vault|"
+         "COMMENT - EXTENSION supabase_vault)[[:space:]]*$' /tmp/all.list > /tmp/j2m-restore.list; "
          "test -s /tmp/j2m-restore.list"],
-        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-    )
-    assert listing.stdin is not None
-    with backup.open("rb") as encrypted:
-        decrypt_stream(encrypted, listing.stdin, key)
-    listing.stdin.close()
-    if listing.wait(timeout=30) != 0:
-        raise RuntimeError("No fue posible preparar la lista de restauración aislada.")
-    restore = subprocess.Popen(["docker", "exec", "-i", name, "pg_restore",
-                                "--exit-on-error", "--no-owner", "--no-acl",
-                                "--exclude-schema=vault", "--use-list=/tmp/j2m-restore.list",
-                                "-U", "j2m_restore", "-d", "j2m_restore"],
-                               stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-                               stderr=subprocess.PIPE)
-    assert restore.stdin is not None
-    timer = threading.Timer(timeout, restore.kill)
-    timer.start()
-    try:
-        with backup.open("rb") as encrypted:
-            decrypt_stream(encrypted, restore.stdin, key)
-        restore.stdin.close()
-        if restore.wait(timeout=10) != 0:
-            raise RuntimeError("pg_restore falló en la base aislada.")
-    finally:
-        timer.cancel()
-        if restore.poll() is None:
-            restore.kill()
-            restore.wait()
+        backup, key, stage="archive_list", timeout=min(30, timeout))
+    _restore_process(
+        ["docker", "exec", "-i", name, "pg_restore",
+         "--exit-on-error", "--no-owner", "--no-acl",
+         "--exclude-schema=vault", "--use-list=/tmp/j2m-restore.list",
+         "-U", "j2m_restore", "-d", "j2m_restore"],
+        backup, key, stage="pg_restore", timeout=timeout)
 
 
 def _restored_media_references(name: str, archived: set[str]) -> set[str]:
@@ -1409,19 +1463,18 @@ def restore_integral_isolated(index: Path, key_file: Path, image: str,
                  "no-new-privileges:true", "--mount", f"type=volume,src={volume},dst=/restore",
                  image, "chown", "j2m:j2m", "/restore"], check=True,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
-            importer = subprocess.Popen(
-                ["docker", "run", "--rm", "-i", "--network", "none", "--read-only",
-                 "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
-                 "--mount", f"type=volume,src={volume},dst=/restore", image, "python", "-m",
-                 "scripts.selfhost_backup", "import-media", "--destination", "/restore",
-                 "--backup-id", backup_id], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE)
-            assert importer.stdin is not None
-            with media.open("rb") as source:
-                decrypt_stream(source, importer.stdin, key)
-            importer.stdin.close()
-            if importer.wait(timeout=timeout) != 0:
-                raise RuntimeError("La restauración aislada de medios falló.")
+            import_name = "j2m-restore-import-" + suffix
+            try:
+                _restore_process(
+                    ["docker", "run", "--rm", "--name", import_name, "-i", "--network", "none",
+                     "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
+                     "--mount", f"type=volume,src={volume},dst=/restore", image, "python", "-m",
+                     "scripts.selfhost_backup", "import-media", "--destination", "/restore",
+                     "--backup-id", backup_id],
+                    media, key, stage="media_import", timeout=timeout)
+            finally:
+                subprocess.run(["docker", "rm", "-f", import_name], stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=30)
 
             env = ["-e", "FLASK_ENV=development", "-e",
                    f"DATABASE_URL=postgresql://j2m_restore:{password}@postgres/j2m_restore",
