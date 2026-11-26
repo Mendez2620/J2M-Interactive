@@ -19,6 +19,10 @@ class AdminWalletReview(db.Model):
     __table_args__ = (
         db.CheckConstraint("state IN ('prepared','queued','running','finished','expired','rejected','inconclusive')",
                            name="ck_admin_wallet_review_state"),
+        db.CheckConstraint(
+            "(state NOT IN ('queued', 'running', 'finished', 'inconclusive') OR confirmed_at IS NOT NULL) AND (state != 'queued' OR (owner IS NULL AND claimed_at IS NULL AND finished_at IS NULL)) AND (state NOT IN ('running', 'finished', 'inconclusive') OR (owner IS NOT NULL AND claimed_at IS NOT NULL)) AND (state NOT IN ('finished', 'inconclusive') OR finished_at IS NOT NULL)",
+            name="ck_admin_wallet_review_claim",
+        ),
         db.Index("ix_admin_wallet_review_queue", "state", "created_at"),
     )
 

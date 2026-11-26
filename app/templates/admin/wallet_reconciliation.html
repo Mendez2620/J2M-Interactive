@@ -8,7 +8,9 @@
     <p>{{ business.name }}</p>
     <p class="text-sm text-slate-600">Diagnóstico local. Un trabajo completado no confirma que la tarjeta esté instalada ni que su saldo remoto siga vigente.</p>
   </header>
-  <p class="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm">La ejecución está bloqueada. Este panel permite diagnosticar y revisar candidaturas.</p>
+  {% if not execution_enabled %}
+  <p class="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm">La ejecución está deshabilitada. Puedes diagnosticar y revisar candidaturas.</p>
+  {% endif %}
   {% if available %}
   {% set counts = audit.counts %}
   <section aria-labelledby="sync-summary" class="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
@@ -85,6 +87,20 @@
   </section>
   <section aria-labelledby="reconciliation-history" class="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
     <h2 id="reconciliation-history" class="font-bold">Historial reciente</h2>
+    {% set states = {'prepared': 'Preparada', 'queued': 'Encolada', 'running': 'Reclamada · resultado sin confirmar', 'finished': 'Finalizada', 'expired': 'Vencida', 'rejected': 'Rechazada', 'inconclusive': 'Inconclusa'} %}
+    <ul class="space-y-2 text-sm">
+    {% for item in review_statuses %}
+      <li>{{ item.created_at.strftime('%Y-%m-%d %H:%M') }} UTC · {{ states.get(item.state, 'No verificable') }}</li>
+    {% else %}
+      <li>No hay revisiones persistidas en esta página.</li>
+    {% endfor %}
+    </ul>
+    {% if review_page > 1 %}
+    <a class="underline text-sm" href="{{ url_for('admin.business_wallet_reconciliation', business_id=business.id, reviews=review_page - 1) }}">Solicitudes anteriores</a>
+    {% endif %}
+    {% if more_reviews %}
+    <a class="underline text-sm" href="{{ url_for('admin.business_wallet_reconciliation', business_id=business.id, reviews=review_page + 1) }}">Más solicitudes</a>
+    {% endif %}
     {% for entry in history %}
     <article class="rounded-lg border border-slate-200 p-3 text-sm">
       <p class="font-semibold">{{ entry.date.strftime('%Y-%m-%d %H:%M') }} UTC · {{ entry.admin }}</p>

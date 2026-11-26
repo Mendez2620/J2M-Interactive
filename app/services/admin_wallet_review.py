@@ -12,6 +12,7 @@ from app.models import Business, PlatformAdmin
 from app.models.platform_admin_session import AdminWalletReview, PlatformAdminSession
 from app.services.google_wallet_reconciliation_plan import preview_google_wallet_reconciliation
 from app.services.platform_admin_session import digest, now
+from app.services.google_wallet_write_reservation import authorize_wallet_writes
 
 
 def enabled():
@@ -35,12 +36,16 @@ def revalidate(review):
 def confirm(review):
     if review.state != "prepared":
         return
-    state = "expired" if review.expires_at <= now() else "queued" if revalidate(review) else "rejected"
+    candidates = revalidate(review) if review.expires_at > now() else ()
+    confirmed_at = now()
+    authorized = _authorized_admin(review.session_digest, review.business_id, review.expires_at)
+    state = ("expired" if review.expires_at <= confirmed_at else
+             "queued" if candidates and authorized else "rejected")
     db.session.execute(update(AdminWalletReview).where(
         AdminWalletReview.id == review.id, AdminWalletReview.state == "prepared",
         AdminWalletReview.session_digest == review.session_digest,
         AdminWalletReview.business_id == review.business_id,
-    ).values(state=state, confirmed_at=now() if state == "queued" else None))
+    ).values(state=state, confirmed_at=confirmed_at if state == "queued" else None))
     db.session.commit()
 
 
@@ -70,7 +75,8 @@ def process_one_admin_wallet_review(service=None):
         db.session.rollback()
         return 0
     changed = db.session.execute(update(model).where(
-        model.id == review_id, model.state == "queued",
+        model.id == review_id, model.state == "queued", model.confirmed_at.is_not(None),
+        model.owner.is_(None),
     ).values(state="running", owner=owner, claimed_at=now()))
     claimed = changed.rowcount == 1
     db.session.commit()
@@ -90,12 +96,22 @@ def process_one_admin_wallet_review(service=None):
             from app.services.google_wallet import GoogleWalletService
             from app.services.google_wallet_reconciliation_control import run_reviewed_reconciliation
 
-            result = run_reviewed_reconciliation(
-                candidates, business_id=business_id, admin_id=admin_id,
-                request_id=str(UUID(hex=review_id)), confirm=True,
-                service=service if service is not None else GoogleWalletService(),
-                authorize=lambda: _authorized_admin(session_digest, business_id, expires_at) == admin_id,
-            )
+            def authorize():
+                if _authorized_admin(session_digest, business_id, expires_at) != admin_id:
+                    return False
+                with db.engine.connect() as connection:
+                    return connection.scalar(select(model.id).where(
+                        model.id == review_id, model.state == "running", model.owner == owner,
+                        model.session_digest == session_digest, model.business_id == business_id,
+                    )) is not None
+
+            with authorize_wallet_writes(authorize):
+                result = run_reviewed_reconciliation(
+                    candidates, business_id=business_id, admin_id=admin_id,
+                    request_id=str(UUID(hex=review_id)), confirm=True,
+                    service=service if service is not None else GoogleWalletService(),
+                    authorize=authorize,
+                )
             if result.get("status") == "finished":
                 state = "finished"
     except Exception:

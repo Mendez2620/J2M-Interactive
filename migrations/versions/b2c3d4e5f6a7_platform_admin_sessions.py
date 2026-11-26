@@ -40,6 +40,10 @@ def upgrade():
             sa.Column("result", sa.JSON),
             sa.CheckConstraint("state IN ('prepared','queued','running','finished','expired','rejected','inconclusive')",
                                name="ck_admin_wallet_review_state"),
+            sa.CheckConstraint(
+                "(state NOT IN ('queued', 'running', 'finished', 'inconclusive') OR confirmed_at IS NOT NULL) AND (state != 'queued' OR (owner IS NULL AND claimed_at IS NULL AND finished_at IS NULL)) AND (state NOT IN ('running', 'finished', 'inconclusive') OR (owner IS NOT NULL AND claimed_at IS NOT NULL)) AND (state NOT IN ('finished', 'inconclusive') OR finished_at IS NOT NULL)",
+                name="ck_admin_wallet_review_claim",
+            ),
         )
         op.create_index("ix_admin_wallet_reviews_business_id", "admin_wallet_reviews", ["business_id"])
         op.create_index("ix_admin_wallet_review_queue", "admin_wallet_reviews", ["state", "created_at"])
@@ -61,7 +65,7 @@ def upgrade():
                 or not target <= foreign
                 or not indexes <= {item["name"] for item in inspector.get_indexes(name)}):
             raise RuntimeError(f"Existing {name} schema is incomplete")
-    if "ck_admin_wallet_review_state" not in {
+    if not {"ck_admin_wallet_review_state", "ck_admin_wallet_review_claim"} <= {
         item["name"] for item in inspector.get_check_constraints("admin_wallet_reviews")
     }:
         raise RuntimeError("Existing reconciliation review state constraint is missing")

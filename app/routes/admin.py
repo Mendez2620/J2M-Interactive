@@ -786,7 +786,9 @@ def update_business(business_id: int):
 @platform_admin_required
 def business_wallet_reconciliation(business_id):
     import json
-    from collections import Counter, defaultdict
+    from app.models.platform_admin_session import AdminWalletReview
+    from app.services.admin_wallet_review import enabled
+    from collections import defaultdict
     from uuid import UUID
     from app.models import AccessAudit, PlatformAdmin
     from app.services.google_wallet_reconciliation_audit import google_wallet_reconciliation_audit
@@ -804,14 +806,24 @@ def business_wallet_reconciliation(business_id):
             or len(reservation_page) > 4 or not 1 <= int(reservation_page) <= 1000):
         abort(400)
     reservation_page = int(reservation_page)
+    review_page = request.args.get("reviews", "1")
+    if not review_page.isascii() or not review_page.isdecimal() or len(review_page) > 4 or not 1 <= int(review_page) <= 1000:
+        abort(400)
+    review_page = int(review_page)
 
     audit = preview = None
     counts = {}
     history = []
+    review_statuses = []
     active_reservations = []
     status = 200
     try:
         audit = google_wallet_reconciliation_audit(business_id)
+        review_statuses = db.session.execute(select(
+            AdminWalletReview.state, AdminWalletReview.created_at,
+        ).where(AdminWalletReview.business_id == business_id)
+          .order_by(AdminWalletReview.created_at.desc(), AdminWalletReview.id.desc())
+          .offset((review_page - 1) * 20).limit(21)).all()
         preview = preview_google_wallet_reconciliation(business_id, limit=25, after_customer_id=int(cursor))
         counts = dict(db.session.execute(
             select(table.c.state, func.count()).where(
@@ -854,7 +866,15 @@ def business_wallet_reconciliation(business_id):
         reports = defaultdict(list)
         for finish in finishes:
             reports[(finish.previous_state, finish.platform_admin_id)].append(finish)
-        start_keys = Counter((row.previous_state, row.platform_admin_id) for row in starts)
+        audit_counts = {
+            (key, action): count for key, action, count in db.session.execute(
+                select(AccessAudit.previous_state, AccessAudit.action, func.count())
+                .where(AccessAudit.business_id == business_id,
+                       AccessAudit.previous_state.in_([row.previous_state for row in starts]),
+                       AccessAudit.action.in_(("wallet_reconciliation_started", "wallet_reconciliation_finished")))
+                .group_by(AccessAudit.previous_state, AccessAudit.action)
+            )
+        }
         for row in starts:
             key = (row.previous_state, row.platform_admin_id)
             matches = reports[key]
@@ -868,8 +888,15 @@ def business_wallet_reconciliation(business_id):
                 valid_id = isinstance(request_id, str) and str(UUID(request_id)) == request_id
             except ValueError:
                 valid_id = False
+            if valid_id and db.session.scalar(select(AdminWalletReview.id).where(
+                AdminWalletReview.id == UUID(request_id).hex,
+                AdminWalletReview.business_id == business_id,
+            )) is not None:
+                continue
             finished = (
-                valid_id and len(matches) == 1 and start_keys[key] == 1
+                valid_id and len(matches) == 1
+                and audit_counts.get((row.previous_state, "wallet_reconciliation_started")) == 1
+                and audit_counts.get((row.previous_state, "wallet_reconciliation_finished")) == 1
                 and matches[0].created_at >= row.created_at and result.get("status") == "finished"
                 and requested is not None and requested > 0 and requested == result.get("requested")
                 and processed is not None and remaining is not None and processed + remaining == requested
@@ -895,6 +922,9 @@ def business_wallet_reconciliation(business_id):
         preview=preview, reservations=counts, history=history, available=status == 200, cursor=int(cursor),
         active_reservations=active_reservations[:20], reservation_page=reservation_page,
         more_reservations=len(active_reservations) > 20 and reservation_page < 1000,
+        review_statuses=review_statuses[:20], review_page=review_page,
+        more_reviews=len(review_statuses) > 20 and review_page < 1000,
+        execution_enabled=enabled() and business.is_active,
     ), status)
     response.headers["Cache-Control"] = "no-store, private"
     return response

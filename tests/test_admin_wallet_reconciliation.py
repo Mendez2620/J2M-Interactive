@@ -1,6 +1,13 @@
 import unittest
+import os
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
+from threading import Barrier
 from unittest.mock import patch
+from uuid import uuid4
+
+from sqlalchemy import create_engine, event
+from sqlalchemy.engine import make_url
 
 from app import create_app
 from tests.admin_session_fixture import issue_for
@@ -14,7 +21,7 @@ from app.services.google_wallet_reconciliation_plan import ReconciliationCandida
 
 class AdminWalletReconciliationTests(unittest.TestCase):
     def setUp(self):
-        app = create_app("testing")
+        app = self.make_app()
         self.app = app
         context = app.app_context()
         context.push()
@@ -32,6 +39,9 @@ class AdminWalletReconciliationTests(unittest.TestCase):
         self.business_id = business.id
         self.path = f"/admin/business/{business.id}/wallet/reconciliation"
         self.client = app.test_client()
+
+    def make_app(self):
+        return create_app("testing")
 
     def authenticate(self):
         with self.client.session_transaction() as session:
@@ -115,10 +125,16 @@ class AdminWalletReconciliationTests(unittest.TestCase):
         self.authenticate()
         self.assertEqual(self.client.get(response.location).status_code, 404)
 
-    def test_confirmed_review_runs_once_through_existing_worker(self):
-        self.authenticate()
+    def queue_review(self):
+        self.client.get("/admin/login")
+        with self.client.session_transaction() as session:
+            csrf = session["csrf_token"]
+        self.assertEqual(self.client.post("/admin/login", data={
+            "email": "admin@example.invalid", "password": "SyntheticPassword123", "csrf_token": csrf,
+        }).status_code, 302)
         business = db.session.get(Business, self.business_id)
         business.loyalty_type = "stamps"
+        business.stamps_reward_limit = 8
         customer = Customer(business_id=business.id, full_name="Synthetic customer")
         db.session.add(customer)
         db.session.commit()
@@ -141,6 +157,10 @@ class AdminWalletReconciliationTests(unittest.TestCase):
         self.app.config.update(GOOGLE_WALLET_MODE="real", GOOGLE_WALLET_RECONCILIATION_ENABLED=True)
         for _ in range(2):
             self.assertEqual(self.client.post(confirmation, data=form).status_code, 303)
+        return customer_id, review.location, form
+
+    def test_confirmed_review_runs_once_through_existing_worker(self):
+        customer_id, location, form = self.queue_review()
         calls = []
 
         class Provider:
@@ -154,8 +174,58 @@ class AdminWalletReconciliationTests(unittest.TestCase):
         self.assertEqual(calls, [(customer_id, self.business_id)])
         self.assertEqual(Transaction.query.count(), 1)
         self.assertEqual(AdminWalletReview.query.one().state, "finished")
-        self.assertEqual(self.client.post(confirmation, data=form).status_code, 303)
-        self.assertIn("Confirmadas: 1", self.client.get(review.location).get_data(as_text=True))
+        self.assertEqual(self.client.post(location + "/confirm", data=form).status_code, 303)
+        self.assertIn("Confirmadas: 1", self.client.get(location).get_data(as_text=True))
+
+    def run_with_wallet_transport(self, revoke_on_read):
+        from app.models import GoogleWalletSyncJob, LoyaltyLedgerEntry
+        from app.services.google_wallet import GoogleWalletService
+
+        customer_id, location, form = self.queue_review()
+        self.app.config["GOOGLE_ISSUER_ID"] = "123456"
+        identifier = f"123456.business_{self.business_id}_customer_{customer_id}"
+        calls = []
+        browser = self.client
+
+        class Response:
+            status_code = 200
+            content = b"synthetic"
+
+            def json(self):
+                return {
+                    "id": identifier, "classId": identifier.split("_customer_")[0], "state": "active",
+                    "loyaltyPoints": {"label": "Sellos", "balance": {
+                        "string": "1 / 8" if calls[-1] == "PATCH" else "0 / 8",
+                    }},
+                }
+
+        class Transport:
+            def request(self, method, url, **kwargs):
+                calls.append(method)
+                if method == "GET" and revoke_on_read:
+                    browser.post("/admin/logout", data={"csrf_token": form["csrf_token"]})
+                return Response()
+
+        service = GoogleWalletService(mode="real", http_session=Transport(), credentials_info={
+            "type": "service_account", "project_id": "synthetic",
+            "client_email": "wallet@synthetic.iam.gserviceaccount.com",
+            "private_key": GoogleWalletService._generate_dev_private_key(),
+            "token_uri": "https://example.invalid/token",
+        })
+        ledger_count = LoyaltyLedgerEntry.query.count()
+        run_google_wallet_sync_worker(service=service, max_cycles=2, sleep_fn=lambda _seconds: None)
+        self.assertEqual(calls, ["GET"] if revoke_on_read else ["GET", "PATCH"])
+        self.assertEqual(GoogleWalletSyncJob.query.count(), 0 if revoke_on_read else 1)
+        self.assertEqual(Transaction.query.count(), 1)
+        self.assertEqual(LoyaltyLedgerEntry.query.count(), ledger_count)
+        if not revoke_on_read:
+            self.assertIn("Confirmadas: 1", self.client.get(location).get_data(as_text=True))
+
+    def test_real_wallet_transport_only_updates_existing_pass(self):
+        self.run_with_wallet_transport(False)
+
+    def test_logout_during_provider_get_prevents_patch(self):
+        self.run_with_wallet_transport(True)
 
     def test_old_password_verification_cannot_issue_a_session(self):
         from app.services.platform_admin_session import issue
@@ -165,3 +235,118 @@ class AdminWalletReconciliationTests(unittest.TestCase):
         admin.set_password("ChangedSyntheticPassword123")
         db.session.commit()
         self.assertIsNone(issue(admin, verified_password_hash=previously_verified))
+
+
+@unittest.skipUnless(os.getenv("TEST_POSTGRES_URL"), "synthetic PostgreSQL not configured")
+class PostgresAdminWalletReconciliationTests(AdminWalletReconciliationTests):
+    def make_app(self):
+        from app.config import TestingConfig
+
+        url = make_url(os.environ["TEST_POSTGRES_URL"])
+        if (url.get_backend_name() != "postgresql" or url.host not in {"localhost", "127.0.0.1"}
+                or url.database != "j2m_test" or url.query):
+            self.fail("Requires dedicated loopback synthetic PostgreSQL")
+        url = url.set(drivername="postgresql+psycopg2")
+        schema = "admin_review_" + uuid4().hex
+        engine = create_engine(url)
+        self.addCleanup(engine.dispose)
+        with engine.begin() as connection:
+            connection.exec_driver_sql(f"CREATE SCHEMA {schema}")
+
+        def cleanup():
+            with engine.begin() as connection:
+                connection.exec_driver_sql(f"DROP SCHEMA {schema} CASCADE")
+
+        self.addCleanup(cleanup)
+        with patch.object(TestingConfig, "SQLALCHEMY_DATABASE_URI", url.render_as_string(hide_password=False)), \
+             patch.object(TestingConfig, "SQLALCHEMY_ENGINE_OPTIONS", {
+                 "connect_args": {"options": f"-csearch_path={schema}"},
+             }):
+            return create_app("testing")
+
+    def test_concurrent_http_confirmation_and_worker_claim_do_not_duplicate_work(self):
+        from app.services.admin_wallet_review import process_one_admin_wallet_review
+
+        customer_id, location, form = self.queue_review()
+        review = AdminWalletReview.query.one()
+        review.state, review.confirmed_at = "prepared", None
+        db.session.commit()
+        cookie = self.client.get_cookie("session").value
+        calls = []
+        engine = db.engine
+
+        class Provider:
+            mode = "real"
+
+            def reconcile_existing_loyalty_balance(self, record, *, business_id):
+                calls.append(record.id)
+                return {"status": "success", "reason": "balance_updated"}
+
+        def confirm_in_browser():
+            client = self.app.test_client()
+            client.set_cookie("session", cookie)
+            return client.post(location + "/confirm", data=form).status_code
+
+        def worker():
+            with self.app.app_context():
+                return process_one_admin_wallet_review(service=Provider())
+
+        def compete(operation, expected_state):
+            barrier = Barrier(2, timeout=10)
+
+            def pause(_conn, _cursor, statement, parameters, _context, _many):
+                if statement.startswith("UPDATE admin_wallet_reviews") and parameters.get("state") == expected_state:
+                    barrier.wait()
+
+            event.listen(engine, "before_cursor_execute", pause)
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    return [future.result(timeout=20) for future in
+                            (executor.submit(operation), executor.submit(operation))]
+            finally:
+                event.remove(engine, "before_cursor_execute", pause)
+
+        self.assertEqual(compete(confirm_in_browser, "queued"), [303, 303])
+        db.session.expire_all()
+        self.assertEqual(AdminWalletReview.query.one().state, "queued")
+        db.session.rollback()
+        self.assertEqual(sorted(compete(worker, "running")), [0, 1])
+        self.assertEqual(calls, [customer_id])
+        self.assertEqual(AdminWalletReview.query.one().state, "finished")
+        self.assertEqual(Transaction.query.count(), 1)
+
+    def test_connection_loss_before_audit_keeps_claim_without_replaying(self):
+        from app.services import google_wallet_reconciliation_control as control
+        from app.services.admin_wallet_review import process_one_admin_wallet_review
+
+        self.queue_review()
+        engine = db.engine
+        killed = []
+
+        class Provider:
+            mode = "real"
+
+            def reconcile_existing_loyalty_balance(self, record, *, business_id):
+                raise AssertionError("No request can precede its audit")
+
+        def interrupt(connection, action, **kwargs):
+            pid, database, schema = connection.exec_driver_sql(
+                "SELECT pg_backend_pid(), current_database(), current_schema()"
+            ).one()
+            self.assertEqual(database, "j2m_test")
+            self.assertTrue(schema.startswith("admin_review_"))
+            with engine.begin() as independent:
+                killed.append(independent.exec_driver_sql(
+                    "SELECT pg_terminate_backend(%s, 5000)", (pid,)
+                ).scalar_one())
+            connection.exec_driver_sql("SELECT 1")
+
+        with patch.object(control, "_append", side_effect=interrupt):
+            self.assertEqual(process_one_admin_wallet_review(service=Provider()), 1)
+        self.assertEqual(killed, [True])
+        self.assertEqual(process_one_admin_wallet_review(service=Provider()), 0)
+        review = AdminWalletReview.query.one()
+        self.assertEqual(review.state, "inconclusive")
+        self.assertTrue(review.owner)
+        self.assertEqual(AccessAudit.query.count(), 0)
+        self.assertIn("Inconclusa", self.client.get(self.path).get_data(as_text=True))
