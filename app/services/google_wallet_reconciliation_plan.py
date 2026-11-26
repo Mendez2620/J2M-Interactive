@@ -224,6 +224,21 @@ def preview_google_wallet_reconciliation(business_id, *, limit=50, after_custome
 
 
 def execute_google_wallet_reconciliation(candidate, *, business_id, service):
+    from app.services.google_wallet import GoogleWalletService
+    from app.services.google_wallet_write_reservation import WalletWriteBlocked
+
+    if (isinstance(service, GoogleWalletService) and service.mode == "real"
+            and isinstance(candidate, ReconciliationCandidate)
+            and candidate.business_id == business_id):
+        try:
+            with service.write_scope(SimpleNamespace(id=candidate.customer_id, business_id=business_id)):
+                return _execute_google_wallet_reconciliation(candidate, business_id=business_id, service=service)
+        except (WalletWriteBlocked, SQLAlchemyError, ValueError):
+            return {"status": "retry", "reason": "write_reservation_unavailable"}
+    return _execute_google_wallet_reconciliation(candidate, business_id=business_id, service=service)
+
+
+def _execute_google_wallet_reconciliation(candidate, *, business_id, service):
     """Internal, explicitly invoked recovery of one previously inspected candidate.
 
     No endpoint, CLI, automatic execution or authorization by a customer ID.

@@ -1,6 +1,8 @@
 """Durable ownership of a Google Wallet resource across database sessions."""
 
 from dataclasses import dataclass, field
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 import re
 from uuid import uuid4
@@ -55,6 +57,7 @@ _TRANSITIONS = {
     ("started", "uncertain"), ("started", "confirmed"), ("started", "rejected"),
     ("uncertain", "confirmed"), ("uncertain", "rejected"),
     ("confirmed", "completed"),
+    ("confirmed", "started"),
 }
 _TERMINAL = {"not_sent", "rejected", "completed"}
 
@@ -86,3 +89,55 @@ def transition(engine, reservation, *, previous, state, remote_status=None):
             "operation": reservation.operation_id, "owner": reservation.owner_token,
             "previous": previous, "remote_status": remote_status})
         return changed.rowcount == 1
+
+
+class WalletWriteBlocked(RuntimeError):
+    pass
+
+
+@dataclass
+class WriteOperation:
+    engine: object
+    reservation: Reservation
+    state: str = "reserved"
+
+    def move(self, state, status=None):
+        if not transition(self.engine, self.reservation, previous=self.state,
+                          state=state, remote_status=status):
+            raise WalletWriteBlocked("Wallet write ownership could not be verified")
+        self.state = state
+
+
+_operations = ContextVar("wallet_write_operations", default=None)
+
+
+@contextmanager
+def writing(engine, resource, **identity):
+    current = _operations.get() or {}
+    key = (engine, resource)
+    if key in current:
+        yield current[key]
+        return
+    reservation = reserve(engine, resource_id=resource.split("/", 1)[1], **identity)
+    if reservation is None:
+        raise WalletWriteBlocked("Wallet write already reserved")
+    operation = WriteOperation(engine, reservation)
+    token = _operations.set({**current, key: operation})
+    try:
+        yield operation
+    finally:
+        _operations.reset(token)
+        if operation.state == "reserved":
+            operation.move("not_sent")
+        elif operation.state == "started":
+            operation.move("uncertain")
+        elif operation.state == "confirmed":
+            operation.move("completed")
+
+
+def authorized_write(engine, resource):
+    operation = (_operations.get() or {}).get((engine, resource))
+    if operation is None or operation.state not in {"reserved", "confirmed"}:
+        raise WalletWriteBlocked("Wallet write requires a matching reservation")
+    operation.move("started")
+    return operation

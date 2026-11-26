@@ -39,3 +39,14 @@ Utiliza la tabla existente `access_audits`, como el flujo de publicaciones. Regi
 El resultado remoto, la cobertura local y la bitácora no forman una transacción distribuida. Si se pierde el registro final, no se declara éxito de la solicitud aunque la cobertura local ya pudiera estar confirmada. No se garantiza inmutabilidad física de la tabla por este cambio; se utiliza su contrato de historial por inserción existente.
 
 La bandera `GOOGLE_WALLET_RECONCILIATION_ENABLED` permanece ausente/falsa y no se expone a configuración de entorno, interfaz web o CLI. Pendientes: conectar un punto de entrada autenticado con CSRF, revisión explícita de la selección, autorización operativa y validación física. No se debe activar esta operación todavía.
+# Persistent write reservations
+
+Real Google Wallet writes require a committed reservation for the exact class
+or object. A request starts durably before HTTP. An interrupted write retains
+ownership indefinitely. A later GET, a new request UUID and a worker restart
+cannot clear it. Class and object reservations are acquired in that order.
+
+Before a rollout or restore, disable Google Wallet and drain every writer
+running older code. Keep Google Wallet disabled after restoring an older
+database until the remote state and any potentially lost reservations have been
+reviewed. There is no administrative override for uncertain writes.

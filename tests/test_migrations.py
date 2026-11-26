@@ -219,7 +219,7 @@ class MigrationTestCase(unittest.TestCase):
             self.upgrade(path)
             with sqlite3.connect(path) as connection:
                 connection.execute("INSERT INTO businesses (id, name, slug, primary_color, secondary_color, loyalty_type, points_per_currency, stamps_reward_limit, cooldown_minutes, is_active, created_at) VALUES (1, 'Conservar', 'conservar', '#000000', '#FFFFFF', 'stamps', 1.0, 10, 60, 1, '2026-01-01')")
-            reversible_apple = self.run_db_command(path, "downgrade")
+            reversible_apple = self.run_db_command(path, "downgrade", "8c9d0e1f2a3b")
             self.assertEqual(
                 reversible_apple.returncode, 0,
                 reversible_apple.stdout + reversible_apple.stderr,

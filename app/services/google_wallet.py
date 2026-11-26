@@ -4,14 +4,19 @@ import logging
 import os
 import re
 import time
+from contextlib import ExitStack, contextmanager
+from functools import wraps
 from typing import Optional, Tuple
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 import jwt
 import requests
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from flask import current_app, has_app_context
+from sqlalchemy.exc import SQLAlchemyError
+from app.extensions import db
+from app.services.google_wallet_write_reservation import WalletWriteBlocked, authorized_write, writing
 from app.media_storage import absolute_branding_url
 from google.auth.exceptions import RefreshError, TransportError
 from google.auth.transport.requests import AuthorizedSession
@@ -29,6 +34,23 @@ class GoogleWalletAPIError(RuntimeError):
         super().__init__("Google Wallet API no disponible")
         self.status_code = status_code
         self.retryable = retryable
+
+
+def _coordinate(*, include_class=False, class_only=False, raises=False):
+    def decorate(method):
+        @wraps(method)
+        def guarded(self, subject, *args, **kwargs):
+            if self.mode != "real":
+                return method(self, subject, *args, **kwargs)
+            try:
+                with self.write_scope(subject, include_class=include_class, class_only=class_only):
+                    return method(self, subject, *args, **kwargs)
+            except (WalletWriteBlocked, SQLAlchemyError, ValueError):
+                if raises:
+                    raise GoogleWalletAPIError(retryable=True) from None
+                return {"status": "retry", "reason": "write_reservation_unavailable"}
+        return guarded
+    return decorate
 
 
 class GoogleWalletService:
@@ -69,7 +91,25 @@ class GoogleWalletService:
         self.sa_email = info["client_email"]
         self.sa_private_key = info["private_key"]
         if self.http is None:
-            self.http = AuthorizedSession(self.credentials)
+            self.http = AuthorizedSession(self.credentials, max_refresh_attempts=0)
+
+    @contextmanager
+    def write_scope(self, subject, *, include_class=False, class_only=False):
+        business_id = subject.id if class_only else subject.business_id
+        with ExitStack() as stack:
+            if self.mode == "real":
+                if include_class or class_only:
+                    stack.enter_context(writing(
+                        db.engine, f"loyaltyClass/{self.issuer_id}.business_{business_id}",
+                        kind="loyaltyClass", issuer=self.issuer_id, business_id=business_id,
+                    ))
+                if not class_only:
+                    stack.enter_context(writing(
+                        db.engine, f"loyaltyObject/{self.get_object_id(subject)}",
+                        kind="loyaltyObject", issuer=self.issuer_id,
+                        business_id=business_id, customer_id=subject.id,
+                    ))
+            yield
 
     @staticmethod
     def _config(name, default=None):
@@ -210,8 +250,20 @@ class GoogleWalletService:
         return result
 
     def _request(self, method, resource, *, body=None):
+        operation = None
+        options = {}
+        if method.upper() not in {"GET", "HEAD", "OPTIONS"}:
+            kind, _, identifier = resource.partition("/")
+            identifier = unquote(identifier) if identifier else (body or {}).get("id")
+            if self.mode != "real" or kind not in {"loyaltyClass", "loyaltyObject"} or not identifier:
+                raise WalletWriteBlocked("Invalid Wallet write resource")
+            if body and "id" in body and body["id"] != identifier:
+                raise WalletWriteBlocked("Wallet write payload identifies another resource")
+            operation = authorized_write(db.engine, f"{kind}/{identifier}")
+            options["allow_redirects"] = False
         try:
-            response = self.http.request(method, f"{self.API_BASE_URL}/{resource}", json=body, timeout=10)
+            response = self.http.request(method, f"{self.API_BASE_URL}/{resource}", json=body,
+                                         timeout=10, **options)
         except RefreshError:
             logger.warning("google_wallet_api_error event=authentication_failure")
             raise GoogleWalletAPIError(status_code=401, retryable=False) from None
@@ -219,7 +271,16 @@ class GoogleWalletService:
             logger.warning("google_wallet_api_error event=network_failure")
             raise GoogleWalletAPIError(retryable=True) from None
         if response.status_code in (200, 201, 204):
-            return response.json() if getattr(response, "content", b"") else {}
+            payload = response.json() if getattr(response, "content", b"") else {}
+            if operation:
+                if not isinstance(payload, dict) or (response.status_code != 204 and not payload):
+                    raise GoogleWalletAPIError(retryable=True)
+                operation.move("confirmed", response.status_code)
+            return payload
+        if operation and response.status_code in {400, 401, 403, 404, 409}:
+            # A definitive response to an intermediate request permits the
+            # next step, but the logical operation keeps its reservation.
+            operation.move("confirmed", response.status_code)
         retryable = response.status_code in {408, 429, 500, 502, 503, 504}
         logger.warning("google_wallet_api_error status_code=%s retryable=%s", response.status_code, retryable)
         raise GoogleWalletAPIError(response.status_code, retryable)
@@ -238,6 +299,7 @@ class GoogleWalletService:
                     raise
         return self._request("PATCH", resource, body=body)
 
+    @_coordinate(raises=True)
     def _ensure_loyalty_object(self, customer):
         """Create an object once; refresh existing metadata without its balance."""
         body = self.create_loyalty_object(customer)
@@ -321,6 +383,7 @@ class GoogleWalletService:
                 patch_body["appLinkData"] = None
         return patch_body
 
+    @_coordinate(class_only=True)
     def publish_loyalty_class(self, business, prepared=None):
         """Publish shared design without changing the stable class identity."""
         if self.mode == "disabled":
@@ -334,6 +397,7 @@ class GoogleWalletService:
         except GoogleWalletAPIError as exc:
             return {"status": "retry" if exc.retryable else "error", "status_code": exc.status_code}
 
+    @_coordinate()
     def publish_loyalty_object_metadata(self, customer, prepared=None):
         """Publish J2M-owned metadata while preserving balance, barcode and foreign modules."""
         if self.mode == "disabled":
@@ -358,6 +422,7 @@ class GoogleWalletService:
         except GoogleWalletAPIError as exc:
             return {"status": "retry" if exc.retryable else "error", "status_code": exc.status_code}
 
+    @_coordinate(include_class=True, raises=True)
     def ensure_resources(self, customer):
         if self.mode != "real":
             return
@@ -396,6 +461,7 @@ class GoogleWalletService:
         token = jwt.encode(claims, self.sa_private_key, algorithm="RS256")
         return token, f"{self.SAVE_URL_PREFIX}{token}"
 
+    @_coordinate()
     def reconcile_existing_loyalty_balance(self, customer, *, business_id):
         """Reconcile one existing remote object; never issue, recreate or activate it.
 
@@ -462,6 +528,7 @@ class GoogleWalletService:
             # A malformed response is not proof that a remote write succeeded.
             return {"status": "retry", "reason": "invalid_provider_response"}
 
+    @_coordinate(include_class=True)
     def update_loyalty_object(self, customer):
         if self.mode == "disabled":
             return {"status": "disabled"}

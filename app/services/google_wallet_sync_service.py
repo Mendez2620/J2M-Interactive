@@ -2,7 +2,7 @@ import json
 import logging
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import case, func, or_, text
@@ -140,11 +140,6 @@ def process_pending_google_wallet_jobs(limit=50, service=None):
                     db.session.rollback()
                     continue
                 job_ids = [job.id for job in jobs]
-                watermark = max(job_ids)
-                GoogleWalletSyncJob.query.filter(
-                    GoogleWalletSyncJob.id.in_(job_ids),
-                    GoogleWalletSyncJob.id <= watermark,
-                ).update({"status": "processing", "locked_at": now}, synchronize_session=False)
                 customer = db.session.get(Customer, customer_id)
                 # A legacy or inconsistent outbox row must never authorize a
                 # provider call for a customer from another business or movement.
@@ -163,17 +158,21 @@ def process_pending_google_wallet_jobs(limit=50, service=None):
                     ).all()]
                 valid_set = set(valid_ids)
                 invalid_ids = [job_id for job_id in job_ids if job_id not in valid_set]
+                if valid_ids:
+                    try:
+                        scope = (service.write_scope(customer, include_class=True)
+                                 if isinstance(service, GoogleWalletService) else nullcontext())
+                        with scope:
+                            db.session.refresh(customer)
+                            result = service.update_loyalty_object(customer)
+                    except Exception:
+                        result = {"status": "retry", "status_code": None}
+                    _record_result(valid_ids, result, now)
                 if invalid_ids:
                     _record_result(invalid_ids, {"status": "error", "status_code": None}, now)
                     logging.getLogger(__name__).warning(
                         "google_wallet_sync_invalid_linkage count=%s", len(invalid_ids)
                     )
-                if valid_ids:
-                    try:
-                        result = service.update_loyalty_object(customer)
-                    except Exception:
-                        result = {"status": "retry", "status_code": None}
-                    _record_result(valid_ids, result, now)
                 db.session.commit()
                 processed += len(job_ids)
         except Exception:

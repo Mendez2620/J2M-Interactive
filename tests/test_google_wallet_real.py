@@ -117,7 +117,8 @@ class GoogleWalletRealTestCase(unittest.TestCase):
         original = self.customer.qr_code_token
         service = self.service([FakeResponse(404), FakeResponse(409), FakeResponse(200, {"id": "ok"})])
         class_body = service.create_or_update_class(self.business)
-        service._upsert("loyaltyClass", class_body["id"], class_body)
+        with service.write_scope(self.business, class_only=True):
+            service._upsert("loyaltyClass", class_body["id"], class_body)
         self.assertEqual([call[0] for call in service.http.calls], ["GET", "POST", "PATCH"])
         object_id = service.get_object_id(self.customer)
         self.customer.qr_code_token = "rotated-private-token"
@@ -244,7 +245,7 @@ class GoogleWalletRealTestCase(unittest.TestCase):
             "appLinkData": {"webAppLinkInfo": {"appTarget": {"targetUri": {"uri": old_url}}}},
         }
         self.business.reward_description = None
-        service = self.service([FakeResponse(200, existing), FakeResponse(200, {})])
+        service = self.service([FakeResponse(200, existing), FakeResponse(200, existing)])
         service._ensure_loyalty_object(self.customer)
         body = service.http.calls[-1][2]
         self.assertEqual(body["textModulesData"][0], external_text)
@@ -267,8 +268,8 @@ class GoogleWalletRealTestCase(unittest.TestCase):
             "linksModuleData": {"uris": [{"id": "foreign", "uri": "https://example.test"}]},
         }
         service = self.service([
-            FakeResponse(200, existing), FakeResponse(200, {}),
-            FakeResponse(200, existing), FakeResponse(200, {}),
+            FakeResponse(200, existing), FakeResponse(200, existing),
+            FakeResponse(200, existing), FakeResponse(200, existing),
         ])
         service._ensure_loyalty_object(self.customer)
         issuance = service.http.calls[-1][2]
@@ -346,13 +347,35 @@ class GoogleWalletRealTestCase(unittest.TestCase):
         self.assertEqual(result["status"], "success")
         self.assertEqual(success.http.calls[0][2]["loyaltyPoints"]["balance"]["string"], "2 / 8")
         self.business.loyalty_type = "points"; self.customer.current_points = 50
-        points = self.service([FakeResponse(200, {})]); points.update_loyalty_object(self.customer)
+        points = self.service([FakeResponse(200, {"ok": True})]); points.update_loyalty_object(self.customer)
         self.assertEqual(points.http.calls[0][2]["loyaltyPoints"]["balance"]["string"], "50 pts")
         for status, expected in ((400, "error"), (401, "error"), (403, "error"), (429, "retry")):
             with self.subTest(status=status):
                 self.assertEqual(self.service([FakeResponse(status)]).update_loyalty_object(self.customer)["status"], expected)
-        timeout = self.service([requests.Timeout()]).update_loyalty_object(self.customer)
+        blocked = self.service([requests.Timeout()])
+        timeout = blocked.update_loyalty_object(self.customer)
         self.assertEqual(timeout["status"], "retry")
+        self.assertEqual(blocked.http.calls, [])
+
+    def test_transport_rejects_unreserved_or_different_resource(self):
+        from app.services.google_wallet_write_reservation import WalletWriteBlocked
+
+        service = self.service([])
+        resource = f"loyaltyObject/{service.get_object_id(self.customer)}"
+        with self.assertRaises(WalletWriteBlocked):
+            service._request("PATCH", resource, body={})
+        with service.write_scope(self.business, class_only=True):
+            with self.assertRaises(WalletWriteBlocked):
+                service._request("PATCH", resource, body={})
+        self.assertEqual(service.http.calls, [])
+
+    def test_transport_timeout_blocks_the_next_writer_without_retrying_http(self):
+        first = self.service([requests.Timeout()])
+        self.assertEqual(first.update_loyalty_object(self.customer)["status"], "retry")
+        self.assertEqual(len(first.http.calls), 1)
+        second = self.service([])
+        self.assertEqual(second.publish_loyalty_object_metadata(self.customer)["status"], "retry")
+        self.assertEqual(second.http.calls, [])
 
     def _existing_balance_object(self, service, *, balance="1 / 8", **overrides):
         return {
