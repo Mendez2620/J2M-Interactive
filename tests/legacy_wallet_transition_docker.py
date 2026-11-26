@@ -53,8 +53,8 @@ root = ROOT
 journal = TransitionJournal(args.journal, legacy_image=img, target_image=new, target_sha=sha,
                             environment="synthetic")
 probe=(root/"tests/legacy_wallet_fixture.py").read_text(encoding="utf-8")
-def exercise(stage):
-    subprocess.run(["docker","run","--rm","-i",*cfg,img,"python","-",stage],input=probe,text=True,check=True,timeout=60)
+def exercise(stage, selected=img):
+    subprocess.run(["docker","run","--rm","-i",*cfg,selected,"python","-",stage],input=probe,text=True,check=True,timeout=60)
 cfg=["--network",p,"--env-file",str(root/".env.wallet-demo.example"),"-e","DATABASE_URL=postgresql://j2m_test:synthetic@db/j2m_test","-e","GOOGLE_WALLET_MODE=disabled","-e","APPLE_WALLET_MODE=disabled"]
 def start(role, selected=img):
     cmd=() if role=="web" else ("flask","--app","run.py","run-google-wallet-sync-worker")
@@ -131,7 +131,7 @@ try:
         raise RuntimeError("Synthetic writers not drained")
     journal.advance("maintenance")
     r("docker","run","--rm",*cfg,new,"flask","--app","run.py","db","upgrade","c3d4e5f6a7b8")
-    schema_check="from run import app; from app.extensions import db; from scripts.check_wallet_referral_schema import validate_schema; a=app.app_context(); a.push(); assert not validate_schema(db.session.connection());"
+    schema_check="from run import app; from app.extensions import db; from scripts.check_wallet_referral_schema import validate_schema; a=app.app_context(); a.push(); raise SystemExit(bool(validate_schema(db.session.connection())));"
     r("docker","run","--rm",*cfg,new,"python","-c",schema_check)
     reserve = """
 INSERT INTO google_wallet_write_reservations
@@ -144,16 +144,20 @@ VALUES (repeat('a',32), repeat('b',32), 'synthetic', 'loyaltyObject', 'synthetic
     persisted = r("docker","exec",n["db"],"psql","-U","j2m_test","-d","j2m_test","-Atc",
                   "SELECT count(*) FROM google_wallet_write_reservations "
                   "WHERE operation_id=repeat('a',32) AND state='uncertain' AND active_slot=1")
-    assert persisted == "1"
+    if persisted != "1":
+        raise RuntimeError("Wallet reservation was not preserved")
     guard_images()
     start("web", new)
     start("worker", new)
     with tempfile.TemporaryDirectory() as tmp:
-        folder=Path(tmp);h.write_certificates(folder)
-        (folder/"nginx.conf").write_text(h.proxy_config().replace("access_log off;", "log_format proof '$http_x_j2m_probe $uri $upstream_addr $upstream_status'; access_log /dev/stdout proof;"),encoding="utf-8")
-        r("docker","run","-d","--name",n["proxy"],"--network",p,"--network-alias","proxy","--mount",f"type=bind,src={folder},dst=/etc/nginx/tls,readonly",h.NGINX_IMAGE,"nginx","-c","/etc/nginx/tls/nginx.conf","-g","daemon off;")
+        folder = Path(tmp)
+        folder.chmod(0o755)
+        write_certificates(folder)
+        (folder/"nginx.conf").write_text(proxy_config().replace("access_log off;", "log_format proof '$http_x_j2m_probe $uri $upstream_addr $upstream_status'; access_log /dev/stdout proof;"),encoding="utf-8")
+        r("docker","run","-d","--name",n["proxy"],"--network",p,"--network-alias","proxy","--mount",f"type=bind,src={folder},dst=/etc/nginx/tls,readonly",NGINX_IMAGE,"nginx","-c","/etc/nginx/tls/nginx.conf","-g","daemon off;")
         time.sleep(5)
         target = attest(folder, new)
+        exercise("verify", new)
         journal.advance("target_verified", container=target.container)
         r("docker", "rm", "-f", n["web"])
         try:
@@ -175,9 +179,10 @@ VALUES (repeat('a',32), repeat('b',32), 'synthetic', 'loyaltyObject', 'synthetic
                  "SELECT version_num FROM alembic_version")
         if head != FINAL_HEAD:
             raise RuntimeError("Recovery changed the database revision")
+        exercise("verify")
         journal.advance("legacy_recovered", container=recovered.container)
         r("docker", "rm", "-f", n["proxy"])
-    print("Legacy TLS: exact request-to-upstream correlation verified on initial and recreated web; one isolated worker.")
+    print("Target and recovered legacy HTTPS bound to exact Docker upstream; one worker per stage.")
 except Exception as exc:
     journal.record("blocked", failure_type=type(exc).__name__)
     raise
@@ -185,4 +190,6 @@ finally:
     journal.file.close()
     for name in n.values():r("docker","rm","-f",name,check=False)
     r("docker","network","rm",p)
-    assert h.production_ids()==before
+    if production_ids() != before:
+        raise RuntimeError("Operational container IDs changed")
+verify_record(args.journal, legacy_image=img, target_image=new, target_sha=sha)

@@ -15,8 +15,10 @@ with app.app_context():
   db.session.add(c);db.session.commit()
  else:
   b=db.session.get(Business,1);c=db.session.get(Customer,1)
-  assert Transaction.query.count()==1 and LoyaltyLedgerEntry.query.count()==2
-  assert c.current_stamps==1 and GoogleWalletSyncJob.query.filter_by(status='completed').count()==1
+  assert Transaction.query.count()==(2 if stage=='verify' else 1)
+  assert LoyaltyLedgerEntry.query.count()==(3 if stage=='verify' else 2)
+  assert c.current_stamps==(0 if stage=='verify' else 1)
+  assert GoogleWalletSyncJob.query.filter_by(status='completed').count()==1
  client=app.test_client()
  response=client.get('/admin/login')
  assert response.status_code==200
@@ -26,6 +28,9 @@ with app.app_context():
  assert response.status_code in (302,303), response.status_code
  assert client.get('/admin/dashboard').status_code==200
  assert client.get('/api/ready').status_code==200
+ if stage=='verify':
+  print('Administrative login and ledger verified on',stage)
+  raise SystemExit(0)
  action,tx=('earn_stamp','earn') if stage=='before' else ('redeem_stamps','redeem')
  process_loyalty_transaction(business=b,customer_id=c.id,staff_id=None,action=action,tx_type=tx,points_amount=0,stamps_amount=1,purchase_amount=0,request_id=stage,fingerprint=stage)
  db.session.commit()
