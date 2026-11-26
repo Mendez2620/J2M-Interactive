@@ -1,5 +1,5 @@
 from datetime import date, datetime
-from flask import Blueprint, jsonify, render_template, request, send_file, redirect, current_app
+from flask import Blueprint, abort, jsonify, make_response, render_template, request, send_file, redirect, current_app
 from io import BytesIO
 import math
 import re
@@ -7,8 +7,8 @@ import unicodedata
 import warnings
 from urllib.parse import urlparse
 from PIL import Image, UnidentifiedImageError
-from sqlalchemy import func, or_
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import joinedload
 from app.extensions import db
 from app.media_storage import MediaStorageError, get_media_storage, is_managed_media_key
@@ -780,6 +780,87 @@ def update_business(business_id: int):
         }), 200
 
     return redirect(f"/admin/business/{business.id}")
+
+
+@admin_bp.get("/business/<int:business_id>/wallet/reconciliation")
+@platform_admin_required
+def business_wallet_reconciliation(business_id):
+    import json
+    from app.models import AccessAudit, PlatformAdmin
+    from app.services.google_wallet_reconciliation_audit import google_wallet_reconciliation_audit
+    from app.services.google_wallet_reconciliation_plan import preview_google_wallet_reconciliation
+    from app.models.google_wallet_write_reservation import table
+
+    business = db.session.get(Business, business_id)
+    if business is None:
+        abort(404)
+    cursor = request.args.get("after", "0")
+    if not cursor.isascii() or not cursor.isdecimal() or len(cursor) > 10 or int(cursor) > 2147483647:
+        abort(400)
+
+    audit = preview = None
+    counts = {}
+    history = []
+    status = 200
+    try:
+        audit = google_wallet_reconciliation_audit(business_id)
+        preview = preview_google_wallet_reconciliation(business_id, limit=25, after_customer_id=int(cursor))
+        counts = dict(db.session.execute(
+            select(table.c.state, func.count()).where(
+                table.c.business_id == business_id, table.c.active_slot == 1,
+            ).group_by(table.c.state)
+        ).all())
+        starts = db.session.execute(
+            select(AccessAudit.previous_state, AccessAudit.new_state, AccessAudit.created_at,
+                   AccessAudit.platform_admin_id, PlatformAdmin.name)
+            .outerjoin(PlatformAdmin, PlatformAdmin.id == AccessAudit.platform_admin_id)
+            .where(AccessAudit.business_id == business_id,
+                   AccessAudit.action == "wallet_reconciliation_started")
+            .order_by(AccessAudit.id.desc()).limit(20)
+        ).all()
+        finishes = db.session.execute(
+            select(AccessAudit.previous_state, AccessAudit.platform_admin_id, AccessAudit.new_state)
+            .where(AccessAudit.business_id == business_id,
+                   AccessAudit.action == "wallet_reconciliation_finished",
+                   AccessAudit.previous_state.in_([row.previous_state for row in starts]))
+            .order_by(AccessAudit.id.desc()).limit(40)
+        ).all()
+
+        def safe_report(value):
+            try:
+                result = json.loads(value or "{}")
+                return result if isinstance(result, dict) else {}
+            except (TypeError, ValueError):
+                return {}
+
+        def safe_count(value):
+            return value if type(value) is int and 0 <= value <= 25 else None
+
+        reports = {(row.previous_state, row.platform_admin_id): safe_report(row.new_state)
+                   for row in reversed(finishes)}
+        for row in starts:
+            result = reports.get((row.previous_state, row.platform_admin_id), {})
+            totals = result.get("counts")
+            totals = totals if isinstance(totals, dict) else {}
+            history.append({
+                "date": row.created_at, "admin": row.name or "Administrador no disponible",
+                "requested": safe_count(safe_report(row.new_state).get("requested")),
+                "processed": safe_count(result.get("processed")),
+                "remaining": safe_count(result.get("remaining")),
+                "confirmed": safe_count(totals.get("success", 0)),
+                "skipped": safe_count(totals.get("skipped", 0)),
+                "errors": sum(safe_count(totals.get(key)) or 0 for key in ("error", "retry", "disabled")),
+                "finished": result.get("status") == "finished",
+            })
+    except SQLAlchemyError:
+        db.session.rollback()
+        status = 503
+    response = make_response(render_template(
+        "admin/wallet_reconciliation.html", business=business, audit=audit,
+        preview=preview, reservations=counts, history=history, available=status == 200,
+    ), status)
+    response.headers["Cache-Control"] = "no-store, private"
+    return response
 
 
 @admin_bp.post("/business/<int:business_id>/wallet/publications")

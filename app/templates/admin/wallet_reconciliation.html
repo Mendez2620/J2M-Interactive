@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}Reconciliación de Google Wallet{% endblock %}
+{% block content %}
+<main class="mx-auto max-w-5xl space-y-6 px-4 py-8 text-slate-900">
+  <a class="text-sm font-semibold underline" href="{{ url_for('admin.get_business_details', business_id=business.id) }}">Volver a {{ business.name }}</a>
+  <header class="space-y-2">
+    <h1 class="text-2xl font-bold">Reconciliación de Google Wallet</h1>
+    <p>{{ business.name }}</p>
+    <p class="text-sm text-slate-600">Diagnóstico local. Un trabajo completado no confirma que la tarjeta esté instalada ni que su saldo remoto siga vigente.</p>
+  </header>
+  <p class="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm">La ejecución está bloqueada. Este panel permite diagnosticar y revisar candidaturas.</p>
+  {% if available %}
+  {% set counts = audit.counts %}
+  <section aria-labelledby="sync-summary" class="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
+    <h2 id="sync-summary" class="font-bold">Resumen local</h2>
+    <dl class="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
+      {% for label, value in [
+        ('Clientes con movimientos', audit.customers_with_transactions),
+        ('Últimos trabajos pendientes o en curso', counts.pending + counts.processing),
+        ('Últimos trabajos fallidos', counts.failed),
+        ('Últimos trabajos completados', counts.completed),
+        ('Clientes sin trabajo para el último movimiento', counts.missing_job),
+        ('Inconsistencias de integridad', counts.missing_ledger + counts.invalid_linkage + counts.unknown_job_status),
+        ('Reservas activas', reservations.values() | sum),
+        ('Escrituras iniciadas o inciertas', reservations.get('started', 0) + reservations.get('uncertain', 0))
+      ] %}
+      <div><dt>{{ label }}</dt><dd class="text-lg font-bold">{{ value }}</dd></div>
+      {% endfor %}
+    </dl>
+  </section>
+  <section aria-labelledby="candidate-preview" class="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
+    <h2 id="candidate-preview" class="font-bold">Vista previa de candidaturas</h2>
+    <p class="text-sm">{{ preview.scanned }} clientes inspeccionados en esta página.</p>
+    {% if preview.candidates %}
+    <ul class="space-y-2 text-sm">
+      {% for candidate in preview.candidates %}
+      <li class="rounded-lg border border-slate-200 p-3">Cliente n.º {{ candidate.customer_id }} · {{ candidate.stamps if candidate.loyalty_type == 'stamps' else candidate.points }} {{ 'sellos' if candidate.loyalty_type == 'stamps' else 'puntos' }}</li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="text-sm">No hay candidaturas elegibles en esta página.</p>
+    {% endif %}
+    {% if preview.next_after_customer_id is not none %}
+    <a class="inline-block underline" href="{{ url_for('admin.business_wallet_reconciliation', business_id=business.id, after=preview.next_after_customer_id) }}">Página siguiente</a>
+    {% endif %}
+  </section>
+  <section aria-labelledby="reconciliation-history" class="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
+    <h2 id="reconciliation-history" class="font-bold">Historial reciente</h2>
+    {% for entry in history %}
+    <article class="rounded-lg border border-slate-200 p-3 text-sm">
+      <p class="font-semibold">{{ entry.date.strftime('%Y-%m-%d %H:%M') }} UTC · {{ entry.admin }}</p>
+      <p>Solicitados: {{ entry.requested if entry.requested is not none else '—' }}</p>
+      {% if entry.finished %}
+      <p>Procesados: {{ entry.processed }} · Restantes: {{ entry.remaining }} · Confirmados: {{ entry.confirmed }} · Omisiones: {{ entry.skipped }} · Errores o reintentos: {{ entry.errors }}</p>
+      {% else %}
+      <p>Resultado inconcluso.</p>
+      {% endif %}
+    </article>
+    {% else %}
+    <p class="text-sm">No hay solicitudes registradas para este negocio.</p>
+    {% endfor %}
+  </section>
+  {% else %}
+  <p role="alert" class="rounded-lg border border-slate-200 p-4">El diagnóstico no está disponible. Inténtalo más tarde.</p>
+  {% endif %}
+</main>
+{% endblock %}
