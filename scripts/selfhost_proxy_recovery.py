@@ -64,20 +64,6 @@ def _https_ready(origin: str, context: ssl.SSLContext, timeout: float,
         return False
 
 
-def _legacy_https_ready(origin: str, context: ssl.SSLContext, timeout: float) -> bool:
-    """Legacy-only probe: require TLS, 200/200, no redirects and no revision header."""
-    try:
-        for path in ("/api/health", "/api/ready"):
-            url = origin + path
-            with urlopen(url, timeout=timeout, context=context) as response:
-                if (response.status != 200 or response.geturl() != url
-                        or response.headers.get("X-J2M-Revision")):
-                    return False
-        return True
-    except Exception:
-        return False
-
-
 def _verify_runtime(expected_image: str, web_container: str, worker_service: str,
                     project: str, proxy_container: str, network_name: str) -> None:
     web = json.loads(_docker("inspect", web_container))[0]
@@ -99,9 +85,17 @@ def _verify_runtime(expected_image: str, web_container: str, worker_service: str
         raise RuntimeError("Debe existir exactamente un worker autorizado.")
     worker = json.loads(_docker("inspect", worker_ids[0]))[0]
     labels = worker.get("Config", {}).get("Labels", {}) or {}
+    worker_network = (worker.get("NetworkSettings", {}).get("Networks", {}) or {}).get(network_name, {})
     if (labels.get("com.docker.compose.project") != project
+            or labels.get("com.docker.compose.service") != worker_service
+            or not worker_network.get("IPAddress")
             or not worker.get("State", {}).get("Running")):
         raise RuntimeError("El worker activo no pertenece al proyecto autorizado.")
+
+    image_id = _docker("image", "inspect", "--format", "{{.Id}}", expected_image).strip()
+    if (not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id)
+            or web.get("Image") != image_id or worker.get("Image") != image_id):
+        raise RuntimeError("La imagen inmutable no corresponde a web y worker.")
 
     proxy = json.loads(_docker("inspect", proxy_container))[0]
     proxy_network = (proxy.get("NetworkSettings", {}).get("Networks", {}) or {}).get(network_name, {})
@@ -109,65 +103,30 @@ def _verify_runtime(expected_image: str, web_container: str, worker_service: str
         raise RuntimeError("El proxy HTTPS no está conectado a la red autorizada.")
 
 
-def _verify_legacy_web_alias(web_container: str, network_name: str) -> None:
-    """Require the Docker web DNS name to resolve uniquely to the inspected web."""
-    target = json.loads(_docker("inspect", web_container))[0]
-    networks = target.get("NetworkSettings", {}).get("Networks", {}) or {}
-    if "web" not in (networks.get(network_name, {}).get("Aliases") or []):
-        raise RuntimeError("El rollback legado no tiene alias web autorizado.")
-    network = json.loads(_docker("network", "inspect", network_name))[0]
-    members = network.get("Containers") or {}
-    if sum(data.get("Name") == web_container for data in members.values()) != 1:
-        raise RuntimeError("No se pudo identificar el web único del rollback.")
-    for container_id, data in members.items():
-        if data.get("Name") == web_container:
-            continue
-        other = json.loads(_docker("inspect", container_id))[0]
-        aliases = ((other.get("NetworkSettings", {}).get("Networks", {}) or {})
-                   .get(network_name, {}).get("Aliases") or [])
-        if "web" in aliases:
-            raise RuntimeError("Alias web ambiguo: rollback inseguro.")
-
-
 def recover_proxy(*, origin: str, expected_image: str, expected_revision: str,
                   web_container: str, worker_service: str, project: str,
                   proxy_container: str, network_name: str | None = None,
                   attempts: int = 8, retry_seconds: float = 1.5,
                   request_timeout: float = 5.0, ca_file: Path | None = None,
-                  legacy_bootstrap_rollback: bool = False) -> bool:
+                  verify_only: bool = False) -> bool:
     if not 1 <= attempts <= 20 or not 0 <= retry_seconds <= 10 or not 1 <= request_timeout <= 20:
         raise ValueError("Los límites de recuperación del proxy no son válidos.")
     if _REVISION_PATTERN.fullmatch(expected_revision) is None:
         raise ValueError("La revisión esperada debe ser un SHA completo de 40 caracteres.")
-    if legacy_bootstrap_rollback and (
-        expected_revision != LEGACY_BOOTSTRAP_SHA
-        or expected_image != f"j2m-interactive:{LEGACY_BOOTSTRAP_SHA}"
-    ):
-        raise ValueError("El modo legado solo permite recuperar la versión local anterior aprobada.")
+    if expected_revision == LEGACY_BOOTSTRAP_SHA:
+        raise RuntimeError("Rollback legado bloqueado: no se puede verificar la identidad HTTPS.")
     safe_origin = _validate_origin(origin)
     context = ssl.create_default_context(cafile=str(ca_file) if ca_file else None)
     actual_network = network_name or f"{project}_j2m-private"
     _verify_runtime(expected_image, web_container, worker_service, project, proxy_container,
                     actual_network)
 
-    if legacy_bootstrap_rollback:
-        # The currently deployed pre-header build cannot return a revision. A
-        # forced validated reload plus unique Docker DNS ownership is required.
-        # Never use this exception for deploying a new image.
-        _verify_legacy_web_alias(web_container, actual_network)
-        _docker("exec", proxy_container, "nginx", "-t")
-        _docker("exec", proxy_container, "nginx", "-s", "reload")
-        for attempt in range(attempts):
-            if _legacy_https_ready(safe_origin, context, request_timeout):
-                print("Rollback legado: recarga forzada y HTTPS 200/200; sin identidad SHA por HTTP.")
-                return True
-            if attempt + 1 < attempts:
-                time.sleep(retry_seconds)
-        raise RuntimeError("El rollback legado no recuperó HTTPS válido.")
-
     if _https_ready(safe_origin, context, request_timeout, expected_revision):
         print("Proxy HTTPS ya sirve la revisión aprobada; no fue necesario recargarlo.")
         return False
+
+    if verify_only:
+        raise RuntimeError("Rollback bloqueado: HTTPS no acredita la imagen del pin anterior.")
 
     _docker("exec", proxy_container, "nginx", "-t")
     _docker("exec", proxy_container, "nginx", "-s", "reload")
@@ -190,8 +149,7 @@ def main() -> int:
     parser.add_argument("--project", default="j2m-cutover-ready")
     parser.add_argument("--proxy-container", default="j2m-cutover-ready-local-https")
     parser.add_argument("--network-name")
-    parser.add_argument("--legacy-bootstrap-rollback", action="store_true",
-                        help="Uso exclusivo del rollback al SHA pre-identidad aprobado.")
+    parser.add_argument("--verify-only", action="store_true")
     parser.add_argument("--attempts", type=int, default=8)
     parser.add_argument("--retry-seconds", type=float, default=1.5)
     parser.add_argument("--request-timeout", type=float, default=5.0)
@@ -210,7 +168,7 @@ def main() -> int:
         retry_seconds=args.retry_seconds,
         request_timeout=args.request_timeout,
         ca_file=args.ca_file,
-        legacy_bootstrap_rollback=args.legacy_bootstrap_rollback,
+        verify_only=args.verify_only,
     )
     return 0
 

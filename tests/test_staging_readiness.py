@@ -8,7 +8,8 @@ from pathlib import Path
 from threading import Barrier, Event
 from unittest.mock import patch
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.engine import make_url
 
 from app import create_app
 from app.config import normalize_database_url
@@ -196,6 +197,11 @@ class StagingReadinessTestCase(unittest.TestCase):
     @unittest.skipUnless(os.getenv("TEST_POSTGRES_URL"), "PostgreSQL efímero no disponible")
     def test_alembic_upgrades_ephemeral_postgres_to_single_expected_head(self):
         url = os.environ["TEST_POSTGRES_URL"]
+        parsed = make_url(url)
+        self.assertIn(parsed.host, {"127.0.0.1", "localhost", "::1"})
+        self.assertEqual(parsed.get_backend_name(), "postgresql")
+        self.assertEqual(parsed.database, "j2m_test")
+        self.assertFalse(parsed.query)
         environment = os.environ.copy()
         environment.update(
             DATABASE_URL=url,
@@ -225,6 +231,12 @@ class StagingReadinessTestCase(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         with engine.connect() as connection:
             self.assertEqual(connection.execute(text("SELECT version_num FROM alembic_version")).scalar(), EXPECTED_HEAD)
+            from scripts.check_wallet_referral_schema import validate_schema
+
+            self.assertEqual(validate_schema(connection), [])
+            connection.execute(text("ALTER TABLE public.google_wallet_referral_jobs DISABLE ROW LEVEL SECURITY"))
+            self.assertIn("row-level security", validate_schema(connection))
+            connection.rollback()
             self.assertEqual(
                 connection.execute(text("SELECT username, email FROM staff WHERE id = 1")).one(),
                 ("existente", "Mixto@Example.Test"),

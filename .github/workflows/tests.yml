@@ -50,6 +50,7 @@ jobs:
       - run: pip install -r requirements.lock
       - run: python -m pip check
       - run: flask --app run.py staging-preflight --help
+      - run: python -m scripts.probe_wallet_session_affinity
       - run: python -m unittest discover tests -v
       - run: docker compose --env-file .env.selfhost.example -f compose.selfhost.yml config --quiet
         env:
@@ -61,6 +62,14 @@ jobs:
       - run: docker compose -p j2m-pr70-production-ci --env-file .env.selfhost.production-test.example -f compose.selfhost.yml -f compose.selfhost.test.yml -f compose.selfhost.production-test.yml config --quiet
       - run: docker compose -p j2m-pr70-loopback-ci --env-file .env.selfhost.production-test.example -f compose.selfhost.yml -f compose.selfhost.test.yml -f compose.selfhost.production-test.yml -f compose.selfhost.loopback-test.yml config --quiet
       - run: docker build --tag j2m-staging:test .
+      - name: Start isolated Wallet Demo rehearsal with Wallet disabled
+        run: |
+          docker tag j2m-staging:test j2m-interactive:wallet-demo-synthetic
+          docker compose -f compose.wallet-demo.yml config --quiet
+          trap 'docker compose -f compose.wallet-demo.yml down' EXIT
+          docker compose -f compose.wallet-demo.yml up -d --wait --wait-timeout 120
+          python -c 'from scripts.check_wallet_demo_readiness import runtime; runtime()'
+          docker compose -f compose.wallet-demo.yml exec -T app python -c "from urllib.request import urlopen; assert urlopen('http://127.0.0.1:8000/api/ready', timeout=5).status == 200"
       - name: Verify isolated Nginx upstream recovery and rollback
         run: python tests/nginx_recovery_ci.py
       - name: Verify joint PostgreSQL and media restoration in isolated Docker resources
