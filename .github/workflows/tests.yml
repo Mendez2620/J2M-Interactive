@@ -98,6 +98,30 @@ jobs:
           python tests/integral_restore_ci.py
       - run: docker build --file Dockerfile.postgres-test --tag j2m-postgres:production-test .
 
+  historical-transition:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.lock
+      - name: Build historical reconstruction and rehearse against PostgreSQL 17
+        run: |
+          set -euo pipefail
+          legacy=dae140e3684be29c534be3e1725598d226b68e03
+          sha=$(git rev-parse HEAD)
+          historical=$(mktemp -d)
+          git archive "$legacy" | tar -x -C "$historical"
+          docker build --label "org.opencontainers.image.revision=$legacy" -t "j2m-interactive:reconstructed-$legacy" "$historical"
+          docker build --label "org.opencontainers.image.revision=$sha" -t "j2m-interactive:transition-$sha" .
+          evidence=$(mktemp -d)
+          python tests/legacy_wallet_transition_docker.py --reconstructed-legacy --journal "$evidence/evidence.jsonl"
+
   powershell-syntax:
     runs-on: windows-latest
     timeout-minutes: 10

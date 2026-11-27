@@ -11,6 +11,7 @@ import time
 import uuid
 from pathlib import Path
 
+from postgres_full_schema_fixture import BACKUP_GRANTS
 from nginx_recovery_ci import NGINX_IMAGE, production_ids, proxy_config, run, write_certificates
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,6 +23,7 @@ from scripts.historical_transition_evidence import (Backend, FINAL_HEAD, INITIAL
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--journal", type=Path)
 parser.add_argument("--preflight-only", action="store_true")
+parser.add_argument("--reconstructed-legacy", action="store_true")
 args = parser.parse_args()
 if not args.preflight_only and args.journal is None:
     parser.error("--journal is required for the synthetic rehearsal")
@@ -29,6 +31,8 @@ sha = run("git", "-C", str(ROOT), "rev-parse", "HEAD")
 if run("git", "-C", str(ROOT), "status", "--porcelain"):
     raise RuntimeError("Rehearsal requires a clean source tree")
 legacy_tag = "j2m-interactive:" + LEGACY_SHA
+if args.reconstructed_legacy:
+    legacy_tag = "j2m-interactive:reconstructed-" + LEGACY_SHA
 target_tag = "j2m-interactive:transition-" + sha
 
 
@@ -37,6 +41,11 @@ def image(tag):
 
 
 img, new = image(legacy_tag), image(target_tag)
+if args.reconstructed_legacy:
+    reconstructed_revision = run("docker", "image", "inspect", "--format",
+                                 '{{index .Config.Labels "org.opencontainers.image.revision"}}', img)
+    if reconstructed_revision != LEGACY_SHA:
+        raise RuntimeError("Reconstructed legacy image lacks the expected revision label")
 label = run("docker", "image", "inspect", "--format",
             '{{index .Config.Labels "org.opencontainers.image.revision"}}', new)
 if label != sha or img == new:
@@ -149,7 +158,18 @@ def restore_fixture():
     global source_digest
     db_args = ["docker", "exec", n["db"]]
     source_digest = logical_digest(SOURCE)
-    archive = subprocess.check_output([*db_args, "pg_dump", "-U", "j2m_test", "-Fc", SOURCE], timeout=25)
+    denied = subprocess.run(["docker", "exec", "-e", "PGPASSWORD=synthetic", n["db"],
+                             "psql", "-h", "127.0.0.1", "-XAt", "-v", "ON_ERROR_STOP=1",
+                             "-U", "j2m_backup", "-d", SOURCE, "-c",
+                             "UPDATE public.customers SET current_stamps=99"],
+                            capture_output=True, timeout=15)
+    if not denied.returncode or b"permission denied" not in denied.stderr:
+        raise RuntimeError("Synthetic backup role is not read-only")
+    archive = subprocess.check_output(
+        ["docker", "exec", "-e", "PGPASSWORD=synthetic", n["db"], "pg_dump", "-h", "127.0.0.1",
+         "-U", "j2m_backup", "--enable-row-security", "--no-owner", "--no-acl", "-Fc", SOURCE],
+        timeout=25,
+    )
     if not archive.startswith(b"PGDMP") or len(archive) > 8 * 1024 * 1024:
         raise RuntimeError("Invalid synthetic snapshot")
     r(*db_args, "createdb", "-U", "j2m_test", "-O", "j2m_transition_owner", RESTORED)
@@ -188,8 +208,11 @@ def provision():
         GRANT j2m_transition_owner TO j2m_migrator;
         CREATE ROLE j2m_web LOGIN PASSWORD 'synthetic';
         CREATE ROLE j2m_worker LOGIN PASSWORD 'synthetic';
+        CREATE ROLE j2m_backup LOGIN PASSWORD 'synthetic';
+        GRANT CONNECT ON DATABASE j2m_test TO j2m_backup;
         REVOKE CONNECT ON DATABASE j2m_test FROM PUBLIC;
     """)
+    sql(SOURCE, BACKUP_GRANTS)
 
 
 def assert_drained():
@@ -329,6 +352,7 @@ try:
     rehearse(args.journal.with_suffix(args.journal.suffix + ".state"), DockerRehearsal(),
              identity={"checkout": sha, "legacy_image": img, "target_image": new,
                        "network": p, "database_container": n["db"],
+                       "legacy_provenance": "reconstructed" if args.reconstructed_legacy else "local-original",
                        "initial_head": INITIAL_HEAD, "target_head": FINAL_HEAD})
 except Exception as exc:
     journal.record("blocked", failure_type=type(exc).__name__)
