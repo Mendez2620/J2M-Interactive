@@ -1,8 +1,11 @@
 """Synthetic PostgreSQL exercise for split roles and a durable writer fence."""
 
+from concurrent.futures import ThreadPoolExecutor
 import subprocess
 import time
 from uuid import uuid4
+
+from postgres_full_schema_fixture import exercise_application_schema
 
 SETUP = """
 CREATE ROLE j2m_owner NOLOGIN;
@@ -15,9 +18,13 @@ CREATE SCHEMA rehearsal AUTHORIZATION j2m_owner;
 SET ROLE j2m_owner;
 CREATE TABLE rehearsal.ledger (id bigint GENERATED ALWAYS AS IDENTITY, tenant int, balance int);
 ALTER TABLE rehearsal.ledger ENABLE ROW LEVEL SECURITY;
+CREATE FUNCTION rehearsal.write_ledger() RETURNS void LANGUAGE SQL
+AS $$ INSERT INTO rehearsal.ledger (tenant,balance) VALUES (1,99) $$;
+REVOKE EXECUTE ON FUNCTION rehearsal.write_ledger() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION rehearsal.write_ledger() TO j2m_web;
 INSERT INTO rehearsal.ledger (tenant, balance) VALUES (1, 2), (2, 3);
 GRANT USAGE ON SCHEMA rehearsal TO j2m_web,j2m_worker,j2m_backup;
-GRANT SELECT, INSERT ON rehearsal.ledger TO j2m_web,j2m_worker;
+GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON rehearsal.ledger TO j2m_web,j2m_worker;
 GRANT USAGE ON SEQUENCE rehearsal.ledger_id_seq TO j2m_web,j2m_worker;
 GRANT SELECT ON rehearsal.ledger, rehearsal.ledger_id_seq TO j2m_backup;
 CREATE POLICY web_rows ON rehearsal.ledger TO j2m_web USING (tenant = 1) WITH CHECK (tenant = 1);
@@ -30,7 +37,7 @@ FENCE = """
 BEGIN;
 ALTER ROLE j2m_web NOLOGIN;
 ALTER ROLE j2m_worker NOLOGIN;
-REVOKE INSERT ON rehearsal.ledger FROM j2m_web,j2m_worker;
+REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON rehearsal.ledger FROM j2m_web,j2m_worker;
 REVOKE USAGE ON SEQUENCE rehearsal.ledger_id_seq FROM j2m_web,j2m_worker;
 LOCK TABLE rehearsal.ledger IN ACCESS EXCLUSIVE MODE;
 COMMIT;
@@ -39,7 +46,9 @@ COMMIT;
 
 def main():
     name = "j2m-roles-" + uuid4().hex[:8]
-    subprocess.run(["docker", "run", "-d", "--name", name, "--network", "none",
+    network = name + "-internal"
+    subprocess.run(["docker", "network", "create", "--internal", network], check=True, capture_output=True, timeout=30)
+    subprocess.run(["docker", "run", "-d", "--name", name, "--network", network, "--network-alias", "db",
                     "-e", "POSTGRES_PASSWORD=synthetic-only", "-e", "POSTGRES_DB=j2m_test",
                     "postgres:17-alpine"], check=True, capture_output=True, timeout=60)
 
@@ -74,18 +83,33 @@ def main():
 
         # A live connection must lose DML too. Wait until its first SELECT completes.
         peer = subprocess.Popen(["docker", "exec", "-i", name, "env", "PGPASSWORD=synthetic-only",
-                                 "psql", "-XAt", "-h", "127.0.0.1", "-U", "j2m_web", "-d", "j2m_test"],
+                                 "psql", "-XqAt", "-h", "127.0.0.1", "-U", "j2m_web", "-d", "j2m_test"],
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
-            peer.stdin.write(b"SELECT 91;\n")
+            peer.stdin.write(b"BEGIN; SELECT balance FROM rehearsal.ledger FOR UPDATE;\n")
             peer.stdin.flush()
-            assert peer.stdout.readline().strip() == b"91"
-            sql(FENCE).check_returncode()
+            assert peer.stdout.readline().strip() == b"2"
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                fence = executor.submit(sql, FENCE)
+                for _ in range(40):
+                    blocked = sql("SELECT count(*) FROM pg_locks WHERE NOT granted "
+                                  "AND relation='rehearsal.ledger'::regclass").stdout.strip()
+                    if blocked not in (b"", b"0"):
+                        break
+                    time.sleep(0.1)
+                else:
+                    raise RuntimeError("Fence did not wait for the active transaction")
+                peer.stdin.write(b"ROLLBACK;\n")
+                peer.stdin.flush()
+                fence.result(timeout=15).check_returncode()
             assert sql("SELECT 1", "j2m_web").returncode
             assert sql("SELECT 1", "j2m_worker").returncode
-            out, errors = peer.communicate(b"INSERT INTO rehearsal.ledger (tenant,balance) VALUES (1,9);\n",
+            out, errors = peer.communicate(b"INSERT INTO rehearsal.ledger (tenant,balance) VALUES (1,9);\n"
+                                           b"UPDATE rehearsal.ledger SET balance=9;\nDELETE FROM rehearsal.ledger;\n"
+                                           b"TRUNCATE rehearsal.ledger;\nSELECT nextval('rehearsal.ledger_id_seq');\n"
+                                           b"SET ROLE j2m_owner;\nSELECT rehearsal.write_ledger();\n",
                                            timeout=8)
-            assert b"permission denied" in errors
+            assert errors.count(b"permission denied") >= 7
             sql("SET ROLE j2m_owner; ALTER TABLE rehearsal.ledger ADD COLUMN note text",
                 "j2m_migrator").check_returncode()
             assert sql(query).stdout.strip() == source
@@ -93,9 +117,11 @@ def main():
             if peer.poll() is None:
                 peer.kill()
                 peer.wait(timeout=8)
+        exercise_application_schema(network, run, sql)
         print("Synthetic per-role RLS, read-only dump coverage, durable writer fence and migrator verified.")
     finally:
         subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=30, check=True)
+        subprocess.run(["docker", "network", "rm", network], capture_output=True, timeout=30, check=True)
 
 
 if __name__ == "__main__":

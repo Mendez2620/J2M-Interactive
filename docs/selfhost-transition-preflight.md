@@ -72,7 +72,7 @@ conexión a Supabase. La restauración ejecuta la imagen por ID inmutable,
 verifica el índice y componentes bajo el bloqueo y exige la revisión
 inicial. Revalida el conjunto y el tag al finalizar.
 
-    python -m scripts.verify_transition_restore --index <archivo-integral-exacto> --key-file <ruta-DPAPI-privada> --expected-index-sha256 <hash> --expected-legacy-image-id <sha256:id> --authorize-isolated-restore
+    python -m scripts.verify_transition_restore --index <archivo-integral-exacto> --key-file <ruta-DPAPI-privada> --expected-index-sha256 <hash> --expected-legacy-image-id <sha256:id> --expected-postgres-image-id <sha256:id> --authorize-isolated-restore
 
 No ejecutar sin aprobación expresa ni utilizar el resultado como permiso
 de transición. La evidencia no se conserva automáticamente; no acredita
@@ -214,3 +214,59 @@ La reapertura y la implementación de la barrera real requieren autorización.
 Referencias: [pg_dump](https://www.postgresql.org/docs/current/app-pgdump.html),
 [RLS de PostgreSQL](https://www.postgresql.org/docs/current/ddl-rowsecurity.html) y
 [roles de Supabase](https://supabase.com/docs/guides/database/postgres/roles).
+
+## Matriz propuesta para la separación de identidades
+
+El ensayo de esquema completo crea ambos heads desde las migraciones de J2M.
+Incluye dos negocios, movimientos sintéticos, secuencias y restauraciones
+estrictas. Las concesiones del fixture se aplican exclusivamente a la base
+desechable. No representan una lista aprobada para Supabase.
+
+| Identidad | Alcance propuesto | Restricciones |
+| --- | --- | --- |
+| Propietario J2M | Propiedad de las tablas, secuencias, funciones y triggers enumerados en el manifiesto de migraciones J2M. Puede cambiar RLS. | NOLOGIN. Excluir esquemas administrados y objetos de extensiones. |
+| Migrador | CONNECT y membresía con SET ROLE hacia el propietario. DDL y cambios de esquema solo durante la ventana. | NOINHERIT. Sin credencial compartida con servicios. |
+| Web | SELECT y DML por flujo sobre negocios, clientes, staff, sesiones, passkeys, recuperación, movimientos, ledger, referidos y auditoría. USAGE en las secuencias de tablas que inserta. | Sin propiedad, BYPASSRLS, CREATEROLE, TRUNCATE ni SET ROLE al propietario. Revisar por separado el acceso administrativo, los outboxes que encola y cada función ejecutable. |
+| Worker | Leer el contexto necesario de negocios y clientes. Operaciones por estado en outboxes, reservas, trabajos de publicación y cola de referidos. | Sin DML en saldos, ledger, credenciales o sesiones. Sin propiedad ni membresía privilegiada. |
+| Respaldo | CONNECT, USAGE de esquema, SELECT de cada tabla y secuencia enumeradas. Política SELECT explícita donde RLS filtra filas. | Sin permisos efectivos de escritura, secuencias de escritura o roles privilegiados. Comparar filas, estructura y posición de secuencias. |
+| Administración | Gestión aprobada de roles, mantenimiento y recuperación. | Credencial separada fuera de web, worker, migrador y tareas. |
+
+Los privilegios predeterminados del propietario deben retirar EXECUTE de
+PUBLIC para funciones nuevas que lo hereden. No conceder DML futuro por
+defecto. Cada migración deberá declarar y probar grants, RLS y permisos de
+secuencia correspondientes. `pg_dump --no-acl --no-owner` compara contenido
+y estructura, pero la recuperación de la configuración de roles exige un
+manifiesto de permisos independiente.
+
+Los logins de web y worker sirven a todos los negocios. Un filtro fijo
+por tenant o un GUC que el mismo login pueda cambiar no acredita aislamiento
+en PostgreSQL. El contexto debe derivarse de la sesión autorizada o del
+trabajo reclamado y aplicarse por transacción, con rollback y limpieza en el
+pool. El modelo actual requiere demostrar en cada flujo si esa autorización
+queda en la aplicación o se vincula a una identidad verificable por la base.
+Las tablas protegidas de reservas y cola necesitan políticas explícitas para
+el rol que ejecuta cada operación. Esta parte del diseño no está certificada.
+
+### Paso previo a cualquier cambio de credenciales
+
+1. Revisar el manifiesto exacto de objetos y grants por flujo en una copia
+   sintética. Detener si un flujo autorizado falla o un rol alcanza otro
+   tenant, la propiedad o una función de escritura ajena.
+2. Solicitar solo el aprovisionamiento de nuevas identidades y grants
+   aprobados. Mantener una copia protegida de la configuración anterior.
+   Cambiar web, worker y respaldo de forma separada y verificar reautenticación,
+   la cobertura del dump y el acceso al pooler de cada rol.
+3. Aprobar por separado la invalidación de la credencial histórica compartida.
+   Identificar y desconectar sus consumidores, incluido Railway, sin
+   modificar roles administrados por anticipado. Mantener un camino
+   administrativo de recuperación.
+4. Solicitar aparte la ventana de migración, con respaldo reciente probado,
+   escritores bloqueados y drenados, migrador independiente, diario y
+   verificación previo a reabrir. Si falla la barrera o la prueba de integridad,
+   conservar mantenimiento, sin downgrade ni pérdida de movimientos.
+
+El comando de restauración de transición requiere
+`--expected-postgres-image-id sha256:<id>`. Verifica la imagen inmutable y la
+versión 17 del contenedor real. La restauración programada conserva su
+interfaz anterior. El verificador estricto de transición exige baseline,
+cadena de balances, correspondencia con movimientos y secuencias sanas.

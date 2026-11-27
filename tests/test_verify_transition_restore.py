@@ -10,7 +10,7 @@ class TransitionRestoreTests(unittest.TestCase):
     def test_authorization_required(self):
         with patch("sys.argv", ["restore", "--index", "x", "--key-file", "x",
                                "--expected-index-sha256", "x",
-                               "--expected-legacy-image-id", "x"]), \
+                               "--expected-legacy-image-id", "x", "--expected-postgres-image-id", "x"]), \
                 patch.object(v, "verify_exact_restore") as restore, patch("builtins.print"):
             self.assertEqual(v.main(), 2)
             restore.assert_not_called()
@@ -27,23 +27,24 @@ class TransitionRestoreTests(unittest.TestCase):
                 patch.object(v, "inspect_backup", return_value=evidence), \
                 patch.object(v, "image_id", return_value=image), \
                 patch.object(v.backup, "restore_integral_isolated", return_value=report) as restore:
-            result = v.verify_exact_restore(index, key, digest, image)
+            result = v.verify_exact_restore(index, key, digest, image, postgres_image=image)
             self.assertFalse(result["transition_authorized"])
             restore.assert_called_once_with(
                 index, key, v.LEGACY_TAG, lock_file=Path("selfhost-backups/.operations.lock"),
-                expected_image_id=image, expected_index_sha256=digest)
+                expected_image_id=image, expected_index_sha256=digest, postgres_image=image)
             restore.reset_mock()
             with self.assertRaises(RuntimeError):
-                v.verify_exact_restore(index, key, "d" * 64, image)
+                v.verify_exact_restore(index, key, "d" * 64, image, postgres_image=image)
             restore.assert_not_called()
             restore.return_value = v.backup.RestoreReport("unexpected", 1, 6, 1, 2)
             with self.assertRaises(RuntimeError):
-                v.verify_exact_restore(index, key, digest, image)
+                v.verify_exact_restore(index, key, digest, image, postgres_image=image)
 
 
     def test_rejects_docker_destination_override_before_inspecting(self):
         with patch.dict(v.os.environ, {"DOCKER_HOST": "tcp://example.invalid:2376"}), \
                 patch.object(v, "command") as docker:
             with self.assertRaisesRegex(ValueError, "Docker environment override"):
-                v.verify_exact_restore(Path("unread"), Path("unread"), "b" * 64, "sha256:" + "c" * 64)
+                v.verify_exact_restore(Path("unread"), Path("unread"), "b" * 64, "sha256:" + "c" * 64,
+                                       postgres_image="sha256:" + "d" * 64)
             docker.assert_not_called()

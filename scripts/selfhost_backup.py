@@ -1418,6 +1418,32 @@ def _integral_components(index: Path, key_file: Path) -> tuple[str, Path, Path]:
     return backup_id, components["postgresql"], components["media"]
 
 
+def verify_transition_accounting(query):
+    """Strict checks for the exact transition restore. No identifiers or values leave the DB."""
+    inconsistent = query("""
+        SELECT count(*) FROM transactions t
+        LEFT JOIN loyalty_ledger_entries l ON l.transaction_id=t.id
+        WHERE l.id IS NULL OR (l.business_id,l.customer_id)<>(t.business_id,t.customer_id)
+             OR l.stamps_delta <> CASE WHEN t.type='earn' THEN t.stamps_amount ELSE -t.stamps_amount END
+             OR round(l.points_delta::numeric, 6) <>
+                round((CASE WHEN t.type='earn' THEN t.points_amount ELSE -t.points_amount END)::numeric, 6)
+             OR NOT EXISTS (SELECT 1 FROM loyalty_ledger_entries b
+                            WHERE b.baseline_customer_id=t.customer_id AND b.business_id=t.business_id
+                              AND b.customer_id=t.customer_id AND b.id<l.id)
+    """)
+    if inconsistent != "0":
+        raise RuntimeError("Movimiento restaurado sin cadena contable verificable.")
+    for table in ("businesses", "customers", "staff", "transactions", "loyalty_ledger_entries",
+                  "google_wallet_sync_jobs"):
+        sequence = query(f"SELECT pg_get_serial_sequence('public.{table}', 'id')")
+        if not re.fullmatch(r"public\.[a-z0-9_]+", sequence):
+            raise RuntimeError("Falta una secuencia esperada del respaldo.")
+        if query(f"SELECT (last_value >= COALESCE((SELECT max(id) FROM public.{table}), 0) "
+                 f"AND (is_called OR last_value > COALESCE((SELECT max(id) FROM public.{table}), 0))) "
+                 f"FROM {sequence}") != "t":
+            raise RuntimeError("Secuencia restaurada no supera los identificadores existentes.")
+
+
 def restore_integral_isolated(index: Path, key_file: Path, image: str,
                               lock_file: Path | None = None,
                               timeout: int = 900, *,
@@ -1469,6 +1495,13 @@ def restore_integral_isolated(index: Path, key_file: Path, image: str,
                             "-e", f"POSTGRES_PASSWORD={password}", postgres_image],
                            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                            timeout=60)
+            if postgres_image != "postgres:17-alpine":
+                observed = subprocess.run(["docker", "inspect", "--format", "{{.Image}}", pg_name],
+                                          check=True, capture_output=True, text=True, timeout=15).stdout.strip()
+                version = subprocess.run(["docker", "exec", pg_name, "postgres", "--version"],
+                                         check=True, capture_output=True, text=True, timeout=15).stdout.strip()
+                if observed != postgres_image or not re.fullmatch(r"postgres \(PostgreSQL\) 17\.[0-9]+(?: .*)?", version):
+                    raise RuntimeError("Identidad o versión PostgreSQL inesperada.")
             _wait_postgres(pg_name)
             _restore_database_stream(database, key, pg_name, timeout)
             archived = set(inspect_media_backup(media, key_file, backup_id))
@@ -1571,6 +1604,8 @@ with app.app_context():
             verified, no_baseline = map(int, verdict.stdout.strip().split(","))
             if verified + no_baseline != counts[1]:
                 raise RuntimeError("El ledger no cubrió el inventario de clientes restaurados.")
+            if expected_index_sha256 is not None:
+                verify_transition_accounting(lambda sql: _psql(pg_name, sql))
             return RestoreReport(revision, *counts, *integrity[:2], len(authorized), verified, no_baseline)
         finally:
             for container in (app_name, pg_name):
