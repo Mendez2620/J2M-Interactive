@@ -567,3 +567,32 @@ la copia carezca de revisión y datos contables, conserva la evidencia
 bajo los mismos identificadores y exige NOLOGIN a escritores. La copia
 parcial no entra a Alembic. El ensayo elimina los recursos aislados
 identificados al terminar la inspección.
+
+### Fronteras de interrupción de la preparación
+
+En PostgreSQL 17 y PgBouncer de sesión, el ensayo termina el cliente
+administrativo mientras la transacción de barrera espera el lock de la
+cola. El supervisor verifica la reversión de los cambios de esa
+transacción y termina su backend si sigue activo. El ingreso por PgBouncer
+y CONNECT en PostgreSQL se cierran de forma independiente. La barrera
+sustituta drena la sesión persistente y comprueba la denegación de
+escrituras. La comparación contable incluye saldos, filas de movimientos
+y ledger.
+
+La reapertura ensaya cuatro terminaciones: grants sin confirmar,
+grants confirmados con NOLOGIN, LOGIN con PgBouncer aún cerrado y
+PgBouncer habilitado antes de confirmar. CONNECT se concede al final,
+tras verificar permisos, roles y cierre previo. Si se interrumpe un
+paso, el supervisor vuelve a comprobar y restablecer el bloqueo. Solo
+la reapertura completa admite las operaciones HTTP de prueba.
+
+En HTTPS el coordinador se termina entre health y ready. El supervisor
+comprueba los IDs e imágenes de web, worker, proxy y PostgreSQL, detiene
+el proxy, aplica NOLOGIN, detiene los procesos y comprueba las sesiones y
+denegaciones SQL. Compara la revisión y el estado contable del mismo
+clúster. La atestación queda incompleta, y Alembic no se vuelve a ejecutar.
+
+La fase posterior 8E.2D.3 deberá aprovisionar identidades reales,
+validar Supavisor y la matriz de permisos operativos, coordinar tareas y
+servicios, verificar el respaldo exacto y certificar la activación.
+Los ensayos actuales no habilitan esa activación.

@@ -143,6 +143,7 @@ admin_users = j2m_pool_admin
 pool_mode = session
 query_wait_timeout = 5
 server_connect_timeout = 5
+server_login_retry = 1
 EOF
 exec pgbouncer /tmp/j2m-pool.ini
 """

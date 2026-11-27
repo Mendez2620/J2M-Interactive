@@ -502,9 +502,14 @@ COMMIT;
     pool_control("ENABLE full_restore_1").check_returncode()
     direct_blocked()
     execute(f"GRANT CONNECT ON DATABASE {database} TO {roles}").check_returncode()
-    reopened = connection(worker, database)
-    result, errors = reopened.communicate(b"SELECT current_user;\n", timeout=8)
-    assert not reopened.returncode and not errors and result.strip() == worker.encode()
+    for _ in range(5):
+        reopened = connection(worker, database)
+        result, errors = reopened.communicate(b"SELECT current_user;\n", timeout=8)
+        if not reopened.returncode and not errors and result.strip() == worker.encode():
+            break
+        time.sleep(0.5)
+    else:
+        raise RuntimeError("Reopened pool did not establish an authenticated writer connection")
     service_flow(web, (root / "tests/postgres_manager_login_flow.py").read_text())
     service_flow(web, (root / "tests/postgres_platform_admin_flow.py").read_text())
     assert execute(accounting).stdout == before
