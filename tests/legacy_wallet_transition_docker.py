@@ -25,7 +25,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--journal", type=Path)
 parser.add_argument("--preflight-only", action="store_true")
 parser.add_argument("--supervised-run")
-parser.add_argument("--interrupt-at", choices=("fence", "restore", "restore-partial", "migrate", "verify"), default="migrate")
+parser.add_argument("--interrupt-at", choices=("fence", "restore", "restore-partial", "migrate", "verify", "https"), default="migrate")
 parser.add_argument("--reconstructed-legacy", action="store_true")
 args = parser.parse_args()
 if not args.preflight_only and args.journal is None:
@@ -91,7 +91,7 @@ def exercise(stage, selected=img):
 def start(role, selected=img):
     cmd=() if role=="web" else ("flask","--app","run.py","run-google-wallet-sync-worker")
     process="web" if role=="web" else "google-wallet-worker"
-    r("docker","run","-d","--name",n[role],"--network-alias",role,"--label",f"com.docker.compose.project={p}","--label",f"com.docker.compose.service={role}",*config(RESTORED, "j2m_" + role),"-e",f"J2M_PROCESS_TYPE={process}","-e",f"J2M_RELEASE_IMAGE=j2m-interactive:{sha if selected == new else ''}",selected,*cmd)
+    r("docker","run","-d","--name",n[role],"--network-alias",role,"--label",label,"--label",f"com.docker.compose.project={p}","--label",f"com.docker.compose.service={role}",*config(RESTORED, "j2m_" + role),"-e",f"J2M_PROCESS_TYPE={process}","-e",f"J2M_RELEASE_IMAGE=j2m-interactive:{sha if selected == new else ''}",selected,*cmd)
 def attest(folder, selected=img):
     def snapshot():
         ids = {role: json.loads(r("docker", "inspect", name))[0] for role, name in n.items()}
@@ -113,6 +113,8 @@ def attest(folder, selected=img):
         r("docker", "exec", n[role], "python", "scripts/container_healthcheck.py")
 
     def request(route, nonce):
+        if route == "ready":
+            interrupt_boundary("https")
         http_input = (f"GET /api/{route} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n"
                       f"X-J2M-Probe: {nonce}\r\n\r\n").encode()
         client = ("import socket,ssl,json; c=ssl.create_default_context(cafile='/proof/ca.crt'); "
@@ -238,6 +240,11 @@ def interrupt_boundary(phase):
         "restored_digest": logical_digest(RESTORED) if has_copy else None,
         "checkout": sha,
     }
+    if phase == "https":
+        evidence["serving"] = {
+            role: r("docker", "inspect", "--format", "{{.Id}}|{{.Image}}", n[role])
+            for role in ("web", "worker", "proxy")
+        }
     if source_digest is not None and evidence["source_digest"] != source_digest:
         raise RuntimeError("Protected source changed before interruption")
     print("J2M_TRANSITION_BOUNDARY " + json.dumps(evidence), flush=True)
@@ -277,7 +284,7 @@ def verify_https_and_recover():
         folder.chmod(0o755)
         write_certificates(folder)
         (folder/"nginx.conf").write_text(proxy_config().replace("access_log off;", "log_format proof '$http_x_j2m_probe $uri $upstream_addr $upstream_status'; access_log /dev/stdout proof;"),encoding="utf-8")
-        r("docker","run","-d","--name",n["proxy"],"--network",p,"--network-alias","proxy","--mount",f"type=bind,src={folder},dst=/etc/nginx/tls,readonly",NGINX_IMAGE,"nginx","-c","/etc/nginx/tls/nginx.conf","-g","daemon off;")
+        r("docker","run","-d","--name",n["proxy"],"--network",p,"--network-alias","proxy","--label",label,"--mount",f"type=bind,src={folder},dst=/etc/nginx/tls,readonly",NGINX_IMAGE,"nginx","-c","/etc/nginx/tls/nginx.conf","-g","daemon off;")
         time.sleep(5)
         target = attest(folder, new)
         exercise("verify", new)

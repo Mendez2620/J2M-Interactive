@@ -61,10 +61,11 @@ def main():
         return run("env", "PGPASSWORD=synthetic-only", "psql", "-XAt", "-v", "ON_ERROR_STOP=1",
                    "-h", "127.0.0.1", "-U", role, "-d", database, "-c", statement)
 
-    def connection(role, database):
+    def connection(role, database, *, direct=False):
+        endpoint = ["-h", "127.0.0.1"] if direct else ["-h", pooler, "-p", "6432"]
         return subprocess.Popen(
             ["docker", "exec", "-i", name, "env", "PGPASSWORD=synthetic-only",
-             "psql", "-XqAt", "-h", pooler, "-p", "6432", "-U", role, "-d", database],
+             "psql", "-XqAt", *endpoint, "-U", role, "-d", database],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
 

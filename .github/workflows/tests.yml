@@ -126,7 +126,7 @@ jobs:
           python tests/legacy_wallet_transition_docker.py --reconstructed-legacy --journal "$evidence/evidence.jsonl"
       - name: Terminate coordinator at fenced transition boundaries
         run: |
-          for phase in fence restore restore-partial migrate verify; do
+          for phase in fence restore restore-partial migrate verify https; do
             python tests/legacy_transition_supervisor_ci.py --reconstructed-legacy --boundary "$phase" --evidence-dir "$RUNNER_TEMP/j2m-transition-evidence/supervised-$phase"
           done
       - name: Preserve synthetic transition evidence
