@@ -3,6 +3,7 @@ import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 
+from flask import current_app
 from sqlalchemy import and_, case, func, or_
 from sqlalchemy.exc import IntegrityError
 
@@ -106,6 +107,8 @@ def enqueue_apple_publication(*, business, admin, reason, republish=False):
 
 
 def enqueue_apple_pass_update(customer, *, reason="balance"):
+    if current_app.config.get("APPLE_WALLET_MODE", "disabled") == "disabled":
+        return 0
     credential = ApplePassCredential.query.filter_by(
         business_id=customer.business_id, customer_id=customer.id,
     ).one_or_none()

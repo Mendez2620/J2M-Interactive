@@ -7,7 +7,7 @@ import time
 # Deliberately explicit: the fixture does not turn newly migrated objects into grants.
 OBJECTS = {
     "j2m_schema_web": {
-        "tables": {"businesses": "SELECT", "customers": "SELECT,UPDATE",
+        "tables": {"businesses": "SELECT", "customers": "SELECT",
                    "transactions": "SELECT,INSERT", "loyalty_ledger_entries": "SELECT,INSERT"},
         "sequences": ("transactions_id_seq", "loyalty_ledger_entries_id_seq"),
     },
@@ -62,6 +62,7 @@ def prove_scoped_grants_and_fence(sql, database, service_flow, connection, pool_
 
     execute(fixture_grants()).check_returncode()
     web, worker = OBJECTS
+    execute("GRANT UPDATE (current_points, current_stamps, last_earn_at) ON public.customers TO j2m_schema_web").check_returncode()
     execute("GRANT UPDATE (referrals_enabled) ON public.businesses TO j2m_schema_web").check_returncode()
     manifest = (Path(__file__).resolve().parents[1] / "scripts/j2m_wallet_queue_grants.sql").read_text()
     execute(manifest).check_returncode()
@@ -128,7 +129,8 @@ def prove_scoped_grants_and_fence(sql, database, service_flow, connection, pool_
         for sequence in (*grants["sequences"], "google_wallet_referral_jobs_id_seq")
     }
     extra_updates = {
-        web: {"businesses": ("referrals_enabled",), "staff_sessions": ("revoked_at",),
+        web: {"customers": ("current_points", "current_stamps", "last_earn_at"),
+              "businesses": ("referrals_enabled",), "staff_sessions": ("revoked_at",),
               "auth_rate_limit_slots": ("reserved_until", "updated_at"),
               "platform_admins": ("name",), "platform_admin_sessions": ("revoked_at",)},
         worker: {"google_wallet_referral_jobs": ("status", "token", "locked_at", "attempts",
@@ -235,6 +237,7 @@ REVOKE UPDATE (revoked_at) ON public.staff_sessions FROM {web};
 REVOKE UPDATE (name) ON public.platform_admins FROM {web};
 REVOKE UPDATE (revoked_at) ON public.platform_admin_sessions FROM {web};
 REVOKE UPDATE (reserved_until, updated_at) ON public.auth_rate_limit_slots FROM {web};
+REVOKE UPDATE (current_points, current_stamps, last_earn_at) ON public.customers FROM {web};
 REVOKE UPDATE (referrals_enabled) ON public.businesses FROM {web};
 REVOKE UPDATE (status, token, locked_at, attempts, run_at, cursor, outcome, updated_at)
     ON public.google_wallet_referral_jobs FROM {worker};
@@ -313,6 +316,7 @@ COMMIT;
     execute(f"SELECT pg_terminate_backend(pid, 3000) {active}").check_returncode()
     assert execute(f"SELECT count(*) {active}").stdout.strip() == b"0"
     execute(fixture_grants()).check_returncode()
+    execute(f"GRANT UPDATE (current_points, current_stamps, last_earn_at) ON public.customers TO {web}").check_returncode()
     execute(f"GRANT UPDATE (referrals_enabled) ON public.businesses TO {web}").check_returncode()
     execute(manifest).check_returncode()
     execute((root / "scripts/j2m_staff_login_grants.sql").read_text()).check_returncode()
@@ -332,3 +336,4 @@ COMMIT;
     service_flow(web, (root / "tests/postgres_platform_admin_flow.py").read_text())
     assert execute(accounting).stdout == before
     print("PgBouncer session affinity, drainage, denial, and verified synthetic reopening passed.")
+    service_flow(web, (root / "tests/postgres_loyalty_http_flow.py").read_text())

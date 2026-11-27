@@ -21,7 +21,8 @@ with app.app_context():
     admin.set_password("SyntheticPlatform123")
     db.session.add(admin)
     for i in (1, 2):
-        business = Business(name=f'Synthetic {i}', slug=f'synthetic-{i}', loyalty_type='stamps', cooldown_minutes=0,
+        business = Business(name=f'Synthetic {i}', slug=f'synthetic-{i}', loyalty_type='points' if i == 1 else 'stamps',
+                            points_per_currency=1, stamps_reward_limit=2, cooldown_minutes=0,
                             web_access_enabled=True)
         db.session.add(business)
         db.session.flush()
@@ -36,8 +37,8 @@ with app.app_context():
         db.session.add(customer)
         db.session.flush()
         process_loyalty_transaction(business=business, customer_id=customer.id, staff_id=None,
-                                    action="earn_stamp", tx_type="earn", points_amount=0,
-                                    stamps_amount=1, purchase_amount=0, request_id=f"synthetic-{i}",
+                                    action="earn_points" if i == 1 else "earn_stamp", tx_type="earn",
+                                    points_amount=1 if i == 1 else 0, stamps_amount=0 if i == 1 else 1, purchase_amount=0, request_id=f"synthetic-{i}",
                                     fingerprint=f"synthetic-{i}")
     db.session.commit()
 """
@@ -136,6 +137,7 @@ def exercise_application_schema(network, run, sql, connection, pool_control):
                 sql, destination, lambda role, source=flow: app("python", "-c", source, role=role, database=destination),
                 connection, pool_control,
             )
+            verify_transition_accounting(query)
             # The lazy baseline is valid for an unused zero-balance account,
             # but must never certify an unexplained positive or negative balance.
             customer_id = query("""

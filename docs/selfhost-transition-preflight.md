@@ -517,3 +517,19 @@ barrera integral de permisos en el pooler: el ensayo de PgBouncer sigue
 siendo independiente. No se simula un fallo dentro de pg_restore ni dentro
 de una transacción, ni se acredita todavía la recuperación durante HTTPS
 o reapertura. CI conserva los informes de las cuatro fronteras.
+
+El fixture de lealtad ejecuta el escáner web con sesiones de cajero
+auténticas. Tiene dos negocios, uno de puntos y otro de sellos. El rol SQL
+web puede actualizar únicamente current_points, current_stamps y
+last_earn_at en customers en este fixture. Conserva SELECT y los inserts
+necesarios en movimientos y ledger. Flask valida la pertenencia del QR
+antes de leer o escribir. El ensayo compara los saldos y entradas
+persistidos después de compra, acumulación, canje, replay concurrente y
+rollback inducido. Esto no amplía los permisos de registro o recuperación.
+
+La copia real previamente examinada pasó las comprobaciones actuales:
+22 movimientos, 26 entradas de ledger, cuatro cadenas verificables y
+dos cuentas sin actividad contable. Esta evidencia corresponde a esa
+copia. Una transición posterior debe verificar el respaldo exacto que
+utilice y no puede inferir de estas cifras el estado anterior a
+c0d1e2f3a4b5.
