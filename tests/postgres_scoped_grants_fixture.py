@@ -24,6 +24,18 @@ def prove_scoped_grants_and_fence(sql, database, service_flow, connection, pool_
     def execute(statement, role="postgres"):
         return sql(statement, role, database=database)
 
+    # Authentication takes a row lock (SELECT FOR UPDATE); PostgreSQL requires
+    # UPDATE on at least one column. Restrict this to the non-security name
+    # column rather than granting changes to credentials or account status.
+    def admin_grants():
+        execute("""
+            GRANT SELECT ON public.platform_admins, public.business_categories,
+                public.google_wallet_sync_jobs TO j2m_schema_web;
+            GRANT UPDATE (name) ON public.platform_admins TO j2m_schema_web;
+            GRANT SELECT, INSERT ON public.platform_admin_sessions TO j2m_schema_web;
+            GRANT UPDATE (revoked_at) ON public.platform_admin_sessions TO j2m_schema_web;
+        """).check_returncode()
+
     def fixture_grants():
         statements = []
         for role, grants in OBJECTS.items():
@@ -75,6 +87,15 @@ def prove_scoped_grants_and_fence(sql, database, service_flow, connection, pool_
     execute("REVOKE j2m_owner FROM j2m_schema_worker").check_returncode()
     root = Path(__file__).resolve().parents[1]
     execute((root / "scripts/j2m_staff_login_grants.sql").read_text()).check_returncode()
+    execute("""
+        CREATE POLICY synthetic_platform_session_read ON public.platform_admin_sessions
+            FOR SELECT TO j2m_schema_web USING (true);
+        CREATE POLICY synthetic_platform_session_create ON public.platform_admin_sessions
+            FOR INSERT TO j2m_schema_web WITH CHECK (true);
+        CREATE POLICY synthetic_platform_session_revoke ON public.platform_admin_sessions
+            FOR UPDATE TO j2m_schema_web USING (true) WITH CHECK (true);
+    """).check_returncode()
+    admin_grants()
     inventory_sql = (root / "scripts/j2m_transition_privilege_inventory.sql").read_text()
     inventory_result = execute(inventory_sql)
     inventory_result.check_returncode()
@@ -91,7 +112,9 @@ def prove_scoped_grants_and_fence(sql, database, service_flow, connection, pool_
         web: {**OBJECTS[web]["tables"], "staff": "SELECT",
               "staff_sessions": "SELECT,INSERT", "auth_rate_limit_slots": "SELECT,INSERT,DELETE",
               "referral_participants": "SELECT", "google_wallet_referral_jobs": "SELECT,INSERT",
-              "google_wallet_write_reservations": "SELECT,INSERT"},
+              "google_wallet_write_reservations": "SELECT,INSERT",
+              "platform_admins": "SELECT", "business_categories": "SELECT",
+              "google_wallet_sync_jobs": "SELECT", "platform_admin_sessions": "SELECT,INSERT"},
         worker: {**OBJECTS[worker]["tables"], "referral_participants": "SELECT",
                  "google_wallet_referral_jobs": "SELECT,INSERT",
                  "google_wallet_write_reservations": "SELECT,INSERT"},
@@ -106,7 +129,8 @@ def prove_scoped_grants_and_fence(sql, database, service_flow, connection, pool_
     }
     extra_updates = {
         web: {"businesses": ("referrals_enabled",), "staff_sessions": ("revoked_at",),
-              "auth_rate_limit_slots": ("reserved_until", "updated_at")},
+              "auth_rate_limit_slots": ("reserved_until", "updated_at"),
+              "platform_admins": ("name",), "platform_admin_sessions": ("revoked_at",)},
         worker: {"google_wallet_referral_jobs": ("status", "token", "locked_at", "attempts",
                                                   "run_at", "cursor", "outcome", "updated_at")},
     }
@@ -160,6 +184,10 @@ def prove_scoped_grants_and_fence(sql, database, service_flow, connection, pool_
         assert_service_manifest(json.loads(execute(inventory_sql).stdout))
 
     service_flow(web, (root / "tests/postgres_manager_login_flow.py").read_text())
+    service_flow(web, (root / "tests/postgres_platform_admin_flow.py").read_text())
+    assert execute("UPDATE platform_admins SET is_active=false", web).returncode
+    assert execute("UPDATE platform_admins SET password_hash='invalid'", web).returncode
+    assert execute("SELECT * FROM platform_admin_sessions", worker).returncode
     service_flow(web)
     service_flow(worker)
     assert execute(accounting).stdout == before
@@ -204,6 +232,8 @@ BEGIN;
 ALTER ROLE {web} NOLOGIN;
 ALTER ROLE {worker} NOLOGIN;
 REVOKE UPDATE (revoked_at) ON public.staff_sessions FROM {web};
+REVOKE UPDATE (name) ON public.platform_admins FROM {web};
+REVOKE UPDATE (revoked_at) ON public.platform_admin_sessions FROM {web};
 REVOKE UPDATE (reserved_until, updated_at) ON public.auth_rate_limit_slots FROM {web};
 REVOKE UPDATE (referrals_enabled) ON public.businesses FROM {web};
 REVOKE UPDATE (status, token, locked_at, attempts, run_at, cursor, outcome, updated_at)
@@ -285,6 +315,7 @@ COMMIT;
         execute(f"ALTER ROLE {role} LOGIN").check_returncode()
     execute(manifest).check_returncode()
     execute((root / "scripts/j2m_staff_login_grants.sql").read_text()).check_returncode()
+    admin_grants()
     restored_inventory = execute(inventory_sql)
     restored_inventory.check_returncode()
     assert_service_manifest(json.loads(restored_inventory.stdout))
@@ -293,5 +324,6 @@ COMMIT;
     result, errors = reopened.communicate(b"SELECT current_user;\n", timeout=8)
     assert not reopened.returncode and not errors and result.strip() == worker.encode()
     service_flow(web, (root / "tests/postgres_manager_login_flow.py").read_text())
+    service_flow(web, (root / "tests/postgres_platform_admin_flow.py").read_text())
     assert execute(accounting).stdout == before
     print("PgBouncer session affinity, drainage, denial, and verified synthetic reopening passed.")

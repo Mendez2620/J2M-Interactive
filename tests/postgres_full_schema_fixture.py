@@ -14,9 +14,12 @@ from scripts.selfhost_backup import verify_transition_accounting
 SEED = """
 from run import app
 from app.extensions import db
-from app.models import Business, Customer, Staff
+from app.models import Business, Customer, Staff, PlatformAdmin
 from app.services.loyalty_transaction_service import process_loyalty_transaction
 with app.app_context():
+    admin = PlatformAdmin(name="Synthetic platform admin", email="platform@example.test", is_active=True)
+    admin.set_password("SyntheticPlatform123")
+    db.session.add(admin)
     for i in (1, 2):
         business = Business(name=f'Synthetic {i}', slug=f'synthetic-{i}', loyalty_type='stamps', cooldown_minutes=0,
                             web_access_enabled=True)
@@ -133,6 +136,27 @@ def exercise_application_schema(network, run, sql, connection, pool_control):
                 sql, destination, lambda role, source=flow: app("python", "-c", source, role=role, database=destination),
                 connection, pool_control,
             )
+            # The lazy baseline is valid for an unused zero-balance account,
+            # but must never certify an unexplained positive or negative balance.
+            customer_id = query("""
+                INSERT INTO customers (business_id,full_name,marketing_consent,
+                    current_points,current_stamps,qr_code_token,created_at)
+                VALUES (1,'Synthetic unused',false,0,0,'synthetic-unused',now())
+                RETURNING id
+            """).splitlines()[0]
+            assert customer_id.isdigit()
+            verify_transition_accounting(query)
+            for points, stamps in ((1, 0), (0, 1), (-1, 0)):
+                query(f"UPDATE customers SET current_points={points}, current_stamps={stamps} WHERE id={customer_id}")
+                try:
+                    verify_transition_accounting(query)
+                except RuntimeError as error:
+                    if "cadena contable" not in str(error):
+                        raise
+                else:
+                    raise RuntimeError("An unexplained customer balance was accepted")
+            query(f"DELETE FROM customers WHERE id={customer_id}")
+            verify_transition_accounting(query)
             query("SELECT setval('public.customers_id_seq', 1, true)")
             try:
                 verify_transition_accounting(query)

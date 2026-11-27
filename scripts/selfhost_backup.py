@@ -1435,6 +1435,13 @@ def verify_transition_accounting(query):
             GROUP BY t.id
             HAVING count(l.id) <> 1
             UNION ALL
+            -- A new customer can legitimately have no ledger until its first
+            -- operation. A nonzero balance without any chain is not verified.
+            SELECT 1 FROM customers c
+            WHERE (c.current_points IS DISTINCT FROM 0 OR c.current_stamps IS DISTINCT FROM 0)
+              AND NOT EXISTS (SELECT 1 FROM loyalty_ledger_entries l
+                              WHERE (l.business_id,l.customer_id)=(c.business_id,c.id))
+            UNION ALL
             SELECT 1 FROM ordered l
             LEFT JOIN customers c ON (c.business_id,c.id)=(l.business_id,l.customer_id)
             LEFT JOIN transactions t ON t.id=l.transaction_id

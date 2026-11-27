@@ -462,3 +462,25 @@ inventario efectivo y habilita el ingreso antes de volver a probar
 autenticación HTTP. La prueba usa una tabla de la cola para observar el
 drenaje. Aún no acredita drenaje de todas las tablas, interrupciones de
 reapertura, integración con el supervisor ni comportamiento de Supavisor.
+
+
+### Cuentas sin baseline y autenticación de plataforma
+
+La restauración real autorizada reportó correspondencia de movimientos y
+ledger, pero la ausencia de un baseline en ciertos clientes no equivale por
+sí misma a una discrepancia. La aplicación crea el baseline al registrar la
+primera operación. Una cuenta sin ledger con ambos saldos cero puede ser
+una cuenta sin actividad; una cuenta sin ledger con saldo no nulo debe
+bloquear la certificación actual. El verificador estricto ahora comprueba
+también ese caso y el fixture prueba ambas situaciones. No se altera ningún
+saldo ni se fabrica historia. Verificar nuevamente el respaldo autenticado
+y documentar por separado el estado de la ventana histórica.
+
+El ensayo restringido amplía el fixture de Super Admin para login, dashboard,
+revocación persistida y denegación a un gerente, antes y después de la
+reapertura. Los grants de plataforma son exclusivamente de ensayo:
+`SELECT FOR UPDATE` requiere UPDATE en alguna columna de platform_admins,
+por lo que se limita a name y se prueban denegaciones de password_hash e
+is_active. Las políticas de sesión para el rol interno son multi-tenant y
+no sustituyen la autorización HTTP. Las operaciones administrativas de
+escritura y el manifiesto operativo completo siguen pendientes.
