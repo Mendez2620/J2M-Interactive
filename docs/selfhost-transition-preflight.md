@@ -550,3 +550,20 @@ de reapertura y la validación del respaldo exacto de la transición.
 La cobertura de interrupciones del ensayo actual y los defectos
 que esa cobertura revele siguen siendo trabajo de preparación.
 Los grants de los fixtures permanecen limitados a recursos sintéticos.
+
+El ensayo HTTP de clientes ejecuta registro, vinculación, autenticación y
+recuperación asistida con el rol web. El fixture coteja SELECT, INSERT,
+permisos de columnas y secuencias contra el inventario efectivo. La
+actualización de nombre del negocio es el permiso mínimo de columna
+usado para el bloqueo de fila durante el registro en este fixture. La
+auditoría se inserta y se lee, con UPDATE y DELETE fuera de la matriz.
+Las políticas se limitan al rol interno y Flask valida el negocio.
+La prueba simula únicamente las dos comprobaciones criptográficas de
+WebAuthn. Las rutas retiradas de recuperación pública devuelven 410.
+
+El supervisor también termina el coordinador después de ejecutar la
+sección pre-data de pg_restore y antes de cargar filas. Comprueba que
+la copia carezca de revisión y datos contables, conserva la evidencia
+bajo los mismos identificadores y exige NOLOGIN a escritores. La copia
+parcial no entra a Alembic. El ensayo elimina los recursos aislados
+identificados al terminar la inspección.

@@ -79,7 +79,7 @@ def enroll(browser, credential_id, *, recovery=False):
     with patch("app.services.customer_auth_service.verify_registration_response", return_value=verified) as check:
         assert post(browser, "/customer-auth/enroll/complete", id="synthetic", response={}).status_code == 200
         assert check.call_args.kwargs["require_user_verification"]
-    assert post(browser, "/customer-auth/enroll/complete", id="synthetic", response={}).status_code in (404, 409)
+    assert post(browser, "/customer-auth/enroll/complete", id="synthetic", response={}).status_code == 403
 
 
 enroll(app.test_client(), b"synthetic-first")
