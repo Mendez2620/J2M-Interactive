@@ -307,18 +307,24 @@ COMMIT;
     assert execute("UPDATE public.customers SET current_stamps=0", "j2m_backup").returncode
     assert execute(accounting).stdout == before
 
-    # Reapply only the declared application grants while pool ingress remains
-    # disabled. A fresh connection is admitted after checking effective grants.
+    # Drop cached PostgreSQL connections before restoring write privileges.
+    # NOLOGIN prevents another direct connection until grants are certified.
+    pool_control("KILL full_restore_1").check_returncode()
+    active = f"FROM pg_stat_activity WHERE usename IN ('{web}', '{worker}')"
+    execute(f"SELECT pg_terminate_backend(pid, 3000) {active}").check_returncode()
+    assert execute(f"SELECT count(*) {active}").stdout.strip() == b"0"
     execute(fixture_grants()).check_returncode()
     execute(f"GRANT UPDATE (referrals_enabled) ON public.businesses TO {web}").check_returncode()
-    for role in OBJECTS:
-        execute(f"ALTER ROLE {role} LOGIN").check_returncode()
     execute(manifest).check_returncode()
     execute((root / "scripts/j2m_staff_login_grants.sql").read_text()).check_returncode()
     admin_grants()
     restored_inventory = execute(inventory_sql)
     restored_inventory.check_returncode()
     assert_service_manifest(json.loads(restored_inventory.stdout))
+    for role in OBJECTS:
+        assert execute("SELECT 1", role).returncode
+    assert execute(f"SELECT count(*) {active}").stdout.strip() == b"0"
+    execute(f"ALTER ROLE {web} LOGIN; ALTER ROLE {worker} LOGIN").check_returncode()
     pool_control("ENABLE full_restore_1").check_returncode()
     reopened = connection(worker, database)
     result, errors = reopened.communicate(b"SELECT current_user;\n", timeout=8)

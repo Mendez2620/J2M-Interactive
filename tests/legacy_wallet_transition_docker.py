@@ -23,6 +23,7 @@ from scripts.historical_transition_evidence import (Backend, FINAL_HEAD, INITIAL
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--journal", type=Path)
 parser.add_argument("--preflight-only", action="store_true")
+parser.add_argument("--supervised-run")
 parser.add_argument("--reconstructed-legacy", action="store_true")
 args = parser.parse_args()
 if not args.preflight_only and args.journal is None:
@@ -58,7 +59,11 @@ if args.preflight_only:
 
 r = run
 before = production_ids()
-p = "j2m-legacy-tls-" + uuid.uuid4().hex[:8]
+if args.supervised_run and not re.fullmatch("[0-9a-f]{32}", args.supervised_run):
+    parser.error("Invalid synthetic run identifier")
+p = "j2m-legacy-tls-" + (args.supervised_run or uuid.uuid4().hex)
+volume = p + "-pgdata"
+label = f"j2m.synthetic.transition={p}"
 n = {role: p + "-" + role for role in ("db", "web", "worker", "proxy")}
 root = ROOT
 SOURCE = "j2m_test"
@@ -197,8 +202,9 @@ def guard_images():
 
 def provision():
     journal.advance("preflight")
-    r("docker","network","create","--internal",p)
-    r("docker","run","-d","--name",n["db"],"--network",p,"--network-alias","db","--tmpfs","/var/lib/postgresql/data","-e","POSTGRES_USER=j2m_test","-e","POSTGRES_DB=j2m_test","-e","POSTGRES_PASSWORD=synthetic","postgres:17-alpine")
+    r("docker", "network", "create", "--internal", "--label", label, p)
+    r("docker", "volume", "create", "--label", label, volume)
+    r("docker","run","-d","--name",n["db"],"--network",p,"--network-alias","db","--label",label,"--mount",f"type=volume,src={volume},dst=/var/lib/postgresql/data,volume-nocopy","-e","POSTGRES_USER=j2m_test","-e","POSTGRES_DB=j2m_test","-e","POSTGRES_PASSWORD=synthetic","postgres:17-alpine")
     time.sleep(4)
     r("docker","run","--rm",*config(SOURCE),new,"flask","--app","run.py","db","upgrade",INITIAL_HEAD)
     exercise("before")
@@ -232,6 +238,22 @@ def migrate():
     r("docker", "run", "--rm", *config(RESTORED, "j2m_migrator"),
       "-e", "PGOPTIONS=-c role=j2m_transition_owner", new,
       "flask", "--app", "run.py", "db", "upgrade", FINAL_HEAD)
+    if args.supervised_run:
+        # The supervisor kills this process after Alembic returns and before
+        # the coordinator can confirm its MIGRATE stage.
+        evidence = {
+            "container": r("docker", "inspect", "--format", "{{.Id}}", n["db"]),
+            "network": r("docker", "network", "inspect", "--format", "{{.Id}}", p),
+            "postgres_image": r("docker", "inspect", "--format", "{{.Image}}", n["db"]),
+            "cluster": sql(RESTORED, "SELECT system_identifier FROM pg_control_system()"),
+            "source": database_identity(SOURCE), "restored": database_identity(RESTORED),
+            "source_digest": source_digest, "checkout": sha,
+            "restored_digest": logical_digest(RESTORED),
+        }
+        print("J2M_MIGRATION_BOUNDARY " + json.dumps(evidence), flush=True)
+        while True:
+            time.sleep(10)
+
 
 
 def verify_migration():
@@ -361,6 +383,9 @@ finally:
     journal.file.close()
     for name in n.values():r("docker","rm","-f",name,check=False)
     r("docker","network","rm",p)
+    if r("docker", "volume", "inspect", "--format",
+         '{{index .Labels "j2m.synthetic.transition"}}', volume, check=False) == p:
+        r("docker", "volume", "rm", volume)
     if production_ids() != before:
         raise RuntimeError("Operational container IDs changed")
 verify_record(args.journal, legacy_image=img, target_image=new, target_sha=sha)

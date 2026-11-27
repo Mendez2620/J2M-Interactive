@@ -10,7 +10,7 @@ BEGIN
     FOREACH service_name IN ARRAY ARRAY['j2m_schema_web', 'j2m_schema_worker']
     LOOP
         SELECT * INTO STRICT service FROM pg_roles WHERE rolname = service_name;
-        IF NOT service.rolcanlogin OR service.rolsuper OR service.rolbypassrls
+        IF service.rolsuper OR service.rolbypassrls
            OR service.rolcreaterole OR service.rolcreatedb OR service.rolreplication
            OR EXISTS (SELECT 1 FROM pg_auth_members WHERE member = service.oid OR roleid = service.oid)
            OR EXISTS (SELECT 1 FROM pg_class WHERE relowner = service.oid

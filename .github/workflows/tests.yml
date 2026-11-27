@@ -124,6 +124,9 @@ jobs:
           evidence="$RUNNER_TEMP/j2m-transition-evidence"
           mkdir -m 700 "$evidence"
           python tests/legacy_wallet_transition_docker.py --reconstructed-legacy --journal "$evidence/evidence.jsonl"
+      - name: Terminate coordinator after PostgreSQL commits Alembic
+        run: |
+          python tests/legacy_transition_supervisor_ci.py --reconstructed-legacy --evidence-dir "$RUNNER_TEMP/j2m-transition-evidence/supervised"
       - name: Preserve synthetic transition evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -132,6 +135,8 @@ jobs:
           path: |
             ${{ runner.temp }}/j2m-transition-evidence/evidence.jsonl
             ${{ runner.temp }}/j2m-transition-evidence/evidence.jsonl.state/transition.json
+            ${{ runner.temp }}/j2m-transition-evidence/supervised/supervisor.json
+            ${{ runner.temp }}/j2m-transition-evidence/supervised/evidence.jsonl.state/transition.json
           if-no-files-found: warn
           retention-days: 30
 
