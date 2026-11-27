@@ -45,7 +45,17 @@ def prove_scoped_grants_and_fence(sql, database, service_flow, connection):
 
     web, worker = OBJECTS
     execute("GRANT UPDATE (referrals_enabled) ON public.businesses TO j2m_schema_web").check_returncode()
-    execute((Path(__file__).resolve().parents[1] / "scripts/j2m_wallet_queue_grants.sql").read_text()).check_returncode()
+    manifest = (Path(__file__).resolve().parents[1] / "scripts/j2m_wallet_queue_grants.sql").read_text()
+    execute(manifest).check_returncode()
+    execute(manifest).check_returncode()
+    execute("ALTER POLICY j2m_referral_queue_read ON public.google_wallet_referral_jobs "
+            "USING (false)").check_returncode()
+    rejected = execute(manifest)
+    assert rejected.returncode and b"Unexpected definition of J2M policy" in rejected.stderr
+    assert execute("SELECT qual FROM pg_policies WHERE policyname='j2m_referral_queue_read'").stdout.strip() == b"false"
+    execute("ALTER POLICY j2m_referral_queue_read ON public.google_wallet_referral_jobs "
+            "USING (true)").check_returncode()
+    execute(manifest).check_returncode()
     execute("INSERT INTO referral_participants (business_id, customer_id, participant_type, "
             "invitation_code, is_enabled, created_at, updated_at) VALUES "
             "(1,1,'customer_ambassador','synthetic-one',false,now(),now()),"
@@ -53,6 +63,10 @@ def prove_scoped_grants_and_fence(sql, database, service_flow, connection):
     accounting = "SELECT current_stamps FROM customers ORDER BY id; SELECT count(*) FROM transactions; " \
                  "SELECT count(*) FROM loyalty_ledger_entries"
     before = execute(accounting).stdout
+    execute("GRANT j2m_owner TO j2m_schema_worker").check_returncode()
+    rejected = execute(manifest)
+    assert rejected.returncode and b"Unexpected J2M service identity" in rejected.stderr
+    execute("REVOKE j2m_owner FROM j2m_schema_worker").check_returncode()
     service_flow(web)
     service_flow(worker)
     assert execute(accounting).stdout == before
@@ -84,7 +98,16 @@ def prove_scoped_grants_and_fence(sql, database, service_flow, connection):
 
     # Direct grants in this fixture are intentionally revoked as a unit.
     roles = ",".join(OBJECTS)
+    execute("""
+        CREATE FUNCTION public.synthetic_fence_write() RETURNS void LANGUAGE SQL SECURITY DEFINER
+        SET search_path = pg_catalog AS $$
+            UPDATE public.customers SET current_stamps = 99 WHERE id = 1;
+        $$;
+        REVOKE EXECUTE ON FUNCTION public.synthetic_fence_write() FROM PUBLIC;
+        GRANT EXECUTE ON FUNCTION public.synthetic_fence_write() TO j2m_schema_worker;
+    """).check_returncode()
     script = f"""
+BEGIN;
 ALTER ROLE {web} NOLOGIN;
 ALTER ROLE {worker} NOLOGIN;
 REVOKE UPDATE (referrals_enabled) ON public.businesses FROM {web};
@@ -95,7 +118,7 @@ REVOKE UPDATE (state, active_slot, updated_at, started_at, remote_resolved_at, r
 REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM {roles};
 REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM {roles};
 REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM {roles};
-REVOKE USAGE ON SCHEMA public FROM {roles};
+COMMIT;
 """
     peer = connection(worker, database)
     try:
@@ -109,13 +132,25 @@ REVOKE USAGE ON SCHEMA public FROM {roles};
             b"DELETE FROM public.google_wallet_referral_jobs;\n"
             b"TRUNCATE public.google_wallet_referral_jobs;\n"
             b"SELECT nextval('public.google_wallet_referral_jobs_id_seq');\n"
-            b"SET ROLE j2m_owner;\n", timeout=8)
-        assert errors.count(b"permission denied") == 6
+            b"SET ROLE j2m_owner;\n"
+            b"SELECT public.synthetic_fence_write();\n", timeout=8)
+        assert errors.count(b"permission denied") == 7
+        assert execute(accounting).stdout == before
     finally:
         if peer.poll() is None:
             peer.kill()
             peer.wait(timeout=8)
     for role in OBJECTS:
+        effective = execute(f"""
+            SELECT json_build_array(
+                has_schema_privilege('{role}', 'public', 'USAGE'),
+                has_any_column_privilege('{role}', 'public.google_wallet_referral_jobs', 'UPDATE'),
+                has_sequence_privilege('{role}', 'public.google_wallet_referral_jobs_id_seq', 'USAGE'),
+                has_function_privilege('{role}', 'public.synthetic_fence_write()', 'EXECUTE'),
+                pg_has_role('{role}', 'j2m_owner', 'MEMBER'))
+        """)
+        effective.check_returncode()
+        assert json.loads(effective.stdout) == [True, False, False, False, False]
         if execute("SELECT 1", role).returncode == 0:
             raise RuntimeError("Fenced login reconnected")
     print("Scoped grants and revoked reconnect on the real J2M fixture verified; referral queue and reservation operations verified.")

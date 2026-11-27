@@ -327,3 +327,11 @@ evidencia. Para datos anteriores al ledger incorporado por c0d1e2f3a4b5,
 la transición requiere un baseline autenticado que distinga el historial sin
 backfill de movimientos posteriores. No se ha validado ese límite sobre el
 respaldo operativo.
+
+La reaplicación del manifiesto acepta políticas idénticas y rechaza
+definiciones distintas en una sola transacción. No reemplaza políticas
+existentes. Antes de conceder permisos rechaza identidades internas con
+membresías, propiedad de relaciones en public o atributos de elevación.
+La validación cubre las políticas nombradas por este manifiesto. La
+revisión de ACL heredadas, funciones, privilegios por defecto y políticas
+adicionales sigue pendiente antes de aplicarlo en operación.
