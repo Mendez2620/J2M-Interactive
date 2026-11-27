@@ -104,11 +104,11 @@ REVOKE USAGE ON SCHEMA public FROM {roles};
         assert peer.stdout.readline().strip() == worker.encode()
         execute(script).check_returncode()
         _, errors = peer.communicate(
-            b"INSERT INTO google_wallet_referral_jobs DEFAULT VALUES;\n"
-            b"UPDATE google_wallet_referral_jobs SET status='pending';\n"
-            b"DELETE FROM google_wallet_referral_jobs;\n"
-            b"TRUNCATE google_wallet_referral_jobs;\n"
-            b"SELECT nextval('google_wallet_referral_jobs_id_seq');\n"
+            b"INSERT INTO public.google_wallet_referral_jobs DEFAULT VALUES;\n"
+            b"UPDATE public.google_wallet_referral_jobs SET status='pending';\n"
+            b"DELETE FROM public.google_wallet_referral_jobs;\n"
+            b"TRUNCATE public.google_wallet_referral_jobs;\n"
+            b"SELECT nextval('public.google_wallet_referral_jobs_id_seq');\n"
             b"SET ROLE j2m_owner;\n", timeout=8)
         assert errors.count(b"permission denied") == 6
     finally:
