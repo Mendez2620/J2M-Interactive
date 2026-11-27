@@ -335,3 +335,14 @@ membresías, propiedad de relaciones en public o atributos de elevación.
 La validación cubre las políticas nombradas por este manifiesto. La
 revisión de ACL heredadas, funciones, privilegios por defecto y políticas
 adicionales sigue pendiente antes de aplicarlo en operación.
+
+### Autenticación web de gerentes
+
+El manifiesto complementario `scripts/j2m_staff_login_grants.sql` habilita
+la consulta de personal y negocio, la creación y revocación de sesiones
+por columna y las operaciones del rate limiter de autenticación. El ensayo
+HTTP usa dos negocios y verifica que cada gerente pueda acceder solo a su
+perfil, que las credenciales del otro negocio no abran sesión y que el
+cierre produzca una revocación persistida. Las operaciones de
+Super Admin, caja, registro, recuperación, passkeys y auditoría requieren
+sus propias validaciones y permisos antes de autorizar el aprovisionamiento.

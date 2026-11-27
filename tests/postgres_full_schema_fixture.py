@@ -14,13 +14,18 @@ from scripts.selfhost_backup import verify_transition_accounting
 SEED = """
 from run import app
 from app.extensions import db
-from app.models import Business, Customer
+from app.models import Business, Customer, Staff
 from app.services.loyalty_transaction_service import process_loyalty_transaction
 with app.app_context():
     for i in (1, 2):
-        business = Business(name=f'Synthetic {i}', slug=f'synthetic-{i}', loyalty_type='stamps', cooldown_minutes=0)
+        business = Business(name=f'Synthetic {i}', slug=f'synthetic-{i}', loyalty_type='stamps', cooldown_minutes=0,
+                            web_access_enabled=True)
         db.session.add(business)
         db.session.flush()
+        manager = Staff(business_id=business.id, username=f'manager{i}', email=f'manager{i}@example.test',
+                        role='manager', web_access_enabled=True)
+        manager.set_password("SyntheticPass123")
+        db.session.add(manager)
         customer = Customer(business_id=business.id, full_name='Synthetic')
         db.session.add(customer)
         db.session.flush()
@@ -121,7 +126,7 @@ def exercise_application_schema(network, run, sql, connection):
         if i == 1:
             flow = (ROOT / "tests/postgres_referral_worker_flow.py").read_text()
             prove_scoped_grants_and_fence(
-                sql, destination, lambda role: app("python", "-c", flow, role=role, database=destination),
+                sql, destination, lambda role, source=flow: app("python", "-c", source, role=role, database=destination),
                 connection,
             )
             query("SELECT setval('public.customers_id_seq', 1, true)")

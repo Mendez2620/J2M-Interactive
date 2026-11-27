@@ -67,6 +67,9 @@ def prove_scoped_grants_and_fence(sql, database, service_flow, connection):
     rejected = execute(manifest)
     assert rejected.returncode and b"Unexpected J2M service identity" in rejected.stderr
     execute("REVOKE j2m_owner FROM j2m_schema_worker").check_returncode()
+    root = Path(__file__).resolve().parents[1]
+    execute((root / "scripts/j2m_staff_login_grants.sql").read_text()).check_returncode()
+    service_flow(web, (root / "tests/postgres_manager_login_flow.py").read_text())
     service_flow(web)
     service_flow(worker)
     assert execute(accounting).stdout == before
@@ -110,6 +113,8 @@ def prove_scoped_grants_and_fence(sql, database, service_flow, connection):
 BEGIN;
 ALTER ROLE {web} NOLOGIN;
 ALTER ROLE {worker} NOLOGIN;
+REVOKE UPDATE (revoked_at) ON public.staff_sessions FROM {web};
+REVOKE UPDATE (reserved_until, updated_at) ON public.auth_rate_limit_slots FROM {web};
 REVOKE UPDATE (referrals_enabled) ON public.businesses FROM {web};
 REVOKE UPDATE (status, token, locked_at, attempts, run_at, cursor, outcome, updated_at)
     ON public.google_wallet_referral_jobs FROM {worker};
