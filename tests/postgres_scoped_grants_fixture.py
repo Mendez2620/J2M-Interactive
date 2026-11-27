@@ -69,6 +69,16 @@ def prove_scoped_grants_and_fence(sql, database, service_flow, connection):
     execute("REVOKE j2m_owner FROM j2m_schema_worker").check_returncode()
     root = Path(__file__).resolve().parents[1]
     execute((root / "scripts/j2m_staff_login_grants.sql").read_text()).check_returncode()
+    inventory_sql = (root / "scripts/j2m_transition_privilege_inventory.sql").read_text()
+    inventory_result = execute(inventory_sql)
+    inventory_result.check_returncode()
+    assert execute(inventory_sql).stdout == inventory_result.stdout
+    inventory = json.loads(inventory_result.stdout)
+    assert {row[0] for row in inventory["roles"]} == {
+        "j2m_owner", "j2m_migrator", "j2m_schema_web", "j2m_schema_worker", "j2m_backup",
+    }
+    assert any(row["policyname"] == "j2m_referral_queue_process" for row in inventory["policies"])
+    assert any(row[0:2] == ["staff_sessions", "revoked_at"] for row in inventory["columns"])
     service_flow(web, (root / "tests/postgres_manager_login_flow.py").read_text())
     service_flow(web)
     service_flow(worker)

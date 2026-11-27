@@ -370,3 +370,23 @@ de cada movimiento, o una copia consistente previa al upgrade cuyo vínculo
 con la ventana de migración pueda demostrarse con un registro de despliegue
 y sin escrituras en el intervalo. Un respaldo actual no sustituye esa
 evidencia. El verificador estricto de transición permanece sin cambios.
+
+### Inventario sintético y coordinación por etapas
+
+El fixture usa `scripts/j2m_transition_privilege_inventory.sql` dos veces para
+comprobar que el inventario sea reproducible. Registra roles, membresías,
+conexión, uso del esquema, propietarios y ACL, RLS, políticas, triggers,
+secuencias, configuración de funciones y privilegios predeterminados.
+El inventario no constituye todavía una lista de autorización integral.
+Queda pendiente evaluar todos los privilegios efectivos, Data API y las
+rutas heredadas o alternativas antes de aprobar un manifiesto operativo.
+
+`scripts/isolated_transition.py` coordina las etapas contra un adaptador
+sintético. Comprueba las precondiciones y el resultado de cada etapa, usa
+un lock exclusivo y reemplaza el diario después de escribirlo y sincronizarlo.
+Una interrupción deja una etapa pendiente y una excepción registrada la
+marca como bloqueada. Cualquier diario previo obliga a inspección
+independiente. No se reejecutan mutaciones ni se reabren escritores a
+partir del diario. Falta conectar los adaptadores Docker y PostgreSQL, y
+ensayar recuperación y reapertura con comprobaciones vivas. El ejecutor no
+está enlazado al despliegue operativo.

@@ -268,20 +268,21 @@ def exclusive_lock(path: Path) -> Iterator[None]:
     handle = path.open("a+b")
     locked = False
     try:
-        if handle.seek(0, os.SEEK_END) == 0:
-            handle.write(b"0")
-            handle.flush()
-        handle.seek(0)
-        if os.name == "nt":
-            import msvcrt
-            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        locked = True
+        try:
+            if handle.seek(0, os.SEEK_END) == 0:
+                handle.write(b"0")
+                handle.flush()
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locked = True
+        except OSError as exc:
+            raise RuntimeError("Ya existe una operación de respaldo activa.") from exc
         yield
-    except OSError as exc:
-        raise RuntimeError("Ya existe una operación de respaldo activa.") from exc
     finally:
         if locked:
             if os.name == "nt":
