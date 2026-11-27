@@ -390,3 +390,26 @@ independiente. No se reejecutan mutaciones ni se reabren escritores a
 partir del diario. Falta conectar los adaptadores Docker y PostgreSQL, y
 ensayar recuperación y reapertura con comprobaciones vivas. El ejecutor no
 está enlazado al despliegue operativo.
+
+La prueba de laptop `tests/legacy_wallet_transition_docker.py` conecta el
+coordinador con Docker, PostgreSQL 17, Alembic y Nginx sintéticos. Conserva
+el diario de evidencia anterior y escribe el historial de etapas junto a
+él. Exige un directorio privado del operador en Windows, donde el
+reemplazo usa un archivo sincronizado, sin prometer sincronizar el
+directorio tras una pérdida abrupta de energía. En POSIX también
+sincroniza el directorio. El aislamiento de red y el drenaje de
+contenedores en este ensayo no sustituyen una barrera de permisos a
+través del pooler. La recuperación del backend legado es deliberada y
+usa la misma base migrada.
+
+Para investigar el baseline, el primer permiso necesario es lectura de
+los registros del migrador de Railway que mencionen la revisión
+`c0d1e2f3a4b5` y del catálogo de respaldos de esa ventana, limitado a
+fechas, revisiones, identidad de ejecución y hashes. No es necesario
+consultar filas ni restaurar respaldos para esa búsqueda inicial. Si se
+localiza una copia contemporánea, se debe autorizar por separado su
+validación aislada y la comprobación de ausencia de escrituras hasta el
+upgrade. Si el historial ya no existe, se puede preparar una
+reconciliación formal desde un corte futuro verificable, con revisión
+independiente de diferencias. Ese corte no certifica la ventana
+histórica y no cambia el rechazo estricto actual.

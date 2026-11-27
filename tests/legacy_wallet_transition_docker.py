@@ -14,6 +14,7 @@ from nginx_recovery_ci import NGINX_IMAGE, production_ids, proxy_config, run, wr
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+from scripts.isolated_transition import Phase, rehearse
 from scripts.historical_transition_evidence import (Backend, FINAL_HEAD, INITIAL_HEAD, LEGACY_SHA,
                                                     TransitionJournal, prove_https, verify_record)
 
@@ -116,21 +117,33 @@ def guard_images():
         raise RuntimeError("A transition image tag changed")
 
 
-try:
+def provision():
     journal.advance("preflight")
     r("docker","network","create","--internal",p)
-    r("docker","run","-d","--name",n["db"],"--network",p,"--network-alias","db","--tmpfs","/var/lib/postgresql/data","-e","POSTGRES_USER=j2m_test","-e","POSTGRES_DB=j2m_test","-e","POSTGRES_PASSWORD=synthetic","postgres:16-alpine")
+    r("docker","run","-d","--name",n["db"],"--network",p,"--network-alias","db","--tmpfs","/var/lib/postgresql/data","-e","POSTGRES_USER=j2m_test","-e","POSTGRES_DB=j2m_test","-e","POSTGRES_PASSWORD=synthetic","postgres:17-alpine")
     time.sleep(4)
     r("docker","run","--rm",*cfg,new,"flask","--app","run.py","db","upgrade","9d0e1f2a3b4c")
     exercise("before")
-    restore_fixture()
+
+
+def assert_drained():
     guard_images()
     # The seed container has already exited; only PostgreSQL may be attached.
     network = json.loads(r("docker", "network", "inspect", p))[0]
     if {value["Name"] for value in network["Containers"].values()} != {n["db"]}:
         raise RuntimeError("Synthetic writers not drained")
+
+
+def restore():
+    restore_fixture()
     journal.advance("maintenance")
+
+
+def migrate():
     r("docker","run","--rm",*cfg,new,"flask","--app","run.py","db","upgrade","c3d4e5f6a7b8")
+
+
+def verify_migration():
     schema_check="from run import app; from app.extensions import db; from scripts.check_wallet_referral_schema import validate_schema; a=app.app_context(); a.push(); raise SystemExit(bool(validate_schema(db.session.connection())));"
     r("docker","run","--rm",*cfg,new,"python","-c",schema_check)
     reserve = """
@@ -146,6 +159,9 @@ VALUES (repeat('a',32), repeat('b',32), 'synthetic', 'loyaltyObject', 'synthetic
                   "WHERE operation_id=repeat('a',32) AND state='uncertain' AND active_slot=1")
     if persisted != "1":
         raise RuntimeError("Wallet reservation was not preserved")
+
+
+def verify_https_and_recover():
     guard_images()
     start("web", new)
     start("worker", new)
@@ -183,6 +199,61 @@ VALUES (repeat('a',32), repeat('b',32), 'synthetic', 'loyaltyObject', 'synthetic
         journal.advance("legacy_recovered", container=recovered.container)
         r("docker", "rm", "-f", n["proxy"])
     print("Target and recovered legacy HTTPS bound to exact Docker upstream; one worker per stage.")
+
+
+class DockerRehearsal:
+    actions = {
+        Phase.PREFLIGHT: provision,
+        Phase.MAINTENANCE: assert_drained,
+        Phase.FENCE: assert_drained,
+        Phase.RESTORE: restore,
+        Phase.MIGRATE: migrate,
+        Phase.VERIFY: verify_migration,
+        Phase.HTTPS: verify_https_and_recover,
+    }
+
+    def __init__(self):
+        self.database_id = None
+
+    def verify_isolation(self):
+        guard_images()
+        if self.database_id is not None:
+            db = json.loads(r("docker", "inspect", self.database_id))[0]
+            network = json.loads(r("docker", "network", "inspect", p))[0]
+            if (db["Name"] != "/" + n["db"] or not network["Internal"]
+                    or set(db["NetworkSettings"]["Networks"]) != {p}
+                    or db["HostConfig"]["PortBindings"]):
+                raise RuntimeError("Unexpected synthetic database isolation")
+
+    def check_prerequisites(self, phase):
+        if phase != Phase.PREFLIGHT:
+            assert_drained()
+        if phase == Phase.MIGRATE:
+            self.check_revision(INITIAL_HEAD)
+
+    def execute(self, phase):
+        self.actions[phase]()
+
+    def check_result(self, phase):
+        if phase == Phase.PREFLIGHT:
+            self.database_id = r("docker", "inspect", "--format", "{{.Id}}", n["db"])
+            self.verify_isolation()
+            self.check_revision(INITIAL_HEAD)
+        if phase in {Phase.MIGRATE, Phase.VERIFY, Phase.HTTPS}:
+            self.check_revision(FINAL_HEAD)
+
+    def check_revision(self, expected):
+        observed = r("docker", "exec", self.database_id, "psql", "-U", "j2m_test", "-Atc",
+                     "SELECT version_num FROM alembic_version")
+        if observed != expected:
+            raise RuntimeError("Unexpected synthetic schema revision")
+
+
+try:
+    rehearse(args.journal.with_suffix(args.journal.suffix + ".state"), DockerRehearsal(),
+             identity={"checkout": sha, "legacy_image": img, "target_image": new,
+                       "network": p, "database_container": n["db"],
+                       "initial_head": INITIAL_HEAD, "target_head": FINAL_HEAD})
 except Exception as exc:
     journal.record("blocked", failure_type=type(exc).__name__)
     raise

@@ -45,7 +45,9 @@ class IsolatedTransitionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             adapter = SyntheticAdapter()
             journal = rehearse(root, adapter)
-            self.assertEqual(json.loads(journal.read_text()), {"phase": "https", "status": "confirmed"})
+            record = json.loads(journal.read_text())
+            self.assertEqual(record["history"][-1], {"phase": "https", "status": "confirmed"})
+            self.assertEqual(len(record["history"]), 2 * len(Phase))
             self.assertFalse(adapter.writer_open)
             self.assertEqual(adapter.actions, list(Phase))
 
@@ -57,7 +59,7 @@ class IsolatedTransitionTests(unittest.TestCase):
                     with self.assertRaises(Interrupted):
                         rehearse(root, adapter)
                     journal = Path(root, "transition.json")
-                    self.assertEqual(json.loads(journal.read_text()),
+                    self.assertEqual(json.loads(journal.read_text())["history"][-1],
                                      {"phase": phase.value, "status": "pending"})
                     journal.write_text('{"phase":"https","status":"confirmed"}')
                     with self.assertRaises(RehearsalBlocked):
@@ -86,6 +88,6 @@ class IsolatedTransitionTests(unittest.TestCase):
             with self.assertRaises(ConnectionError):
                 rehearse(root, adapter)
             journal = json.loads(Path(root, "transition.json").read_text())
-            self.assertEqual(journal, {"phase": "fence", "status": "blocked"})
+            self.assertEqual(journal["history"][-1], {"phase": "fence", "status": "blocked"})
             self.assertNotIn(Phase.MIGRATE, adapter.actions)
             self.assertFalse(adapter.writer_open)
