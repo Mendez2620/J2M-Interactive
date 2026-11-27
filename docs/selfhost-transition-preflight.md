@@ -294,3 +294,36 @@ El bloqueo del legado se mantiene. La disponibilidad de un respaldo
 certificado y una atestación anterior no sustituye validar la barrera en
 vivo antes de migrar. Mantenga separadas las futuras aprobaciones de
 aprovisionamiento de roles, cambio de servicios y migración.
+
+## Permisos operativos de la cola de referidos
+
+`scripts/j2m_wallet_queue_grants.sql` es un manifiesto de aprovisionamiento
+para el propietario del esquema después de migrar y crear los roles internos.
+El ensayo usa `j2m_schema_web` y `j2m_schema_worker` sin propiedad, membresía
+del propietario ni BYPASSRLS. La instalación productiva sigue pendiente de
+aprobar el manifiesto completo y comprobar el pooler.
+
+| Recurso | Web | Worker |
+| --- | --- | --- |
+| Cola de referidos | SELECT, INSERT inicial y uso de secuencia | SELECT, INSERT inicial, uso de secuencia y UPDATE de campos de procesamiento |
+| Participantes | Sin cambios en este manifiesto | SELECT para expansión |
+| Reservas | SELECT, INSERT inicial y UPDATE de campos de transición | Igual que web |
+
+Los servicios atienden varios negocios. RLS limita el acceso por identidad y
+operación. Los filtros de Flask, las claves foráneas compuestas y las
+comprobaciones del servicio preservan el tenant de cada trabajo. Estas
+políticas no aíslan por tenant a un operador con acceso SQL directo al rol
+interno. La matriz cubre la cola y las reservas, y aún falta la matriz completa
+para autenticación, registro, lealtad y demás flujos.
+
+La barrera sintética prueba revocación de permisos de columna y de tabla,
+secuencias y SET ROLE desde una conexión ya abierta. La prueba de bloqueo de
+migradores conserva la sesión a través de varios commits. Sigue pendiente
+integrar la barrera completa, incluir privilegios heredados y funciones
+operativas, y verificar drenaje y recuperación en el pooler.
+
+El verificador contable conserva el rechazo estricto de movimientos sin
+evidencia. Para datos anteriores al ledger incorporado por c0d1e2f3a4b5,
+la transición requiere un baseline autenticado que distinga el historial sin
+backfill de movimientos posteriores. No se ha validado ese límite sobre el
+respaldo operativo.

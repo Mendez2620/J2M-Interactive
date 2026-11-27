@@ -60,6 +60,13 @@ def main():
         return run("env", "PGPASSWORD=synthetic-only", "psql", "-XAt", "-v", "ON_ERROR_STOP=1",
                    "-h", "127.0.0.1", "-U", role, "-d", database, "-c", statement)
 
+    def connection(role, database):
+        return subprocess.Popen(
+            ["docker", "exec", "-i", name, "env", "PGPASSWORD=synthetic-only",
+             "psql", "-XqAt", "-h", "127.0.0.1", "-U", role, "-d", database],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+
     try:
         for _ in range(25):
             if sql("SELECT 1").returncode == 0:
@@ -117,7 +124,7 @@ def main():
             if peer.poll() is None:
                 peer.kill()
                 peer.wait(timeout=8)
-        exercise_application_schema(network, run, sql)
+        exercise_application_schema(network, run, sql, connection)
         print("Synthetic per-role RLS, read-only dump coverage, durable writer fence and migrator verified.")
     finally:
         subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=30, check=True)

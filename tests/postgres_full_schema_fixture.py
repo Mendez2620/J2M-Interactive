@@ -57,14 +57,15 @@ FROM pg_sequences WHERE schemaname='public' ORDER BY sequencename;
 """
 
 
-def exercise_application_schema(network, run, sql):
+def exercise_application_schema(network, run, sql, connection):
     sql("CREATE DATABASE full_schema OWNER j2m_owner").check_returncode()
 
-    def app(*args):
+    def app(*args, role="j2m_migrator", database="full_schema"):
+        options = ["-e", "PGOPTIONS=-c role=j2m_owner"] if role == "j2m_migrator" else []
         subprocess.run(["docker", "run", "--rm", "--network", network,
                         "--env-file", str(ROOT / ".env.wallet-demo.example"),
-                        "-e", "DATABASE_URL=postgresql://j2m_migrator:synthetic-only@db/full_schema",
-                        "-e", "PGOPTIONS=-c role=j2m_owner", "-e", "GOOGLE_WALLET_MODE=disabled",
+                        "-e", f"DATABASE_URL=postgresql://{role}:synthetic-only@db/{database}",
+                        *options, "-e", "GOOGLE_WALLET_MODE=disabled",
                         "-e", "APPLE_WALLET_MODE=disabled", "j2m-interactive:wallet-demo-synthetic", *args],
                        check=True, timeout=90)
 
@@ -118,7 +119,11 @@ def exercise_application_schema(network, run, sql):
 
         verify_transition_accounting(query)
         if i == 1:
-            prove_scoped_grants_and_fence(run, sql, destination)
+            flow = (ROOT / "tests/postgres_referral_worker_flow.py").read_text()
+            prove_scoped_grants_and_fence(
+                sql, destination, lambda role: app("python", "-c", flow, role=role, database=destination),
+                connection,
+            )
             query("SELECT setval('public.customers_id_seq', 1, true)")
             try:
                 verify_transition_accounting(query)
