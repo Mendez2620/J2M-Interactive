@@ -25,7 +25,10 @@ with app.app_context():
         manager = Staff(business_id=business.id, username=f'manager{i}', email=f'manager{i}@example.test',
                         role='manager', web_access_enabled=True)
         manager.set_password("SyntheticPass123")
-        db.session.add(manager)
+        cashier = Staff(business_id=business.id, username=f'cashier{i}', role='cashier',
+                        web_access_enabled=True, permissions="scanner_operate_web")
+        cashier.set_password("SyntheticPass123")
+        db.session.add_all([manager, cashier])
         customer = Customer(business_id=business.id, full_name='Synthetic')
         db.session.add(customer)
         db.session.flush()

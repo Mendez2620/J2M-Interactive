@@ -1,4 +1,4 @@
-"""Exercise manager browser authentication over Flask HTTP under the web role."""
+"""Exercise manager and cashier browser authentication under the web role."""
 
 import re
 
@@ -43,3 +43,33 @@ for tenant, client in enumerate(clients, 1):
         assert db.session.scalar(text(
             "SELECT revoked_at IS NOT NULL FROM staff_sessions WHERE id=:id"
         ), {"id": session_id}) is True
+
+for tenant in (1, 2):
+    client = app.test_client()
+    credentials = {
+        "identity": f"cashier{tenant}", "password": "SyntheticPass123",
+        "business_slug": f"synthetic-{tenant}",
+        "csrf_token": csrf(client.get("/staff/login?legacy=1")),
+    }
+    wrong = client.post("/staff/login", data={**credentials, "business_slug": f"synthetic-{3-tenant}"})
+    assert wrong.status_code == 401, wrong.status_code
+    assert client.get("/staff/portal/scanner").status_code == 302
+    logged_in = client.post("/staff/login", data=credentials)
+    assert logged_in.status_code == 302, logged_in.status_code
+    scanner = client.get("/staff/portal/scanner")
+    assert scanner.status_code == 200, scanner.status_code
+    assert f"Synthetic {tenant}".encode() in scanner.data
+    assert f"Synthetic {3-tenant}".encode() not in scanner.data
+    assert client.get("/manager/portal/account").status_code == 302
+    with client.session_transaction() as session:
+        session_id = session["staff_session_id"]
+        logout_csrf = session["csrf_token"]
+    assert client.post("/staff/logout", data={"csrf_token": logout_csrf}).status_code == 302
+    assert client.get("/staff/portal/scanner").status_code == 302
+    with app.app_context():
+        row = db.session.execute(text("""
+            SELECT staff.business_id, staff_sessions.revoked_at IS NOT NULL
+            FROM staff_sessions JOIN staff ON staff.id = staff_sessions.staff_id
+            WHERE staff_sessions.id=:session_id
+        """), {"session_id": session_id}).one()
+        assert tuple(row) == (tenant, True)

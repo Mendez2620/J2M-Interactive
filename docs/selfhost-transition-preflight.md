@@ -346,3 +346,27 @@ perfil, que las credenciales del otro negocio no abran sesión y que el
 cierre produzca una revocación persistida. Las operaciones de
 Super Admin, caja, registro, recuperación, passkeys y auditoría requieren
 sus propias validaciones y permisos antes de autorizar el aprovisionamiento.
+
+El ensayo incluye el acceso histórico de cajeros sin correo, el permiso
+`scanner_operate_web`, el rechazo de un negocio incorrecto, el bloqueo del
+portal de gerentes y la revocación persistida. La política SELECT de
+participantes deja a Flask la autorización de negocio y personal para el
+escáner. El rol web es interno y multi-tenant.
+
+### Evidencia del baseline del ledger
+
+El PR #6 (merge `7280c32`) creó el ledger en la revisión
+`c0d1e2f3a4b5`. Su migración actualiza el estado de cooldown a partir
+del historial cuando agrega la columna y crea la tabla de ledger con sus
+restricciones. No inserta una entrada por movimiento histórico ni registra
+el conjunto de movimientos presentes al migrar.
+
+Una cadena de balances internamente coherente y la correspondencia de
+movimientos nuevos con sus entradas son comprobaciones distintas. Ninguna
+identifica por sí sola qué movimientos existían antes del ledger. Para
+clasificarlos se necesita una evidencia autenticada y vinculada a esa
+ejecución de Alembic: un inventario contemporáneo de IDs, tenant y digest
+de cada movimiento, o una copia consistente previa al upgrade cuyo vínculo
+con la ventana de migración pueda demostrarse con un registro de despliegue
+y sin escrituras en el intervalo. Un respaldo actual no sustituye esa
+evidencia. El verificador estricto de transición permanece sin cambios.
