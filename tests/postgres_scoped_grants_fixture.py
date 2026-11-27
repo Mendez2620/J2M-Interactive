@@ -309,7 +309,6 @@ COMMIT;
 
     # Drop cached PostgreSQL connections before restoring write privileges.
     # NOLOGIN prevents another direct connection until grants are certified.
-    pool_control("KILL full_restore_1").check_returncode()
     active = f"FROM pg_stat_activity WHERE usename IN ('{web}', '{worker}')"
     execute(f"SELECT pg_terminate_backend(pid, 3000) {active}").check_returncode()
     assert execute(f"SELECT count(*) {active}").stdout.strip() == b"0"

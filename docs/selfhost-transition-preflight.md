@@ -484,3 +484,22 @@ por lo que se limita a name y se prueban denegaciones de password_hash e
 is_active. Las políticas de sesión para el rol interno son multi-tenant y
 no sustituyen la autorización HTTP. Las operaciones administrativas de
 escritura y el manifiesto operativo completo siguen pendientes.
+
+### Terminación entre el commit de Alembic y el diario
+
+El supervisor sintético arranca el coordinador con un identificador
+aleatorio. La base usa un volumen Docker dedicado y etiquetado. El
+supervisor termina el proceso después del commit y antes de confirmar
+la etapa. Inspecciona los mismos recursos mediante Docker y PostgreSQL,
+valida las identidades de ambas bases, la revisión y la contabilidad.
+Comprueba que no haya otros clientes conectados. No vuelve a migrar ni
+habilita escritores y elimina únicamente los recursos identificados del
+ensayo. Esta prueba no sustituye otras fronteras de terminación ni
+acredita recuperación con tráfico habilitado.
+
+En la reapertura sintética con PgBouncer se eliminan las conexiones
+PostgreSQL restantes de los dos escritores antes de restaurar grants.
+El manifiesto se aplica con los roles aún en NOLOGIN y el ingreso del
+pooler cerrado. Se verifica el inventario efectivo y se prueba la
+denegación directa antes de volver a habilitar LOGIN e ingreso. Aún se
+requieren pruebas de terminación durante esta acción separada.
