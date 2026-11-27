@@ -80,6 +80,7 @@ def exercise(directory, *, reconstructed=False, boundary='migrate'):
             if observed != evidence["cluster"]:
                 raise RuntimeError("Unexpected PostgreSQL cluster")
             expected_head = FINAL_HEAD if boundary in ("migrate", "verify") else INITIAL_HEAD
+            partial = boundary == "restore-partial"
             has_copy = boundary != "fence"
             databases = [("source", "j2m_test", INITIAL_HEAD)]
             if has_copy:
@@ -90,9 +91,14 @@ def exercise(directory, *, reconstructed=False, boundary='migrate'):
                 if query(database, "SELECT current_database(), oid FROM pg_database "
                                    "WHERE datname=current_database()") != evidence[field]:
                     raise RuntimeError("Unexpected database identity")
-                if query(database, "SELECT version_num FROM alembic_version") != revision:
-                    raise RuntimeError("Unexpected database revision after interruption")
-                verify_transition_accounting(lambda statement: query(database, statement))
+                if partial and field == "restored":
+                    if any(query(database, f"SELECT count(*) FROM public.{table}") != "0"
+                           for table in ("alembic_version", "customers", "transactions", "loyalty_ledger_entries")):
+                        raise RuntimeError("A partially restored database was mistaken for a complete backup")
+                else:
+                    if query(database, "SELECT version_num FROM alembic_version") != revision:
+                        raise RuntimeError("Unexpected database revision after interruption")
+                    verify_transition_accounting(lambda statement: query(database, statement))
                 if logical_digest(db["Id"], database) != evidence[field + "_digest"]:
                     raise RuntimeError("Logical state changed across coordinator termination")
                 if query(database, "SELECT count(*) FROM pg_stat_activity "
@@ -113,11 +119,13 @@ def exercise(directory, *, reconstructed=False, boundary='migrate'):
                 if denied.returncode == 0 or b"not permitted to log in" not in denied.stderr:
                     raise RuntimeError("Writer reconnect was not rejected by NOLOGIN")
             state = json.loads(journal.with_suffix(".jsonl.state").joinpath("transition.json").read_text())
-            if (state["phase"], state["status"]) != (boundary, "pending"):
+            if (state["phase"], state["status"]) != ("restore" if partial else boundary, "pending"):
                 raise RuntimeError("Expected unconfirmed transition stage in the coordinator journal")
             report = {**evidence, "volume": volume_name, "initial_head": INITIAL_HEAD,
-                      "actual_head": expected_head if has_copy else None,
-                      "coordinator_terminated": True, "accounting_verified": True,
+                      "actual_head": expected_head if has_copy and not partial else None,
+                      "partial_restore_verified": partial,
+                      "coordinator_terminated": True, "source_accounting_verified": True,
+                      "restored_accounting_verified": has_copy and not partial,
                       "logical_digest_verified": True, "writer_reconnect_denied": True,
                       "migration_replayed": False, "reopened": False}
             (directory / "supervisor.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
@@ -142,7 +150,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--reconstructed-legacy", action="store_true")
     parser.add_argument("--evidence-dir", type=Path)
-    parser.add_argument("--boundary", choices=("fence", "restore", "migrate", "verify"), default="migrate")
+    parser.add_argument("--boundary", choices=("fence", "restore", "restore-partial", "migrate", "verify"), default="migrate")
     options = parser.parse_args()
     if options.evidence_dir:
         exercise(options.evidence_dir, reconstructed=options.reconstructed_legacy, boundary=options.boundary)

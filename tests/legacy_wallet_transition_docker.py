@@ -25,7 +25,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--journal", type=Path)
 parser.add_argument("--preflight-only", action="store_true")
 parser.add_argument("--supervised-run")
-parser.add_argument("--interrupt-at", choices=("fence", "restore", "migrate", "verify"), default="migrate")
+parser.add_argument("--interrupt-at", choices=("fence", "restore", "restore-partial", "migrate", "verify"), default="migrate")
 parser.add_argument("--reconstructed-legacy", action="store_true")
 args = parser.parse_args()
 if not args.preflight_only and args.journal is None:
@@ -156,9 +156,13 @@ def restore_fixture():
     if not archive.startswith(b"PGDMP") or len(archive) > 8 * 1024 * 1024:
         raise RuntimeError("Invalid synthetic snapshot")
     r(*db_args, "createdb", "-U", "j2m_test", "-O", "j2m_transition_owner", RESTORED)
-    subprocess.run(["docker", "exec", "-i", n["db"], "pg_restore", "--exit-on-error",
-                    "--no-owner", "--no-acl", "--role=j2m_transition_owner",
-                    "-U", "j2m_test", "-d", RESTORED], input=archive, check=True, timeout=25)
+    command = ["docker", "exec", "-i", n["db"], "pg_restore", "--exit-on-error",
+               "--no-owner", "--no-acl", "--role=j2m_transition_owner", "-U", "j2m_test", "-d", RESTORED]
+    if args.supervised_run and args.interrupt_at == "restore-partial":
+        # Commit only the DDL section; do not load rows, sequences or constraints.
+        subprocess.run([*command, "--section=pre-data"], input=archive, check=True, timeout=25)
+        interrupt_boundary("restore-partial")
+    subprocess.run(command, input=archive, check=True, timeout=25)
     if logical_digest(RESTORED) != source_digest or logical_digest(SOURCE) != source_digest:
         raise RuntimeError("Synthetic logical restore did not match its source")
     journal.advance("restored", sha256=hashlib.sha256(archive).hexdigest(),
@@ -219,11 +223,11 @@ def migrate():
 
 
 def interrupt_boundary(phase):
-    if not args.supervised_run or phase.value != args.interrupt_at:
+    if not args.supervised_run or phase != args.interrupt_at:
         return
-    has_copy = phase != Phase.FENCE
+    has_copy = phase != Phase.FENCE.value
     evidence = {
-        "phase": phase.value,
+        "phase": phase,
         "container": r("docker", "inspect", "--format", "{{.Id}}", n["db"]),
         "network": r("docker", "network", "inspect", "--format", "{{.Id}}", p),
         "postgres_image": r("docker", "inspect", "--format", "{{.Image}}", n["db"]),
@@ -336,7 +340,7 @@ class DockerRehearsal:
 
     def execute(self, phase):
         self.actions[phase]()
-        interrupt_boundary(phase)
+        interrupt_boundary(phase.value)
 
     def check_result(self, phase):
         if phase == Phase.PREFLIGHT:

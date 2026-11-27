@@ -533,3 +533,20 @@ dos cuentas sin actividad contable. Esta evidencia corresponde a esa
 copia. Una transición posterior debe verificar el respaldo exacto que
 utilice y no puede inferir de estas cifras el estado anterior a
 c0d1e2f3a4b5.
+
+### Entrega de preparación y activación posterior
+
+El delta de infraestructura del PR se limita al workflow de pruebas,
+con permisos de repositorio de lectura, PostgreSQL efímero y recursos
+Docker sintéticos. El PR no cambia Compose operativo, tareas
+programadas, pin ni scripts de despliegue. El flujo normal de
+despliegue sigue comprobando el backend anterior antes de construir o
+cambiar el pin. El verificador de identidad HTTPS sigue rechazando
+la revisión legada sin una identidad verificable.
+
+La propuesta 8E.2D.3 puede incluir el aprovisionamiento real, las pruebas
+de compatibilidad con Supavisor y la atestación operativa, la autorización
+de reapertura y la validación del respaldo exacto de la transición.
+La cobertura de interrupciones del ensayo actual y los defectos
+que esa cobertura revele siguen siendo trabajo de preparación.
+Los grants de los fixtures permanecen limitados a recursos sintéticos.

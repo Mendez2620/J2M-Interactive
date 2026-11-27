@@ -17,6 +17,25 @@ OBJECTS = {
         "sequences": (),
     },
 }
+CUSTOMER_TABLES = (
+    "customer_linking_enrollments", "customer_credentials", "customer_sessions",
+    "customer_auth_challenges", "customer_auth_audits", "customer_registration_identity_claims",
+    "customer_recovery_rate_limits", "customers", "referral_participants",
+)
+CUSTOMER_UPDATES = {
+    "businesses": ("name",),  # SELECT FOR UPDATE during registration.
+    "customer_recovery_rate_limits": ("reserved_until", "updated_at"),
+    "customer_linking_enrollments": (
+        "status", "browser_binding_hash", "pairing_code_hash", "claimed_at",
+        "approved_at", "pairing_failed_attempts", "pairing_locked_at",
+        "webauthn_challenge", "consumed_at", "secret_hash",
+    ),
+    "customer_credentials": ("sign_count", "last_used_at", "is_active", "revoked_at", "revoked_reason"),
+    "customer_sessions": ("revoked_at", "last_active_at"),
+    "customer_auth_challenges": ("consumed_at",),
+}
+CUSTOMER_SEQUENCES = ("customers_id_seq", "referral_participants_id_seq",
+                      "customer_credentials_id_seq", "customer_auth_audits_id_seq")
 MIGRATOR_LOCK = (-1783214642, 9815)
 
 
@@ -35,6 +54,30 @@ def prove_scoped_grants_and_fence(sql, database, service_flow, connection, pool_
             GRANT SELECT, INSERT ON public.platform_admin_sessions TO j2m_schema_web;
             GRANT UPDATE (revoked_at) ON public.platform_admin_sessions TO j2m_schema_web;
         """).check_returncode()
+
+    def customer_grants():
+        for table in CUSTOMER_TABLES:
+            execute(f"GRANT SELECT, INSERT ON public.{table} TO j2m_schema_web").check_returncode()
+        for table, columns in CUSTOMER_UPDATES.items():
+            execute(f"GRANT UPDATE ({','.join(columns)}) ON public.{table} TO j2m_schema_web").check_returncode()
+        for sequence in CUSTOMER_SEQUENCES:
+            execute(f"GRANT USAGE ON SEQUENCE public.{sequence} TO j2m_schema_web").check_returncode()
+
+    def customer_policies():
+        for table in CUSTOMER_TABLES:
+            protected = execute(f"SELECT relrowsecurity FROM pg_class WHERE oid='public.{table}'::regclass")
+            protected.check_returncode()
+            if protected.stdout.strip() != b"t":
+                continue
+            execute(f"CREATE POLICY fixture_customer_read ON public.{table} "
+                    "FOR SELECT TO j2m_schema_web USING (true)").check_returncode()
+            predicate = ("participant_type = 'customer_ambassador' AND NOT is_enabled"
+                         if table == "referral_participants" else "true")
+            execute(f"CREATE POLICY fixture_customer_insert ON public.{table} "
+                    f"FOR INSERT TO j2m_schema_web WITH CHECK ({predicate})").check_returncode()
+            if table in CUSTOMER_UPDATES:
+                execute(f"CREATE POLICY fixture_customer_update ON public.{table} "
+                        "FOR UPDATE TO j2m_schema_web USING (true) WITH CHECK (true)").check_returncode()
 
     def fixture_grants():
         statements = []
@@ -97,6 +140,8 @@ def prove_scoped_grants_and_fence(sql, database, service_flow, connection, pool_
             FOR UPDATE TO j2m_schema_web USING (true) WITH CHECK (true);
     """).check_returncode()
     admin_grants()
+    customer_grants()
+    customer_policies()
     inventory_sql = (root / "scripts/j2m_transition_privilege_inventory.sql").read_text()
     inventory_result = execute(inventory_sql)
     inventory_result.check_returncode()
@@ -120,6 +165,7 @@ def prove_scoped_grants_and_fence(sql, database, service_flow, connection, pool_
                  "google_wallet_referral_jobs": "SELECT,INSERT",
                  "google_wallet_write_reservations": "SELECT,INSERT"},
     }
+    expected_tables[web].update(dict.fromkeys(CUSTOMER_TABLES, "SELECT,INSERT"))
     expected_table_rows = {
         (role, table, privilege) for role, grants in expected_tables.items()
         for table, privileges in grants.items() for privilege in privileges.split(",")
@@ -128,6 +174,7 @@ def prove_scoped_grants_and_fence(sql, database, service_flow, connection, pool_
         (role, sequence, "USAGE") for role, grants in OBJECTS.items()
         for sequence in (*grants["sequences"], "google_wallet_referral_jobs_id_seq")
     }
+    expected_sequence_rows.update((web, sequence, "USAGE") for sequence in CUSTOMER_SEQUENCES)
     extra_updates = {
         web: {"customers": ("current_points", "current_stamps", "last_earn_at"),
               "businesses": ("referrals_enabled",), "staff_sessions": ("revoked_at",),
@@ -136,6 +183,8 @@ def prove_scoped_grants_and_fence(sql, database, service_flow, connection, pool_
         worker: {"google_wallet_referral_jobs": ("status", "token", "locked_at", "attempts",
                                                   "run_at", "cursor", "outcome", "updated_at")},
     }
+    for table, names in CUSTOMER_UPDATES.items():
+        extra_updates[web][table] = (*extra_updates[web].get(table, ()), *names)
     for role in OBJECTS:
         extra_updates[role]["google_wallet_write_reservations"] = (
             "state", "active_slot", "updated_at", "started_at", "remote_resolved_at", "remote_status")
@@ -229,8 +278,13 @@ def prove_scoped_grants_and_fence(sql, database, service_flow, connection, pool_
         REVOKE EXECUTE ON FUNCTION public.synthetic_fence_write() FROM PUBLIC;
         GRANT EXECUTE ON FUNCTION public.synthetic_fence_write() TO j2m_schema_worker;
     """).check_returncode()
+    revoke_customer_updates = "; ".join(
+        f"REVOKE UPDATE ({','.join(columns)}) ON public.{table} FROM {web}"
+        for table, columns in CUSTOMER_UPDATES.items()
+    )
     script = f"""
 BEGIN;
+{revoke_customer_updates};
 ALTER ROLE {web} NOLOGIN;
 ALTER ROLE {worker} NOLOGIN;
 REVOKE UPDATE (revoked_at) ON public.staff_sessions FROM {web};
@@ -321,6 +375,7 @@ COMMIT;
     execute(manifest).check_returncode()
     execute((root / "scripts/j2m_staff_login_grants.sql").read_text()).check_returncode()
     admin_grants()
+    customer_grants()
     restored_inventory = execute(inventory_sql)
     restored_inventory.check_returncode()
     assert_service_manifest(json.loads(restored_inventory.stdout))

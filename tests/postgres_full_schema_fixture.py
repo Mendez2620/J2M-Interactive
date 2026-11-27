@@ -30,7 +30,7 @@ with app.app_context():
                         role='manager', web_access_enabled=True)
         manager.set_password("SyntheticPass123")
         cashier = Staff(business_id=business.id, username=f'cashier{i}', role='cashier',
-                        web_access_enabled=True, permissions="scanner_operate_web")
+                        web_access_enabled=True, permissions="scanner_operate_web,authorize_customer_identity")
         cashier.set_password("SyntheticPass123")
         db.session.add_all([manager, cashier])
         customer = Customer(business_id=business.id, full_name='Synthetic')
@@ -168,6 +168,9 @@ def exercise_application_schema(network, run, sql, connection, pool_control):
             else:
                 raise RuntimeError("A regressed customer sequence was accepted")
             query("SELECT setval('public.customers_id_seq', 2, true)")
+            customer_flow = (ROOT / "tests/postgres_customer_http_flow.py").read_text()
+            app("python", "-c", customer_flow, role="j2m_schema_web", database=destination)
+            verify_transition_accounting(query)
             query("INSERT INTO transactions (business_id,customer_id,type,points_amount,"
                   "stamps_amount,purchase_amount,timestamp) VALUES (1,1,'earn',0,1,0,now())")
             try:
