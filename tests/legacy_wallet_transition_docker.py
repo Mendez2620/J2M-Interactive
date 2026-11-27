@@ -1,5 +1,6 @@
 """Laptop-only synthetic transition using the original historical container image."""
 import argparse
+import re
 import hashlib
 import json
 import shutil
@@ -51,16 +52,30 @@ before = production_ids()
 p = "j2m-legacy-tls-" + uuid.uuid4().hex[:8]
 n = {role: p + "-" + role for role in ("db", "web", "worker", "proxy")}
 root = ROOT
+SOURCE = "j2m_test"
+RESTORED = "restore_test"
+source_digest = None
 journal = TransitionJournal(args.journal, legacy_image=img, target_image=new, target_sha=sha,
                             environment="synthetic")
 probe=(root/"tests/legacy_wallet_fixture.py").read_text(encoding="utf-8")
+def config(database, role="j2m_test"):
+    if database not in {SOURCE, RESTORED}:
+        raise RuntimeError("Unexpected synthetic database")
+    return ["--network", p, "--env-file", str(root / ".env.wallet-demo.example"),
+            "-e", f"DATABASE_URL=postgresql://{role}:synthetic@db/{database}",
+            "-e", "GOOGLE_WALLET_MODE=disabled", "-e", "APPLE_WALLET_MODE=disabled"]
+
+
 def exercise(stage, selected=img):
-    subprocess.run(["docker","run","--rm","-i",*cfg,selected,"python","-",stage],input=probe,text=True,check=True,timeout=60)
-cfg=["--network",p,"--env-file",str(root/".env.wallet-demo.example"),"-e","DATABASE_URL=postgresql://j2m_test:synthetic@db/j2m_test","-e","GOOGLE_WALLET_MODE=disabled","-e","APPLE_WALLET_MODE=disabled"]
+    database = SOURCE if stage == "before" else RESTORED
+    subprocess.run(["docker", "run", "--rm", "-i", *config(database), selected,
+                    "python", "-", stage], input=probe, text=True, check=True, timeout=60)
+
+
 def start(role, selected=img):
     cmd=() if role=="web" else ("flask","--app","run.py","run-google-wallet-sync-worker")
     process="web" if role=="web" else "google-wallet-worker"
-    r("docker","run","-d","--name",n[role],"--network-alias",role,"--label",f"com.docker.compose.project={p}","--label",f"com.docker.compose.service={role}",*cfg,"-e",f"J2M_PROCESS_TYPE={process}","-e",f"J2M_RELEASE_IMAGE=j2m-interactive:{sha if selected == new else ''}",selected,*cmd)
+    r("docker","run","-d","--name",n[role],"--network-alias",role,"--label",f"com.docker.compose.project={p}","--label",f"com.docker.compose.service={role}",*config(RESTORED, "j2m_" + role),"-e",f"J2M_PROCESS_TYPE={process}","-e",f"J2M_RELEASE_IMAGE=j2m-interactive:{sha if selected == new else ''}",selected,*cmd)
 def attest(folder, selected=img):
     def snapshot():
         ids = {role: json.loads(r("docker", "inspect", name))[0] for role, name in n.items()}
@@ -72,7 +87,8 @@ def attest(folder, selected=img):
             labels = obj["Config"]["Labels"]
             details = obj["NetworkSettings"]["Networks"]
             if (obj["Image"] != selected or not obj["State"]["Running"] or set(details) != {p}
-                    or labels["com.docker.compose.project"] != p or labels["com.docker.compose.service"] != role):
+                    or labels["com.docker.compose.project"] != p or labels["com.docker.compose.service"] != role
+                    or f"DATABASE_URL=postgresql://j2m_{role}:synthetic@db/{RESTORED}" not in obj["Config"]["Env"]):
                 raise RuntimeError("Unexpected Docker backend identity")
         web = ids["web"]
         return Backend(web["Image"], web["Id"], web["NetworkSettings"]["Networks"][p]["IPAddress"])
@@ -96,20 +112,62 @@ def attest(folder, selected=img):
                        revision=sha if selected == new else None)
 
 
+def sql(database, statement):
+    return r("docker", "exec", n["db"], "psql", "-XAt", "-v", "ON_ERROR_STOP=1",
+             "-U", "j2m_test", "-d", database, "-c", statement)
+
+
+def logical_digest(database):
+    # Compare the full logical schema, rows, and sequence state. PostgreSQL
+    # emits a fresh psql restriction key for each dump.
+    dump = subprocess.check_output(
+        ["docker", "exec", n["db"], "pg_dump", "-U", "j2m_test", "--no-owner",
+         "--no-acl", database], timeout=25,
+    )
+    if not dump or len(dump) > 8 * 1024 * 1024:
+        raise RuntimeError("Unexpected synthetic logical dump size")
+    lines = []
+    in_copy = False
+    for line in dump.splitlines():
+        if not in_copy:
+            if line.startswith((b"\\restrict ", b"\\unrestrict ")):
+                continue
+            # Normalize casts that PostgreSQL deparses differently after
+            # a dump/parse cycle. Preserve COPY row bytes as-is.
+            line = re.sub(rb"\(\(ARRAY\[([^\]]*)\]\)::text\[\]\)",
+                          lambda match: b"(ARRAY[" + match[1].replace(b"::character varying", b"::text") + b"])",
+                          line)
+            line = re.sub(rb"\(('(?:[^']|'')*')::character varying\)::text", rb"\1::text", line)
+            in_copy = line.startswith(b"COPY ") and line.endswith(b" FROM stdin;")
+        elif line == b"\\.":
+            in_copy = False
+        lines.append(line)
+    return hashlib.sha256(b"\n".join(lines)).hexdigest()
+
+
 def restore_fixture():
+    global source_digest
     db_args = ["docker", "exec", n["db"]]
-    archive = subprocess.check_output([*db_args, "pg_dump", "-U", "j2m_test", "-Fc", "j2m_test"], timeout=25)
+    source_digest = logical_digest(SOURCE)
+    archive = subprocess.check_output([*db_args, "pg_dump", "-U", "j2m_test", "-Fc", SOURCE], timeout=25)
     if not archive.startswith(b"PGDMP") or len(archive) > 8 * 1024 * 1024:
         raise RuntimeError("Invalid synthetic snapshot")
-    r(*db_args, "createdb", "-U", "j2m_test", "restore_test")
+    r(*db_args, "createdb", "-U", "j2m_test", "-O", "j2m_transition_owner", RESTORED)
     subprocess.run(["docker", "exec", "-i", n["db"], "pg_restore", "--exit-on-error",
-                    "-U", "j2m_test", "-d", "restore_test"], input=archive, check=True, timeout=25)
-    rows = r(*db_args, "psql", "-U", "j2m_test", "-d", "restore_test", "-Atc",
-             "SELECT version_num, (SELECT count(*) FROM transactions), "
-             "(SELECT count(*) FROM google_wallet_sync_jobs) FROM alembic_version")
-    if rows != INITIAL_HEAD + "|1|1":
-        raise RuntimeError("Synthetic restore did not preserve revision and movements")
-    journal.advance("restored", sha256=hashlib.sha256(archive).hexdigest(), revision=INITIAL_HEAD)
+                    "--no-owner", "--no-acl", "--role=j2m_transition_owner",
+                    "-U", "j2m_test", "-d", RESTORED], input=archive, check=True, timeout=25)
+    if logical_digest(RESTORED) != source_digest or logical_digest(SOURCE) != source_digest:
+        raise RuntimeError("Synthetic logical restore did not match its source")
+    journal.advance("restored", sha256=hashlib.sha256(archive).hexdigest(),
+                    logical_sha256=source_digest, revision=INITIAL_HEAD,
+                    source=database_identity(SOURCE), restored=database_identity(RESTORED))
+
+
+def database_identity(database):
+    identity = sql(database, "SELECT current_database(), oid FROM pg_database WHERE datname=current_database()")
+    if not identity.startswith(database + "|"):
+        raise RuntimeError("Unexpected synthetic connection target")
+    return identity
 
 
 def guard_images():
@@ -122,8 +180,16 @@ def provision():
     r("docker","network","create","--internal",p)
     r("docker","run","-d","--name",n["db"],"--network",p,"--network-alias","db","--tmpfs","/var/lib/postgresql/data","-e","POSTGRES_USER=j2m_test","-e","POSTGRES_DB=j2m_test","-e","POSTGRES_PASSWORD=synthetic","postgres:17-alpine")
     time.sleep(4)
-    r("docker","run","--rm",*cfg,new,"flask","--app","run.py","db","upgrade","9d0e1f2a3b4c")
+    r("docker","run","--rm",*config(SOURCE),new,"flask","--app","run.py","db","upgrade",INITIAL_HEAD)
     exercise("before")
+    sql(SOURCE, """
+        CREATE ROLE j2m_transition_owner NOLOGIN;
+        CREATE ROLE j2m_migrator LOGIN NOINHERIT PASSWORD 'synthetic';
+        GRANT j2m_transition_owner TO j2m_migrator;
+        CREATE ROLE j2m_web LOGIN PASSWORD 'synthetic';
+        CREATE ROLE j2m_worker LOGIN PASSWORD 'synthetic';
+        REVOKE CONNECT ON DATABASE j2m_test FROM PUBLIC;
+    """)
 
 
 def assert_drained():
@@ -140,21 +206,23 @@ def restore():
 
 
 def migrate():
-    r("docker","run","--rm",*cfg,new,"flask","--app","run.py","db","upgrade","c3d4e5f6a7b8")
+    r("docker", "run", "--rm", *config(RESTORED, "j2m_migrator"),
+      "-e", "PGOPTIONS=-c role=j2m_transition_owner", new,
+      "flask", "--app", "run.py", "db", "upgrade", FINAL_HEAD)
 
 
 def verify_migration():
     schema_check="from run import app; from app.extensions import db; from scripts.check_wallet_referral_schema import validate_schema; a=app.app_context(); a.push(); raise SystemExit(bool(validate_schema(db.session.connection())));"
-    r("docker","run","--rm",*cfg,new,"python","-c",schema_check)
+    r("docker","run","--rm",*config(RESTORED),new,"python","-c",schema_check)
     reserve = """
 INSERT INTO google_wallet_write_reservations
 (operation_id, owner_token, issuer, kind, resource_id, business_id, customer_id, state, active_slot, updated_at)
 VALUES (repeat('a',32), repeat('b',32), 'synthetic', 'loyaltyObject', 'synthetic.object', 1, 1, 'uncertain', 1, now());
 """
-    r("docker","exec",n["db"],"psql","-U","j2m_test","-d","j2m_test","-v","ON_ERROR_STOP=1","-c",reserve)
+    r("docker","exec",n["db"],"psql","-U","j2m_test","-d",RESTORED,"-v","ON_ERROR_STOP=1","-c",reserve)
     journal.advance("migrated", revision=FINAL_HEAD)
     exercise("after")
-    persisted = r("docker","exec",n["db"],"psql","-U","j2m_test","-d","j2m_test","-Atc",
+    persisted = r("docker","exec",n["db"],"psql","-U","j2m_test","-d",RESTORED,"-Atc",
                   "SELECT count(*) FROM google_wallet_write_reservations "
                   "WHERE operation_id=repeat('a',32) AND state='uncertain' AND active_slot=1")
     if persisted != "1":
@@ -163,6 +231,10 @@ VALUES (repeat('a',32), repeat('b',32), 'synthetic', 'loyaltyObject', 'synthetic
 
 def verify_https_and_recover():
     guard_images()
+    # The serving smoke test only needs health/readiness; privileged data
+    # verification remains a separate short-lived synthetic fixture.
+    sql(RESTORED, "GRANT SELECT ON alembic_version TO j2m_web, j2m_worker")
+
     start("web", new)
     start("worker", new)
     with tempfile.TemporaryDirectory() as tmp:
@@ -191,7 +263,7 @@ def verify_https_and_recover():
         recovered = attest(folder)
         if recovered.container == target.container:
             raise RuntimeError("Expected a separate recovered backend")
-        head = r("docker", "exec", n["db"], "psql", "-U", "j2m_test", "-Atc",
+        head = r("docker", "exec", n["db"], "psql", "-U", "j2m_test", "-d", RESTORED, "-Atc",
                  "SELECT version_num FROM alembic_version")
         if head != FINAL_HEAD:
             raise RuntimeError("Recovery changed the database revision")
@@ -229,7 +301,7 @@ class DockerRehearsal:
         if phase != Phase.PREFLIGHT:
             assert_drained()
         if phase == Phase.MIGRATE:
-            self.check_revision(INITIAL_HEAD)
+            self.check_revision(INITIAL_HEAD, RESTORED)
 
     def execute(self, phase):
         self.actions[phase]()
@@ -238,13 +310,17 @@ class DockerRehearsal:
         if phase == Phase.PREFLIGHT:
             self.database_id = r("docker", "inspect", "--format", "{{.Id}}", n["db"])
             self.verify_isolation()
-            self.check_revision(INITIAL_HEAD)
+            self.check_revision(INITIAL_HEAD, SOURCE)
+        if phase == Phase.RESTORE:
+            self.check_revision(INITIAL_HEAD, RESTORED)
         if phase in {Phase.MIGRATE, Phase.VERIFY, Phase.HTTPS}:
-            self.check_revision(FINAL_HEAD)
+            self.check_revision(FINAL_HEAD, RESTORED)
+            self.check_revision(INITIAL_HEAD, SOURCE)
+            if logical_digest(SOURCE) != source_digest:
+                raise RuntimeError("Protected synthetic source changed")
 
-    def check_revision(self, expected):
-        observed = r("docker", "exec", self.database_id, "psql", "-U", "j2m_test", "-Atc",
-                     "SELECT version_num FROM alembic_version")
+    def check_revision(self, expected, database):
+        observed = sql(database, "SELECT version_num FROM alembic_version")
         if observed != expected:
             raise RuntimeError("Unexpected synthetic schema revision")
 
