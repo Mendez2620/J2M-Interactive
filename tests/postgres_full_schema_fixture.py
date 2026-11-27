@@ -65,7 +65,7 @@ FROM pg_sequences WHERE schemaname='public' ORDER BY sequencename;
 """
 
 
-def exercise_application_schema(network, run, sql, connection):
+def exercise_application_schema(network, run, sql, connection, pool_control):
     sql("CREATE DATABASE full_schema OWNER j2m_owner").check_returncode()
 
     def app(*args, role="j2m_migrator", database="full_schema"):
@@ -127,10 +127,11 @@ def exercise_application_schema(network, run, sql, connection):
 
         verify_transition_accounting(query)
         if i == 1:
+            sql(BACKUP_GRANTS, database=destination).check_returncode()
             flow = (ROOT / "tests/postgres_referral_worker_flow.py").read_text()
             prove_scoped_grants_and_fence(
                 sql, destination, lambda role, source=flow: app("python", "-c", source, role=role, database=destination),
-                connection,
+                connection, pool_control,
             )
             query("SELECT setval('public.customers_id_seq', 1, true)")
             try:

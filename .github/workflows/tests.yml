@@ -87,7 +87,9 @@ jobs:
           test -n "$before" && test "$before" = "$after"
           "${demo[@]}" exec -T app python -c "from urllib.request import urlopen; assert urlopen('http://127.0.0.1:8000/api/ready', timeout=5).status == 200"
       - name: Verify split roles, complete dump and writer fence in isolated PostgreSQL
-        run: python tests/postgres_role_separation_ci.py
+        run: |
+          docker build -f tests/Dockerfile.pgbouncer -t j2m-pgbouncer:synthetic .
+          python tests/postgres_role_separation_ci.py
       - name: Verify restricted Wallet egress against synthetic TLS endpoints
         run: python tests/wallet_egress_ci.py
       - name: Verify isolated Nginx upstream recovery and rollback

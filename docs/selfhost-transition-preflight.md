@@ -447,3 +447,18 @@ secuencia de web y worker con sus concesiones explícitas y prueba desviaciones
 directas, por PUBLIC y por membresía. Esto no acredita todavía funciones,
 Data API, ni el manifiesto operativo completo. El workflow conserva únicamente
 los diarios sintéticos del ensayo histórico como artefactos de CI.
+
+### Barrera y reapertura mediante PgBouncer de sesión
+
+El fixture de esquema completo añade un PgBouncer desechable en la misma red
+interna que PostgreSQL 17. Usa DISABLE para bloquear clientes nuevos antes
+de revocar permisos y NOLOGIN en PostgreSQL. Una sesión anterior conserva
+el mismo PID entre commits, mantiene una transacción abierta hasta que el
+bloqueo de drenaje se observa en pg_locks y luego comprueba denegaciones
+por tabla, columna, secuencia, función y SET ROLE. Una conexión directa
+nueva también debe fallar. El rol de respaldo conserva lectura bajo RLS.
+La reapertura sintética reaplica los grants declarados, verifica el
+inventario efectivo y habilita el ingreso antes de volver a probar
+autenticación HTTP. La prueba usa una tabla de la cola para observar el
+drenaje. Aún no acredita drenaje de todas las tablas, interrupciones de
+reapertura, integración con el supervisor ni comportamiento de Supavisor.

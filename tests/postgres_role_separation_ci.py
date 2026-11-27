@@ -47,6 +47,7 @@ COMMIT;
 def main():
     name = "j2m-roles-" + uuid4().hex[:8]
     network = name + "-internal"
+    pooler = name + "-pooler"
     subprocess.run(["docker", "network", "create", "--internal", network], check=True, capture_output=True, timeout=30)
     subprocess.run(["docker", "run", "-d", "--name", name, "--network", network, "--network-alias", "db",
                     "-e", "POSTGRES_PASSWORD=synthetic-only", "-e", "POSTGRES_DB=j2m_test",
@@ -63,7 +64,7 @@ def main():
     def connection(role, database):
         return subprocess.Popen(
             ["docker", "exec", "-i", name, "env", "PGPASSWORD=synthetic-only",
-             "psql", "-XqAt", "-h", "127.0.0.1", "-U", role, "-d", database],
+             "psql", "-XqAt", "-h", pooler, "-p", "6432", "-U", role, "-d", database],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
 
@@ -124,10 +125,45 @@ def main():
             if peer.poll() is None:
                 peer.kill()
                 peer.wait(timeout=8)
-        exercise_application_schema(network, run, sql, connection)
+        start_pooler = """cat > /tmp/j2m-users <<'EOF'
+"j2m_schema_web" "synthetic-only"
+"j2m_schema_worker" "synthetic-only"
+"j2m_pool_admin" "synthetic-only"
+EOF
+cat > /tmp/j2m-pool.ini <<'EOF'
+[databases]
+full_restore_1 = host=db port=5432 dbname=full_restore_1
+[pgbouncer]
+listen_addr = 0.0.0.0
+listen_port = 6432
+auth_type = scram-sha-256
+auth_file = /tmp/j2m-users
+admin_users = j2m_pool_admin
+pool_mode = session
+query_wait_timeout = 5
+server_connect_timeout = 5
+EOF
+exec pgbouncer /tmp/j2m-pool.ini
+"""
+        subprocess.run(["docker", "run", "-d", "--name", pooler, "--network", network,
+                        "--entrypoint", "sh", "j2m-pgbouncer:synthetic", "-ec", start_pooler],
+                       check=True, capture_output=True, timeout=30)
+
+        def pool_control(statement):
+            return run("env", "PGPASSWORD=synthetic-only", "psql", "-XAt", "-v", "ON_ERROR_STOP=1",
+                       "-h", pooler, "-p", "6432", "-U", "j2m_pool_admin", "-d", "pgbouncer",
+                       "-c", statement)
+
+        for _ in range(20):
+            if pool_control("SHOW VERSION").returncode == 0:
+                break
+            time.sleep(0.25)
+        else:
+            raise RuntimeError("Synthetic PgBouncer unavailable")
+        exercise_application_schema(network, run, sql, connection, pool_control)
         print("Synthetic per-role RLS, read-only dump coverage, durable writer fence and migrator verified.")
     finally:
-        subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=30, check=True)
+        subprocess.run(["docker", "rm", "-f", name, pooler], capture_output=True, timeout=30)
         subprocess.run(["docker", "network", "rm", network], capture_output=True, timeout=30, check=True)
 
 

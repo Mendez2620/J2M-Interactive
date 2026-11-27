@@ -20,18 +20,23 @@ OBJECTS = {
 MIGRATOR_LOCK = (-1783214642, 9815)
 
 
-def prove_scoped_grants_and_fence(sql, database, service_flow, connection):
+def prove_scoped_grants_and_fence(sql, database, service_flow, connection, pool_control):
     def execute(statement, role="postgres"):
         return sql(statement, role, database=database)
 
-    for role, grants in OBJECTS.items():
+    def fixture_grants():
+        statements = []
+        for role, grants in OBJECTS.items():
+            statements.extend(f"GRANT {privileges} ON public.{table} TO {role}"
+                              for table, privileges in grants["tables"].items())
+            statements.extend(f"GRANT USAGE ON SEQUENCE public.{sequence} TO {role}"
+                              for sequence in grants["sequences"])
+        return "; ".join(statements)
+
+    for role in OBJECTS:
         execute(f"CREATE ROLE {role} LOGIN PASSWORD 'synthetic-only'").check_returncode()
         execute(f"GRANT CONNECT ON DATABASE {database} TO {role}; "
                 f"GRANT USAGE ON SCHEMA public TO {role}").check_returncode()
-        for table, privileges in grants["tables"].items():
-            execute(f"GRANT {privileges} ON public.{table} TO {role}").check_returncode()
-        for sequence in grants["sequences"]:
-            execute(f"GRANT USAGE ON SEQUENCE public.{sequence} TO {role}").check_returncode()
         # Service accounts must not inherit the owner, a bypass role or public writes.
         properties = execute(f"""
             SELECT json_build_array(rolsuper,rolbypassrls,rolcreaterole,
@@ -43,6 +48,7 @@ def prove_scoped_grants_and_fence(sql, database, service_flow, connection):
         if not execute("SET ROLE j2m_owner", role).returncode:
             raise RuntimeError("Synthetic service assumed owner")
 
+    execute(fixture_grants()).check_returncode()
     web, worker = OBJECTS
     execute("GRANT UPDATE (referrals_enabled) ON public.businesses TO j2m_schema_web").check_returncode()
     manifest = (Path(__file__).resolve().parents[1] / "scripts/j2m_wallet_queue_grants.sql").read_text()
@@ -207,14 +213,35 @@ REVOKE UPDATE (state, active_slot, updated_at, started_at, remote_resolved_at, r
 REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM {roles};
 REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM {roles};
 REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM {roles};
+SET LOCAL lock_timeout = '8s';
+LOCK TABLE public.google_wallet_referral_jobs IN ACCESS EXCLUSIVE MODE;
 COMMIT;
 """
     peer = connection(worker, database)
     try:
-        peer.stdin.write(b"SELECT current_user;\n")
+        peer.stdin.write(b"BEGIN; SELECT current_user,pg_backend_pid(); COMMIT; SELECT pg_backend_pid();\n")
         peer.stdin.flush()
-        assert peer.stdout.readline().strip() == worker.encode()
-        execute(script).check_returncode()
+        current, pid = peer.stdout.readline().strip().split(b"|")
+        assert current == worker.encode() and peer.stdout.readline().strip() == pid
+        pool_control("DISABLE full_restore_1").check_returncode()
+        newcomer = connection(worker, database)
+        _, rejected = newcomer.communicate(b"SELECT 1;\n", timeout=8)
+        assert newcomer.returncode and b"disabled" in rejected.lower()
+        peer.stdin.write(b"BEGIN; SELECT count(*) FROM public.google_wallet_referral_jobs;\n")
+        peer.stdin.flush()
+        assert peer.stdout.readline().strip().isdigit()
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            fence = executor.submit(execute, script)
+            for _ in range(40):
+                if execute("SELECT count(*) FROM pg_locks WHERE NOT granted AND "
+                           "relation='public.google_wallet_referral_jobs'::regclass").stdout.strip() == b"1":
+                    break
+                time.sleep(0.1)
+            else:
+                raise RuntimeError("Fence did not drain the pooled transaction")
+            peer.stdin.write(b"ROLLBACK;\n")
+            peer.stdin.flush()
+            fence.result(timeout=12).check_returncode()
         _, errors = peer.communicate(
             b"INSERT INTO public.google_wallet_referral_jobs DEFAULT VALUES;\n"
             b"UPDATE public.google_wallet_referral_jobs SET status='pending';\n"
@@ -243,3 +270,28 @@ COMMIT;
         if execute("SELECT 1", role).returncode == 0:
             raise RuntimeError("Fenced login reconnected")
     print("Scoped grants and revoked reconnect on the real J2M fixture verified; referral queue and reservation operations verified.")
+
+    backup = execute("SELECT count(*) FROM public.loyalty_ledger_entries", "j2m_backup")
+    backup.check_returncode()
+    assert backup.stdout == execute("SELECT count(*) FROM public.loyalty_ledger_entries").stdout
+    assert execute("UPDATE public.customers SET current_stamps=0", "j2m_backup").returncode
+    assert execute(accounting).stdout == before
+
+    # Reapply only the declared application grants while pool ingress remains
+    # disabled. A fresh connection is admitted after checking effective grants.
+    execute(fixture_grants()).check_returncode()
+    execute(f"GRANT UPDATE (referrals_enabled) ON public.businesses TO {web}").check_returncode()
+    for role in OBJECTS:
+        execute(f"ALTER ROLE {role} LOGIN").check_returncode()
+    execute(manifest).check_returncode()
+    execute((root / "scripts/j2m_staff_login_grants.sql").read_text()).check_returncode()
+    restored_inventory = execute(inventory_sql)
+    restored_inventory.check_returncode()
+    assert_service_manifest(json.loads(restored_inventory.stdout))
+    pool_control("ENABLE full_restore_1").check_returncode()
+    reopened = connection(worker, database)
+    result, errors = reopened.communicate(b"SELECT current_user;\n", timeout=8)
+    assert not reopened.returncode and not errors and result.strip() == worker.encode()
+    service_flow(web, (root / "tests/postgres_manager_login_flow.py").read_text())
+    assert execute(accounting).stdout == before
+    print("PgBouncer session affinity, drainage, denial, and verified synthetic reopening passed.")
