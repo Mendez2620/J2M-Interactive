@@ -503,3 +503,17 @@ El manifiesto se aplica con los roles aún en NOLOGIN y el ingreso del
 pooler cerrado. Se verifica el inventario efectivo y se prueba la
 denegación directa antes de volver a habilitar LOGIN e ingreso. Aún se
 requieren pruebas de terminación durante esta acción separada.
+
+
+### Ampliación del ensayo de interrupción
+
+El supervisor sintético permite terminar el proceso realmente después de
+las acciones FENCE, RESTORE, MIGRATE y VERIFY, antes de confirmar la etapa.
+Verifica la revisión correspondiente, identidad, digest lógico independiente,
+contabilidad y rechazo efectivo de nuevas conexiones de web y worker
+(NOLOGIN), sin repetir migraciones. El fixture histórico mantiene ambos roles
+NOLOGIN hasta su prueba de disponibilidad HTTPS. Esto no equivale a una
+barrera integral de permisos en el pooler: el ensayo de PgBouncer sigue
+siendo independiente. No se simula un fallo dentro de pg_restore ni dentro
+de una transacción, ni se acredita todavía la recuperación durante HTTPS
+o reapertura. CI conserva los informes de las cuatro fronteras.

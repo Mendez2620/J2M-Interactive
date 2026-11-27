@@ -11,6 +11,7 @@ import time
 import uuid
 from pathlib import Path
 
+from legacy_transition_digest import logical_digest as snapshot_digest
 from postgres_full_schema_fixture import BACKUP_GRANTS
 from nginx_recovery_ci import NGINX_IMAGE, production_ids, proxy_config, run, write_certificates
 
@@ -24,6 +25,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--journal", type=Path)
 parser.add_argument("--preflight-only", action="store_true")
 parser.add_argument("--supervised-run")
+parser.add_argument("--interrupt-at", choices=("fence", "restore", "migrate", "verify"), default="migrate")
 parser.add_argument("--reconstructed-legacy", action="store_true")
 args = parser.parse_args()
 if not args.preflight_only and args.journal is None:
@@ -132,31 +134,7 @@ def sql(database, statement):
 
 
 def logical_digest(database):
-    # Compare the full logical schema, rows, and sequence state. PostgreSQL
-    # emits a fresh psql restriction key for each dump.
-    dump = subprocess.check_output(
-        ["docker", "exec", n["db"], "pg_dump", "-U", "j2m_test", "--no-owner",
-         "--no-acl", database], timeout=25,
-    )
-    if not dump or len(dump) > 8 * 1024 * 1024:
-        raise RuntimeError("Unexpected synthetic logical dump size")
-    lines = []
-    in_copy = False
-    for line in dump.splitlines():
-        if not in_copy:
-            if line.startswith((b"\\restrict ", b"\\unrestrict ")):
-                continue
-            # Normalize casts that PostgreSQL deparses differently after
-            # a dump/parse cycle. Preserve COPY row bytes as-is.
-            line = re.sub(rb"\(\(ARRAY\[([^\]]*)\]\)::text\[\]\)",
-                          lambda match: b"(ARRAY[" + match[1].replace(b"::character varying", b"::text") + b"])",
-                          line)
-            line = re.sub(rb"\(('(?:[^']|'')*')::character varying\)::text", rb"\1::text", line)
-            in_copy = line.startswith(b"COPY ") and line.endswith(b" FROM stdin;")
-        elif line == b"\\.":
-            in_copy = False
-        lines.append(line)
-    return hashlib.sha256(b"\n".join(lines)).hexdigest()
+    return snapshot_digest(n["db"], database)
 
 
 def restore_fixture():
@@ -212,8 +190,8 @@ def provision():
         CREATE ROLE j2m_transition_owner NOLOGIN;
         CREATE ROLE j2m_migrator LOGIN NOINHERIT PASSWORD 'synthetic';
         GRANT j2m_transition_owner TO j2m_migrator;
-        CREATE ROLE j2m_web LOGIN PASSWORD 'synthetic';
-        CREATE ROLE j2m_worker LOGIN PASSWORD 'synthetic';
+        CREATE ROLE j2m_web NOLOGIN PASSWORD 'synthetic';
+        CREATE ROLE j2m_worker NOLOGIN PASSWORD 'synthetic';
         CREATE ROLE j2m_backup LOGIN PASSWORD 'synthetic';
         GRANT CONNECT ON DATABASE j2m_test TO j2m_backup;
         REVOKE CONNECT ON DATABASE j2m_test FROM PUBLIC;
@@ -238,22 +216,29 @@ def migrate():
     r("docker", "run", "--rm", *config(RESTORED, "j2m_migrator"),
       "-e", "PGOPTIONS=-c role=j2m_transition_owner", new,
       "flask", "--app", "run.py", "db", "upgrade", FINAL_HEAD)
-    if args.supervised_run:
-        # The supervisor kills this process after Alembic returns and before
-        # the coordinator can confirm its MIGRATE stage.
-        evidence = {
-            "container": r("docker", "inspect", "--format", "{{.Id}}", n["db"]),
-            "network": r("docker", "network", "inspect", "--format", "{{.Id}}", p),
-            "postgres_image": r("docker", "inspect", "--format", "{{.Image}}", n["db"]),
-            "cluster": sql(RESTORED, "SELECT system_identifier FROM pg_control_system()"),
-            "source": database_identity(SOURCE), "restored": database_identity(RESTORED),
-            "source_digest": source_digest, "checkout": sha,
-            "restored_digest": logical_digest(RESTORED),
-        }
-        print("J2M_MIGRATION_BOUNDARY " + json.dumps(evidence), flush=True)
-        while True:
-            time.sleep(10)
 
+
+def interrupt_boundary(phase):
+    if not args.supervised_run or phase.value != args.interrupt_at:
+        return
+    has_copy = phase != Phase.FENCE
+    evidence = {
+        "phase": phase.value,
+        "container": r("docker", "inspect", "--format", "{{.Id}}", n["db"]),
+        "network": r("docker", "network", "inspect", "--format", "{{.Id}}", p),
+        "postgres_image": r("docker", "inspect", "--format", "{{.Image}}", n["db"]),
+        "cluster": sql(SOURCE, "SELECT system_identifier FROM pg_control_system()"),
+        "source": database_identity(SOURCE),
+        "restored": database_identity(RESTORED) if has_copy else None,
+        "source_digest": logical_digest(SOURCE),
+        "restored_digest": logical_digest(RESTORED) if has_copy else None,
+        "checkout": sha,
+    }
+    if source_digest is not None and evidence["source_digest"] != source_digest:
+        raise RuntimeError("Protected source changed before interruption")
+    print("J2M_TRANSITION_BOUNDARY " + json.dumps(evidence), flush=True)
+    while True:
+        time.sleep(10)
 
 
 def verify_migration():
@@ -279,6 +264,7 @@ def verify_https_and_recover():
     # The serving smoke test only needs health/readiness; privileged data
     # verification remains a separate short-lived synthetic fixture.
     sql(RESTORED, "GRANT SELECT ON alembic_version TO j2m_web, j2m_worker")
+    sql(RESTORED, "ALTER ROLE j2m_web LOGIN; ALTER ROLE j2m_worker LOGIN")
 
     start("web", new)
     start("worker", new)
@@ -350,6 +336,7 @@ class DockerRehearsal:
 
     def execute(self, phase):
         self.actions[phase]()
+        interrupt_boundary(phase)
 
     def check_result(self, phase):
         if phase == Phase.PREFLIGHT:
