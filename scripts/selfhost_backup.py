@@ -1421,15 +1421,44 @@ def _integral_components(index: Path, key_file: Path) -> tuple[str, Path, Path]:
 def verify_transition_accounting(query):
     """Strict checks for the exact transition restore. No identifiers or values leave the DB."""
     inconsistent = query("""
-        SELECT count(*) FROM transactions t
-        LEFT JOIN loyalty_ledger_entries l ON l.transaction_id=t.id
-        WHERE l.id IS NULL OR (l.business_id,l.customer_id)<>(t.business_id,t.customer_id)
-             OR l.stamps_delta <> CASE WHEN t.type='earn' THEN t.stamps_amount ELSE -t.stamps_amount END
-             OR round(l.points_delta::numeric, 6) <>
-                round((CASE WHEN t.type='earn' THEN t.points_amount ELSE -t.points_amount END)::numeric, 6)
-             OR NOT EXISTS (SELECT 1 FROM loyalty_ledger_entries b
-                            WHERE b.baseline_customer_id=t.customer_id AND b.business_id=t.business_id
-                              AND b.customer_id=t.customer_id AND b.id<l.id)
+        WITH ordered AS (
+            SELECT l.*, lag(points_after) OVER chain AS previous_points,
+                   lag(stamps_after) OVER chain AS previous_stamps,
+                   row_number() OVER chain AS step,
+                   row_number() OVER (PARTITION BY business_id, customer_id ORDER BY id DESC) AS reverse_step
+              FROM loyalty_ledger_entries l
+              WINDOW chain AS (PARTITION BY business_id, customer_id ORDER BY id)
+        ), broken AS (
+            SELECT 1 FROM transactions t
+            LEFT JOIN loyalty_ledger_entries l ON l.transaction_id=t.id
+            GROUP BY t.id
+            HAVING count(l.id) <> 1
+            UNION ALL
+            SELECT 1 FROM ordered l
+            LEFT JOIN customers c ON (c.business_id,c.id)=(l.business_id,l.customer_id)
+            LEFT JOIN transactions t ON t.id=l.transaction_id
+            WHERE c.id IS NULL
+               OR (l.step=1 AND (l.operation_type IS DISTINCT FROM 'baseline'
+                    OR l.baseline_customer_id IS DISTINCT FROM l.customer_id
+                    OR l.transaction_id IS NOT NULL OR l.points_delta IS DISTINCT FROM 0
+                    OR l.stamps_delta IS DISTINCT FROM 0))
+               OR (l.step>1 AND (l.baseline_customer_id IS NOT NULL
+                    OR t.id IS NULL OR t.type NOT IN ('earn','redeem')
+                    OR l.operation_type IS DISTINCT FROM t.type
+                    OR (l.business_id,l.customer_id) IS DISTINCT FROM (t.business_id,t.customer_id)
+                    OR l.stamps_delta IS DISTINCT FROM CASE WHEN t.type='earn' THEN t.stamps_amount ELSE -t.stamps_amount END
+                    OR round(l.points_delta::numeric,6) IS DISTINCT FROM
+                       round((CASE WHEN t.type='earn' THEN t.points_amount ELSE -t.points_amount END)::numeric,6)
+                    OR round(l.points_before::numeric,6) IS DISTINCT FROM round(l.previous_points::numeric,6)
+                    OR l.stamps_before IS DISTINCT FROM l.previous_stamps))
+               OR round(l.points_after::numeric,6) IS DISTINCT FROM
+                  round((l.points_before::numeric+l.points_delta::numeric),6)
+               OR l.stamps_after IS DISTINCT FROM l.stamps_before+l.stamps_delta
+               OR (l.reverse_step=1 AND (
+                   round(l.points_after::numeric,6) IS DISTINCT FROM round(c.current_points::numeric,6)
+                   OR l.stamps_after IS DISTINCT FROM c.current_stamps))
+        )
+        SELECT count(*) FROM broken
     """)
     if inconsistent != "0":
         raise RuntimeError("Movimiento restaurado sin cadena contable verificable.")

@@ -5,6 +5,8 @@ import re
 import subprocess
 import sys
 
+from postgres_scoped_grants_fixture import prove_scoped_grants_and_fence
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from scripts.selfhost_backup import verify_transition_accounting
@@ -116,6 +118,7 @@ def exercise_application_schema(network, run, sql):
 
         verify_transition_accounting(query)
         if i == 1:
+            prove_scoped_grants_and_fence(run, sql, destination)
             query("SELECT setval('public.customers_id_seq', 1, true)")
             try:
                 verify_transition_accounting(query)

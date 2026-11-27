@@ -270,3 +270,27 @@ El comando de restauración de transición requiere
 versión 17 del contenedor real. La restauración programada conserva su
 interfaz anterior. El verificador estricto de transición exige baseline,
 cadena de balances, correspondencia con movimientos y secuencias sanas.
+
+## Resultado del ensayo de permisos acotados
+
+El manifiesto ejecutado está en `tests/postgres_scoped_grants_fixture.py`.
+En el esquema objetivo, el candidato web puede leer negocios y clientes
+y tiene los permisos probados para las tablas de movimientos y ledger.
+El candidato worker carece de permisos para cambiar saldos. Ninguno
+puede asumir al propietario. El GRANT de lectura sobre la cola de
+referidos no basta: la consulta del worker devuelve cero filas bajo RLS.
+Hasta definir y probar las políticas y los flujos de autorización que faltan,
+esos roles no deben sustituir al login operativo.
+
+La exclusión sintética utiliza una clave transaccional de migrador y verifica
+que otra sesión no puede adquirirla. El bloqueo por privilegios del
+esquema sintético revoca grants directos y bloquea reconexiones. El ensayo
+independiente de sesión persistente verifica los verbos de escritura sobre
+una tabla representativa. Aún deben revisarse sus equivalentes en el
+inventario real de funciones, membresías, Data API, propietarios y pooler.
+
+El procedimiento operativo no se habilita por un informe de este ensayo.
+El bloqueo del legado se mantiene. La disponibilidad de un respaldo
+certificado y una atestación anterior no sustituye validar la barrera en
+vivo antes de migrar. Mantenga separadas las futuras aprobaciones de
+aprovisionamiento de roles, cambio de servicios y migración.
