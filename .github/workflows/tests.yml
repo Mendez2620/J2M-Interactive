@@ -119,8 +119,19 @@ jobs:
           git archive "$legacy" | tar -x -C "$historical"
           docker build --label "org.opencontainers.image.revision=$legacy" -t "j2m-interactive:reconstructed-$legacy" "$historical"
           docker build --label "org.opencontainers.image.revision=$sha" -t "j2m-interactive:transition-$sha" .
-          evidence=$(mktemp -d)
+          evidence="$RUNNER_TEMP/j2m-transition-evidence"
+          mkdir -m 700 "$evidence"
           python tests/legacy_wallet_transition_docker.py --reconstructed-legacy --journal "$evidence/evidence.jsonl"
+      - name: Preserve synthetic transition evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: historical-transition-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/j2m-transition-evidence/evidence.jsonl
+            ${{ runner.temp }}/j2m-transition-evidence/evidence.jsonl.state/transition.json
+          if-no-files-found: warn
+          retention-days: 30
 
   powershell-syntax:
     runs-on: windows-latest

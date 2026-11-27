@@ -79,6 +79,80 @@ def prove_scoped_grants_and_fence(sql, database, service_flow, connection):
     }
     assert any(row["policyname"] == "j2m_referral_queue_process" for row in inventory["policies"])
     assert any(row[0:2] == ["staff_sessions", "revoked_at"] for row in inventory["columns"])
+    # Compare effective service grants, not just catalog ACLs. A table-level
+    # grant implies the corresponding column grants and is checked separately.
+    expected_tables = {
+        web: {**OBJECTS[web]["tables"], "staff": "SELECT",
+              "staff_sessions": "SELECT,INSERT", "auth_rate_limit_slots": "SELECT,INSERT,DELETE",
+              "referral_participants": "SELECT", "google_wallet_referral_jobs": "SELECT,INSERT",
+              "google_wallet_write_reservations": "SELECT,INSERT"},
+        worker: {**OBJECTS[worker]["tables"], "referral_participants": "SELECT",
+                 "google_wallet_referral_jobs": "SELECT,INSERT",
+                 "google_wallet_write_reservations": "SELECT,INSERT"},
+    }
+    expected_table_rows = {
+        (role, table, privilege) for role, grants in expected_tables.items()
+        for table, privileges in grants.items() for privilege in privileges.split(",")
+    }
+    expected_sequence_rows = {
+        (role, sequence, "USAGE") for role, grants in OBJECTS.items()
+        for sequence in (*grants["sequences"], "google_wallet_referral_jobs_id_seq")
+    }
+    extra_updates = {
+        web: {"businesses": ("referrals_enabled",), "staff_sessions": ("revoked_at",),
+              "auth_rate_limit_slots": ("reserved_until", "updated_at")},
+        worker: {"google_wallet_referral_jobs": ("status", "token", "locked_at", "attempts",
+                                                  "run_at", "cursor", "outcome", "updated_at")},
+    }
+    for role in OBJECTS:
+        extra_updates[role]["google_wallet_write_reservations"] = (
+            "state", "active_slot", "updated_at", "started_at", "remote_resolved_at", "remote_status")
+    columns = json.loads(execute("""
+        SELECT jsonb_agg(jsonb_build_array(c.relname, a.attname))
+        FROM pg_class c JOIN pg_attribute a ON a.attrelid=c.oid
+        WHERE c.relnamespace='public'::regnamespace AND c.relkind IN ('r','p','v','m','f')
+          AND a.attnum>0 AND NOT a.attisdropped
+    """).stdout)
+    expected_column_rows = {
+        (role, table, column, privilege) for role, name, privilege in expected_table_rows
+        for table, column in columns if table == name
+        and privilege in {"SELECT", "INSERT", "UPDATE", "REFERENCES"}
+    }
+    expected_column_rows.update(
+        (role, table, column, "UPDATE") for role, grants in extra_updates.items()
+        for table, names in grants.items() for column in names
+    )
+
+    def assert_service_manifest(observed):
+        for key, expected in (("effective_tables", expected_table_rows),
+                              ("effective_columns", expected_column_rows),
+                              ("effective_sequences", expected_sequence_rows)):
+            actual = {tuple(row) for row in observed[key] if row[0] in OBJECTS}
+            if actual != expected:
+                raise AssertionError(f"Unexpected {key}: extra={sorted(actual-expected)}, missing={sorted(expected-actual)}")
+        if any(row[0] in OBJECTS for row in observed["effective_memberships"]):
+            raise AssertionError("Unexpected service role membership")
+
+    assert_service_manifest(inventory)
+    for grant, revoke in (
+        (f"GRANT UPDATE (current_stamps) ON public.customers TO {worker}",
+         f"REVOKE UPDATE (current_stamps) ON public.customers FROM {worker}"),
+        ("GRANT DELETE ON public.customers TO PUBLIC", "REVOKE DELETE ON public.customers FROM PUBLIC"),
+        (f"GRANT UPDATE ON SEQUENCE public.transactions_id_seq TO {worker}",
+         f"REVOKE UPDATE ON SEQUENCE public.transactions_id_seq FROM {worker}"),
+        (f"GRANT j2m_owner TO {worker}", f"REVOKE j2m_owner FROM {worker}"),
+    ):
+        execute(grant).check_returncode()
+        try:
+            assert_service_manifest(json.loads(execute(inventory_sql).stdout))
+        except AssertionError:
+            pass
+        else:
+            raise RuntimeError("Privilege drift was accepted")
+        finally:
+            execute(revoke).check_returncode()
+        assert_service_manifest(json.loads(execute(inventory_sql).stdout))
+
     service_flow(web, (root / "tests/postgres_manager_login_flow.py").read_text())
     service_flow(web)
     service_flow(worker)

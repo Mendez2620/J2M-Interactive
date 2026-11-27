@@ -413,3 +413,37 @@ upgrade. Si el historial ya no existe, se puede preparar una
 reconciliación formal desde un corte futuro verificable, con revisión
 independiente de diferencias. Ese corte no certifica la ventana
 histórica y no cambia el rechazo estricto actual.
+
+
+### Cierre de búsqueda histórica y criterios de revisión
+
+La investigación de metadatos del 27 de noviembre de 2026 no encontró
+una ejecución autenticada de `c0d1e2f3a4b5` ni una copia vinculable a ella.
+El proyecto Railway visible se creó el 19 de octubre y su despliegue más
+antiguo accesible es del 23 de octubre. Los primeros metadatos locales y
+de Drive visibles corresponden al 18 de noviembre. Estos resultados no
+prueban que no existieran movimientos ni que nunca hubiera otras copias.
+
+No repetir esa búsqueda sin una fuente nueva. Verificar primero el respaldo
+actual autenticado en aislamiento, con conteos agregados de movimientos
+sin ledger, discrepancias de cadena, saldos sin baseline, referencias y
+secuencias. Si la verificación estricta aprueba, documentar el alcance de
+la integridad actual, sin atribuirle certeza histórica. Si falla, conservar
+las diferencias como no resueltas y diseñar un corte prospectivo auditable,
+sin fabricar entradas, modificar movimientos o saldos ni cambiar el
+verificador estricto por una excepción genérica. El nuevo corte exige
+evidencia del estado congelado, reconciliación independiente y pruebas
+negativas; no certifica la migración histórica.
+
+El cierre del código de preparación y la autorización de la transición
+operativa son decisiones distintas: se puede revisar el código aislado
+cuando cumpla los criterios de preparación, manteniendo bloqueada cualquier
+operación real no certificada.
+
+El inventario sintético incluye privilegios efectivos de conexión, esquema,
+tabla, columna, secuencia, ejecución de funciones y membresías, incluyendo
+las opciones de PostgreSQL 17. El fixture compara grants de tabla, columna y
+secuencia de web y worker con sus concesiones explícitas y prueba desviaciones
+directas, por PUBLIC y por membresía. Esto no acredita todavía funciones,
+Data API, ni el manifiesto operativo completo. El workflow conserva únicamente
+los diarios sintéticos del ensayo histórico como artefactos de CI.
