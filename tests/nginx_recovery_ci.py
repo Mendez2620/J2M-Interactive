@@ -98,6 +98,20 @@ http {
 """
 
 
+def nonce_https_request(network, folder, image, route, nonce):
+    """Use the synthetic CA for an HTTPS request from the internal Docker network."""
+    http_input = (f"GET /api/{route} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n"
+                  f"X-J2M-Probe: {nonce}\r\n\r\n").encode()
+    client = ("import socket,ssl,json; c=ssl.create_default_context(cafile='/proof/ca.crt'); "
+              "s=c.wrap_socket(socket.create_connection(('proxy',8443),3),server_hostname='localhost'); "
+              f"s.sendall({http_input!r}); b=s.makefile('rb'); status=int(b.readline().split()[1]); "
+              "headers={k.lower():v.strip() for k,v in (line.decode().split(':',1) "
+              "for line in iter(b.readline,b'\\r\\n'))}; "
+              "print(json.dumps([status,headers.get('x-j2m-revision')]))")
+    return json.loads(run("docker", "run", "--rm", "--network", network, "--mount",
+                          f"type=bind,src={folder},dst=/proof,readonly", image, "python", "-c", client))
+
+
 def production_ids() -> dict[str, str]:
     result = {}
     for line in run("docker", "ps", "-a", "--format", "{{.Names}}|{{.ID}}").splitlines():

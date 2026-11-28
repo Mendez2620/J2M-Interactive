@@ -116,6 +116,85 @@ TRIGGERS = {
 }
 
 
+# Independently declared from a1b2c3d4e5f6, b2c3d4e5f6a7 and c3d4e5f6a7b8.
+# Each entry carries (PostgreSQL type, NOT NULL, canonical default).
+TIMESTAMP = "timestamp without time zone"
+TRANSITION_COLUMNS = {
+    "google_wallet_write_reservations": {
+        "operation_id": ("character varying(32)", True, None),
+        "owner_token": ("character varying(32)", True, None),
+        "issuer": ("character varying(128)", True, None),
+        "kind": ("character varying(16)", True, None),
+        "resource_id": ("character varying(255)", True, None),
+        "business_id": ("integer", True, None),
+        "customer_id": ("integer", False, None),
+        "state": ("character varying(16)", True, None),
+        "active_slot": ("integer", False, None),
+        "created_at": (TIMESTAMP, True, "now()"),
+        "updated_at": (TIMESTAMP, True, None),
+        "started_at": (TIMESTAMP, False, None),
+        "remote_resolved_at": (TIMESTAMP, False, None),
+        "remote_status": ("integer", False, None),
+    },
+    "platform_admin_sessions": {
+        "token_digest": ("character varying(64)", True, None),
+        "admin_id": ("integer", True, None),
+        "password_digest": ("character varying(64)", True, None),
+        "expires_at": (TIMESTAMP, True, None),
+        "revoked_at": (TIMESTAMP, False, None),
+    },
+    "admin_wallet_reviews": {
+        "id": ("character varying(32)", True, None),
+        "session_digest": ("character varying(64)", True, None),
+        "business_id": ("integer", True, None),
+        "candidate_ids": ("json", True, None),
+        "snapshot": ("json", True, None),
+        "fingerprint": ("character varying(64)", True, None),
+        "created_at": (TIMESTAMP, True, None),
+        "expires_at": (TIMESTAMP, True, None),
+        "state": ("character varying(16)", True, "'prepared'::character varying"),
+        "confirmed_at": (TIMESTAMP, False, None),
+        "claimed_at": (TIMESTAMP, False, None),
+        "owner": ("character varying(32)", False, None),
+        "finished_at": (TIMESTAMP, False, None),
+        "result": ("json", False, None),
+    },
+    "google_wallet_referral_jobs": {
+        "id": ("integer", True, "nextval('google_wallet_referral_jobs_id_seq'::regclass)"),
+        "business_id": ("integer", True, None),
+        "customer_id": ("integer", False, None),
+        "cursor": ("integer", True, "0"),
+        "scheduled_expiry": ("boolean", True, "false"),
+        "status": ("character varying(16)", True, "'pending'::character varying"),
+        "token": ("character varying(32)", False, None),
+        "attempts": ("integer", True, "0"),
+        "run_at": (TIMESTAMP, True, None),
+        "locked_at": (TIMESTAMP, False, None),
+        "created_at": (TIMESTAMP, True, None),
+        "updated_at": (TIMESTAMP, True, None),
+        "outcome": ("character varying(24)", False, None),
+    },
+}
+
+
+def verify_transition_columns(revision, catalog):
+    if revision not in {"9d0e1f2a3b4c", "c3d4e5f6a7b8"}:
+        raise ValueError("Unknown transition revision")
+    prefixes = tuple(f"column:{table}." for table in TRANSITION_COLUMNS)
+    claim = "column:google_wallet_sync_jobs.claim_token"
+    expected = {}
+    if revision == "c3d4e5f6a7b8":
+        expected = {
+            f"column:{table}.{column}": [type_, not_null, "", "", default, None]
+            for table, columns in TRANSITION_COLUMNS.items()
+            for column, (type_, not_null, default) in columns.items()
+        }
+        expected[claim] = ["character varying(32)", False, "", "", None, None]
+    observed = {key: row for key, row in catalog.items() if key == claim or key.startswith(prefixes)}
+    if observed != expected:
+        raise ValueError("Unexpected transition column definition")
+
+
 def verify_fixture_security(revision, catalog):
     """Check source-derived security invariants, independent of before/after drift checks."""
     from scripts.check_transition_relation_manifest import verify_relation_manifest
@@ -123,6 +202,7 @@ def verify_fixture_security(revision, catalog):
     relations = {key.removeprefix("relation:"): row for key, row in catalog.items()
                  if key.startswith("relation:")}
     verify_relation_manifest(revision, [f"{row[0]}:{name}" for name, row in relations.items()])
+    verify_transition_columns(revision, catalog)
     expected_rls = LEGACY_RLS
     if revision == "c3d4e5f6a7b8":
         expected_rls |= TARGET_RLS_ADDITIONS

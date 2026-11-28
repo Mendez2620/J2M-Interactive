@@ -349,3 +349,25 @@ La búsqueda de referencias a service_role y a rutas REST, GraphQL y RPC
 en app, scripts, workflows y la configuración Railway versionada solo
 encontró las referencias del runbook. La inspección de consumidores
 externos y esquemas publicados sigue siendo una condición operativa.
+
+### Contrato declarado para la migración y HTTPS sobre el origen
+
+La matriz PostgreSQL comprueba los tipos, nulabilidad, identidad y defaults
+de las cuatro tablas añadidas y de claim_token. En el head legado esos
+campos deben estar ausentes. La lista se deriva del DDL de las tres
+migraciones. Los cuerpos de las seis rutinas se contrastan por separado.
+
+El fixture inicia un proxy interno y un web y worker de diagnóstico con
+la identidad lectora sintética. Las sondas HTTPS deben correlacionar cada
+nonce con el upstream esperado, confirmar la revisión de la imagen y
+conservar el mismo clúster y head. La recuperación de backend se ensaya
+sobre el origen ya migrado, sin restaurar datos sobre él. La barrera de
+ingreso a escritores permanece activa durante las sondas. Tras la salida
+normal se comprueba CONNECT de los escritores. Los ensayos de terminación
+del supervisor se conservan por separado. La restauración de CONNECT del
+fixture no habilita un corte operativo.
+
+Una tarea simulada compite por el mismo archivo de exclusión antes
+del respaldo y vuelve a intentarlo al finalizar. Se registra el tiempo
+desde la adquisición de la exclusión hasta su liberación. Esta medición
+incluye las negativas del fixture y no mide una ventana operativa.

@@ -4,7 +4,7 @@ from copy import deepcopy
 from contextlib import contextmanager
 from difflib import unified_diff
 from unittest.mock import patch
-from time import monotonic
+from time import monotonic, sleep
 from pathlib import Path
 import os
 import re
@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT))
 from scripts.selfhost_backup import (
     _hash_file, exclusive_lock, integral_backup, restore_integral_isolated, verify_integral_set, verify_transition_accounting,
 )
-from scripts.historical_transition_evidence import LEGACY_SHA
+from scripts.historical_transition_evidence import Backend, FINAL_HEAD, LEGACY_SHA, prove_https
 from scripts.check_transition_relation_manifest import RELATION_QUERY, verify_relation_manifest
 from scripts.check_transition_security_catalog import CATALOG_QUERY, verify_catalog, verify_fixture_security
 
@@ -241,7 +241,21 @@ def certify_pre_migration_backup(network, sql, root, ca):
 
     # The disposable DB normally inherits CONNECT from PUBLIC. During the
     # archive window only the exporter and the restricted reader may connect.
-    with exclusive_lock(root / ".operations.lock"):
+    lock_file = root / ".operations.lock"
+
+    def simulated_backup_task():
+        return subprocess.run(
+            [sys.executable, "-c",
+             "from pathlib import Path; import sys; from scripts.selfhost_backup import exclusive_lock; "
+             "context = exclusive_lock(Path(sys.argv[1])); context.__enter__(); context.__exit__(None, None, None)",
+             str(lock_file)], cwd=ROOT, capture_output=True, timeout=20,
+        )
+
+    started = monotonic()
+    with exclusive_lock(lock_file):
+        competing_task = simulated_backup_task()
+        if competing_task.returncode == 0 or b"Ya existe una" not in competing_task.stderr:
+            raise RuntimeError("A simulated backup task bypassed the transition lock")
         sql("REVOKE CONNECT ON DATABASE full_schema FROM PUBLIC; "
             "GRANT CONNECT ON DATABASE full_schema TO j2m_backup",
             database=database).check_returncode()
@@ -277,6 +291,125 @@ def certify_pre_migration_backup(network, sql, root, ca):
             sql("GRANT CONNECT ON DATABASE full_schema TO PUBLIC; "
                 "REVOKE CONNECT ON DATABASE full_schema FROM j2m_backup,j2m_migrator",
                 database=database).check_returncode()
+            for role in ("j2m_schema_web", "j2m_schema_worker"):
+                sql("SELECT 1", role, database=database).check_returncode()
+    simulated_backup_task().check_returncode()
+    print(f"Synthetic admission and task lock restored after {monotonic() - started:.2f}s.")
+
+
+def attest_fenced_origin(network, ca, image, revision, sql):
+    """Attest the migrated source through Nginx while only readers can enter."""
+    from nginx_recovery_ci import NGINX_IMAGE, nonce_https_request, proxy_config, run, write_certificates
+
+    if not re.fullmatch(r"j2m-roles-[0-9a-f]{8}-internal", network):
+        raise ValueError("Unexpected synthetic HTTPS network")
+    prefix = network.removesuffix("-internal")
+    names = {role: f"{prefix}-attest-{role}" for role in ("web", "worker", "proxy")}
+    db = json.loads(run("docker", "inspect", prefix))[0]["Id"]
+    network_spec = json.loads(run("docker", "network", "inspect", network))[0]
+    if (not network_spec["Internal"] or {entry["Name"] for entry in network_spec["Containers"].values()}
+            != {prefix, f"{prefix}-pooler"}):
+        raise RuntimeError("Unexpected initial Docker network membership")
+    network_id = network_spec["Id"]
+    folder = ca.parent / "https"
+    folder.mkdir(mode=0o755)
+    write_certificates(folder)
+    (folder / "nginx.conf").write_text(proxy_config().replace(
+        "access_log off;",
+        "log_format proof '$http_x_j2m_probe $uri $upstream_addr $upstream_status'; access_log /dev/stdout proof;",
+    ), encoding="utf-8")
+    db_url = ("postgresql://j2m_backup:synthetic-only@db/full_schema"
+              "?sslmode=verify-full&sslrootcert=/run/j2m/supabase-ca.pem")
+    started = monotonic()
+    selected = image
+    selected_revision = revision
+
+    def query(statement):
+        result = sql(statement, database="full_schema")
+        result.check_returncode()
+        return result.stdout.decode().strip()
+
+    def snapshot():
+        observed = json.loads(run("docker", "network", "inspect", network))[0]
+        services = {role: json.loads(run("docker", "inspect", name))[0] for role, name in names.items()}
+        if (observed["Id"] != network_id or not observed["Internal"]
+                or db not in observed["Containers"]
+                or query("SELECT version_num FROM alembic_version") != FINAL_HEAD):
+            raise RuntimeError("Fenced origin changed during HTTPS attestation")
+        for role in ("web", "worker", "proxy"):
+            service = services[role]
+            if (not service["State"]["Running"] or service["HostConfig"]["PortBindings"]
+                    or set(service["NetworkSettings"]["Networks"]) != {network}
+                    or service["Config"]["Labels"].get("j2m.synthetic.role") != role
+                    or (role != "proxy" and service["Image"] != selected)):
+                raise RuntimeError("Unexpected synthetic HTTPS service identity")
+        if observed["Containers"].keys() != {db, *(item["Id"] for item in services.values()), *pooler_ids}:
+            raise RuntimeError("Unexpected network member during attestation")
+        web = services["web"]
+        return Backend(web["Image"], web["Id"], web["NetworkSettings"]["Networks"][network]["IPAddress"])
+
+    pooler_ids = set(network_spec["Containers"]) - {db}
+    def start_services():
+        for role in ("web", "worker"):
+            command = () if role == "web" else ("flask", "--app", "run.py", "run-google-wallet-sync-worker")
+            process = "web" if role == "web" else "google-wallet-worker"
+            run("docker", "run", "-d", "--name", names[role], "--network", network,
+                "--network-alias", role, "--label", f"j2m.synthetic.role={role}",
+                "--env-file", str(ROOT / ".env.wallet-demo.example"),
+                "-e", f"J2M_PROCESS_TYPE={process}", "-e", f"J2M_RELEASE_IMAGE=j2m-interactive:{selected_revision or ''}",
+                "-e", f"DATABASE_URL={db_url}", "-e", "DATABASE_SSLMODE=verify-full",
+                "-e", "GOOGLE_WALLET_MODE=disabled", "-e", "APPLE_WALLET_MODE=disabled", "--mount",
+                f"type=bind,src={ca},dst=/run/j2m/supabase-ca.pem,readonly", selected, *command)
+    def attest():
+        for role in ("web", "worker"):
+            for _ in range(30):
+                health = subprocess.run(
+                    ["docker", "exec", names[role], "python", "scripts/container_healthcheck.py"],
+                    capture_output=True, timeout=10,
+                )
+                if health.returncode == 0:
+                    break
+                sleep(.25)
+            else:
+                raise RuntimeError(f"Synthetic {role} healthcheck did not pass")
+        return prove_https(
+            snapshot, lambda route, nonce: nonce_https_request(network, folder, image, route, nonce),
+            lambda: run("docker", "logs", names["proxy"]), revision=selected_revision,
+        )
+
+    try:
+        start_services()
+        run("docker", "run", "-d", "--name", names["proxy"], "--network", network, "--network-alias", "proxy",
+            "--label", "j2m.synthetic.role=proxy", "--mount", f"type=bind,src={folder},dst=/etc/nginx/tls,readonly",
+            NGINX_IMAGE, "nginx", "-c", "/etc/nginx/tls/nginx.conf", "-g", "daemon off;")
+        backend = attest()
+        run("docker", "rm", "-f", names["web"], names["worker"])
+        try:
+            snapshot()
+        except RuntimeError:
+            pass
+        except subprocess.CalledProcessError:
+            pass
+        else:
+            raise RuntimeError("Missing fenced backend was accepted")
+        for role in ("j2m_schema_web", "j2m_schema_worker"):
+            assert sql("SELECT 1", role, database="full_schema").returncode
+        legacy_tag = "j2m-interactive:reconstructed-" + LEGACY_SHA
+        legacy = json.loads(run("docker", "image", "inspect", legacy_tag))[0]
+        if legacy["Config"]["Labels"].get("org.opencontainers.image.revision") != LEGACY_SHA:
+            raise RuntimeError("Recovery image does not match the historical revision")
+        selected, selected_revision = legacy["Id"], None
+        start_services()
+        run("docker", "exec", names["proxy"], "nginx", "-c", "/etc/nginx/tls/nginx.conf", "-s", "reload")
+        recovered = attest()
+        if recovered.container == backend.container:
+            raise RuntimeError("Expected a different recovered backend")
+        verify_transition_accounting(query)
+        print(f"Same-origin fenced HTTPS and backend recovery: {monotonic() - started:.2f}s, "
+              f"target={backend.container}, recovered={recovered.container}")
+    finally:
+        for name in names.values():
+            subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=30)
 
 
 def exercise_application_schema(network, run, sql, connection, pool_control, ca, operation):
@@ -650,6 +783,9 @@ print("Dedicated migrator bigint lock, commit boundaries, role cleanup and repla
             for role in ("j2m_schema_web", "j2m_schema_worker"):
                 assert sql("SELECT 1", role, database="full_schema").returncode
             print("Legacy backup exclusion and writer admission gate held through migration.")
+            if candidate.startswith("j2m-interactive:transition-"):
+                attest_fenced_origin(network, ca, metadata["Id"], checkout, sql)
+
 
             sql(BACKUP_GRANTS, database=destination).check_returncode()
             flow = (ROOT / "tests/postgres_referral_worker_flow.py").read_text()
