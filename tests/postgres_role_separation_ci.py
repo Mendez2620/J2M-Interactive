@@ -143,6 +143,7 @@ EOF
 cat > /tmp/j2m-pool.ini <<'EOF'
 [databases]
 full_restore_1 = host=db port=5432 dbname=full_restore_1
+full_schema = host=db port=5432 dbname=full_schema
 [pgbouncer]
 listen_addr = 0.0.0.0
 listen_port = 6432

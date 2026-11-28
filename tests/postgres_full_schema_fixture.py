@@ -81,6 +81,26 @@ FROM pg_sequences WHERE schemaname='public' ORDER BY sequencename;
 """
 
 
+def prove_incoming_membership_rejected(sql, database):
+    """Exercise the catalog query against a real, rollback-scoped incoming grant."""
+    from scripts.transition_membership_manifest import verify_fixture_memberships
+
+    for grant in ("", "CREATE ROLE fixture_external LOGIN; GRANT j2m_owner TO fixture_external;"):
+        result = sql(f"BEGIN; {grant} {CATALOG_QUERY} ROLLBACK;", database=database)
+        result.check_returncode()
+        catalog = json.loads(next(line for line in result.stdout.splitlines() if line.startswith(b"{")))
+        if not grant:
+            verify_fixture_memberships(catalog)
+            continue
+        try:
+            verify_fixture_memberships(catalog)
+        except ValueError:
+            if "membership:fixture_external:j2m_owner:postgres" not in catalog:
+                raise RuntimeError("The incoming grant did not reach the PostgreSQL catalog") from None
+        else:
+            raise AssertionError("Incoming membership from an external login was accepted")
+
+
 def prove_alternate_write_barrier(sql, database):
     def read():
         result = sql(CATALOG_QUERY, database=database)
@@ -145,7 +165,7 @@ ROLLBACK;
 
 
 @contextmanager
-def certify_pre_migration_backup(network, sql, root, ca):
+def certify_pre_migration_backup(network, sql, root, ca, pool_control):
     """Run the real integral backup with an independently exported snapshot."""
     database = "full_schema"
     output = root / "restricted-backups"
@@ -243,19 +263,23 @@ def certify_pre_migration_backup(network, sql, root, ca):
     # archive window only the exporter and the restricted reader may connect.
     lock_file = root / ".operations.lock"
 
-    def simulated_backup_task():
+    task_names = ("local-backup", "external-copy", "restore-test")
+
+    def simulated_backup_task(task):
         return subprocess.run(
             [sys.executable, "-c",
              "from pathlib import Path; import sys; from scripts.selfhost_backup import exclusive_lock; "
              "context = exclusive_lock(Path(sys.argv[1])); context.__enter__(); context.__exit__(None, None, None)",
-             str(lock_file)], cwd=ROOT, capture_output=True, timeout=20,
+             str(lock_file), task], cwd=ROOT, capture_output=True, timeout=20,
         )
 
     started = monotonic()
     with exclusive_lock(lock_file):
-        competing_task = simulated_backup_task()
-        if competing_task.returncode == 0 or b"Ya existe una" not in competing_task.stderr:
-            raise RuntimeError("A simulated backup task bypassed the transition lock")
+        for task in task_names:
+            competing_task = simulated_backup_task(task)
+            if competing_task.returncode == 0 or b"Ya existe una" not in competing_task.stderr:
+                raise RuntimeError(f"Simulated task bypassed the transition lock: {task}")
+        pool_control("DISABLE full_schema").check_returncode()
         sql("REVOKE CONNECT ON DATABASE full_schema FROM PUBLIC; "
             "GRANT CONNECT ON DATABASE full_schema TO j2m_backup",
             database=database).check_returncode()
@@ -293,12 +317,13 @@ def certify_pre_migration_backup(network, sql, root, ca):
                 database=database).check_returncode()
             for role in ("j2m_schema_web", "j2m_schema_worker"):
                 sql("SELECT 1", role, database=database).check_returncode()
-    simulated_backup_task().check_returncode()
+    for task in task_names:
+        simulated_backup_task(task).check_returncode()
     print(f"Synthetic admission and task lock restored after {monotonic() - started:.2f}s.")
 
 
-def attest_fenced_origin(network, ca, image, revision, sql):
-    """Attest the migrated source through Nginx while only readers can enter."""
+def attest_fenced_origin(network, ca, image, revision, sql, *, reopened=False):
+    """Attest the migrated source with either fenced or restored service identities."""
     from nginx_recovery_ci import NGINX_IMAGE, nonce_https_request, proxy_config, run, write_certificates
 
     if not re.fullmatch(r"j2m-roles-[0-9a-f]{8}-internal", network):
@@ -311,15 +336,13 @@ def attest_fenced_origin(network, ca, image, revision, sql):
             != {prefix, f"{prefix}-pooler"}):
         raise RuntimeError("Unexpected initial Docker network membership")
     network_id = network_spec["Id"]
-    folder = ca.parent / "https"
+    folder = ca.parent / ("https-reopened" if reopened else "https")
     folder.mkdir(mode=0o755)
     write_certificates(folder)
     (folder / "nginx.conf").write_text(proxy_config().replace(
         "access_log off;",
         "log_format proof '$http_x_j2m_probe $uri $upstream_addr $upstream_status'; access_log /dev/stdout proof;",
     ), encoding="utf-8")
-    db_url = ("postgresql://j2m_backup:synthetic-only@db/full_schema"
-              "?sslmode=verify-full&sslrootcert=/run/j2m/supabase-ca.pem")
     started = monotonic()
     selected = image
     selected_revision = revision
@@ -353,6 +376,10 @@ def attest_fenced_origin(network, ca, image, revision, sql):
         for role in ("web", "worker"):
             command = () if role == "web" else ("flask", "--app", "run.py", "run-google-wallet-sync-worker")
             process = "web" if role == "web" else "google-wallet-worker"
+            login = f"j2m_schema_{role}" if reopened else "j2m_backup"
+            password = f"synthetic-{login}" if reopened else "synthetic-only"
+            db_url = (f"postgresql://{login}:{password}@db/full_schema"
+                      "?sslmode=verify-full&sslrootcert=/run/j2m/supabase-ca.pem")
             run("docker", "run", "-d", "--name", names[role], "--network", network,
                 "--network-alias", role, "--label", f"j2m.synthetic.role={role}",
                 "--env-file", str(ROOT / ".env.wallet-demo.example"),
@@ -383,6 +410,19 @@ def attest_fenced_origin(network, ca, image, revision, sql):
             "--label", "j2m.synthetic.role=proxy", "--mount", f"type=bind,src={folder},dst=/etc/nginx/tls,readonly",
             NGINX_IMAGE, "nginx", "-c", "/etc/nginx/tls/nginx.conf", "-g", "daemon off;")
         backend = attest()
+        if reopened:
+            for role in ("web", "worker"):
+                login = f"j2m_schema_{role}"
+                probe = (
+                    "from run import app; from app.extensions import db; from sqlalchemy import text; "
+                    "app.app_context().push(); row=db.session.execute("
+                    "text('SELECT current_user,session_user,current_database()')).one(); "
+                    f"assert tuple(row) == {(login, login, 'full_schema')!r}"
+                )
+                run("docker", "exec", names[role], "python", "-c", probe)
+            verify_transition_accounting(query)
+            print(f"Reopened origin HTTPS and effective service identities: {monotonic() - started:.2f}s")
+            return
         run("docker", "rm", "-f", names["web"], names["worker"])
         try:
             snapshot()
@@ -741,8 +781,9 @@ print("Dedicated migrator bigint lock, commit boundaries, role cleanup and repla
             else:
                 raise AssertionError(f"Fixture accepted {change} drift at {head}")
         print(f"Declared relation ownership, ACL, RLS and membership verified for {head}.")
+        prove_incoming_membership_rejected(sql, "full_schema")
         if i == 0:
-            operation.enter_context(certify_pre_migration_backup(network, sql, root, ca))
+            operation.enter_context(certify_pre_migration_backup(network, sql, root, ca, pool_control))
         assert sql("SELECT version_num FROM alembic_version",
                    database="full_schema").stdout.strip() == head.encode()
         observed_relations = sql(RELATION_QUERY, database="full_schema")
@@ -772,8 +813,8 @@ print("Dedicated migrator bigint lock, commit boundaries, role cleanup and repla
         if origin[0] != restored[0] or origin[1] != restored[1]:
             diff = list(unified_diff([line.decode() for line in origin[1]], [line.decode() for line in restored[1]], n=0))
             raise RuntimeError(f"Restored J2M fixture differs (data matched={origin[0] == restored[0]}): " + "\n".join(diff[:20]))
-        def query(statement):
-            result = sql(statement, database=destination)
+        def query(statement, database=destination):
+            result = sql(statement, database=database)
             result.check_returncode()
             return result.stdout.decode().strip()
 
@@ -787,21 +828,26 @@ print("Dedicated migrator bigint lock, commit boundaries, role cleanup and repla
                 attest_fenced_origin(network, ca, metadata["Id"], checkout, sql)
 
 
-            sql(BACKUP_GRANTS, database=destination).check_returncode()
+            origin_database = "full_schema"
             flow = (ROOT / "tests/postgres_referral_worker_flow.py").read_text()
             checked = set()
 
             def run_service(role, source=flow):
                 if role not in checked:
-                    check_tls(role, destination)
-                    check_effective_pool(role, destination)
+                    check_tls(role, origin_database)
+                    check_effective_pool(role, origin_database)
                     checked.add(role)
-                app("python", "-c", source, role=role, database=destination)
+                app("python", "-c", source, role=role, database=origin_database)
 
+            started = monotonic()
             prove_scoped_grants_and_fence(
-                sql, destination, run_service,
+                sql, origin_database, run_service,
                 connection, pool_control,
             )
+            verify_transition_accounting(lambda statement: query(statement, origin_database))
+            print(f"Fenced-origin grants, coordinator interruptions and reopening: {monotonic() - started:.2f}s")
+            if candidate.startswith("j2m-interactive:transition-"):
+                attest_fenced_origin(network, ca, metadata["Id"], checkout, sql, reopened=True)
             verify_transition_accounting(query)
             # The lazy baseline is valid for an unused zero-balance account,
             # but must never certify an unexplained positive or negative balance.
@@ -834,7 +880,7 @@ print("Dedicated migrator bigint lock, commit boundaries, role cleanup and repla
                 raise RuntimeError("A regressed customer sequence was accepted")
             query("SELECT setval('public.customers_id_seq', 2, true)")
             customer_flow = (ROOT / "tests/postgres_customer_http_flow.py").read_text()
-            app("python", "-c", customer_flow, role="j2m_schema_web", database=destination)
+            run_service("j2m_schema_web", customer_flow)
             verify_transition_accounting(query)
             query("INSERT INTO transactions (business_id,customer_id,type,points_amount,"
                   "stamps_amount,purchase_amount,timestamp) VALUES (1,1,'earn',0,1,0,now())")

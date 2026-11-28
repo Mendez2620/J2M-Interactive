@@ -371,3 +371,31 @@ Una tarea simulada compite por el mismo archivo de exclusión antes
 del respaldo y vuelve a intentarlo al finalizar. Se registra el tiempo
 desde la adquisición de la exclusión hasta su liberación. Esta medición
 incluye las negativas del fixture y no mide una ventana operativa.
+
+### Secuencias y reapertura del origen sintético
+
+La declaración versionada del inventario identifica las 30 secuencias de
+origen y la nueva secuencia de destino. Para cada SERIAL de las claves
+primarias integer, la comprobación exige los parámetros PostgreSQL, el
+vínculo OWNED BY y el default nextval en la columna correcta. La nueva
+regresión SQL intenta otorgar el rol propietario a un login ajeno a J2M
+dentro de una transacción revertida y exige que el catálogo lo rechace.
+
+El alias full_schema de PgBouncer apunta a la base que se migró y sirvió
+los diagnósticos HTTPS. El fixture de grants y de interrupción de
+coordinadores usa ese alias. La reconexión por pool se verifica con
+current_database y current_user. En la reapertura, Nginx vuelve a
+atestarse con el par de identidades web y worker; los contenedores
+comprueban sus identidades SQL efectivas sobre full_schema. Las tres
+tareas simuladas comprueban la misma exclusión antes y después de la
+ventana. El volumen restaurado sigue disponible como destino separado
+para las negativas de contabilidad que alteran deliberadamente valores.
+
+Las pruebas de terminación del supervisor histórico tienen su propio
+ciclo de creación de recursos. Para completar la certificación todavía
+deben compartir una variante de la ventana desde el respaldo restringido,
+con las mismas identidades inmutables y el diario de ese origen. La
+declaración de columnas históricas fuera de las claves SERIAL también
+sigue pendiente. Las pruebas de Supavisor, la atribución externa y la
+validación de credenciales e imagen instaladas pertenecen a las puertas
+operativas A/B/C.

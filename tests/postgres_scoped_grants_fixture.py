@@ -1,4 +1,4 @@
-"""Draft fixture for scoped J2M service grants; exercised only against the restored synthetic schema."""
+"""Scoped J2M service-grant rehearsal against disposable PostgreSQL schemas."""
 from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
@@ -7,7 +7,7 @@ import time
 # Deliberately explicit: the fixture does not turn newly migrated objects into grants.
 OBJECTS = {
     "j2m_schema_web": {
-        "tables": {"businesses": "SELECT", "customers": "SELECT",
+        "tables": {"alembic_version": "SELECT", "businesses": "SELECT", "customers": "SELECT",
                    "transactions": "SELECT,INSERT", "loyalty_ledger_entries": "SELECT,INSERT"},
         "sequences": ("transactions_id_seq", "loyalty_ledger_entries_id_seq"),
     },
@@ -40,6 +40,8 @@ MIGRATOR_LOCK = (-1783214642, 9815)
 
 
 def prove_scoped_grants_and_fence(sql, database, service_flow, connection, pool_control):
+    if database not in {"full_schema", "full_restore_1"}:
+        raise ValueError("Unexpected synthetic writer database")
     def execute(statement, role="postgres"):
         return sql(statement, role, database=database)
 
@@ -341,13 +343,14 @@ COMMIT;
         _, rejected = newcomer.communicate(b"SELECT 1;\n", timeout=8)
         assert newcomer.returncode and b"disabled" in rejected.lower()
 
+    pool_control(f"ENABLE {database}").check_returncode()
     peer = connection(worker, database)
     try:
         peer.stdin.write(b"BEGIN; SELECT current_user,pg_backend_pid(); COMMIT; SELECT pg_backend_pid();\n")
         peer.stdin.flush()
         current, pid = peer.stdout.readline().strip().split(b"|")
         assert current == worker.encode() and peer.stdout.readline().strip() == pid
-        pool_control("DISABLE full_restore_1").check_returncode()
+        pool_control(f"DISABLE {database}").check_returncode()
         pool_blocked()
         # Database CONNECT is an independent gate even if the role remains LOGIN.
         execute(f"GRANT CONNECT ON DATABASE {database} TO j2m_backup,j2m_migrator; "
@@ -437,7 +440,7 @@ COMMIT;
         assert_service_manifest(json.loads(restored_inventory.stdout))
 
     def refence():
-        pool_control("DISABLE full_restore_1").check_returncode()
+        pool_control(f"DISABLE {database}").check_returncode()
         execute(script).check_returncode()
         assert execute(f"SELECT count(*) {active}").stdout.strip() == b"0"
         direct_blocked()
@@ -490,7 +493,7 @@ COMMIT;
     refence()
     restore_grants()
     execute(login).check_returncode()
-    interrupted("ENABLE full_restore_1;", pool=True)
+    interrupted(f"ENABLE {database};", pool=True)
     newcomer = connection(worker, database)
     _, error = newcomer.communicate(b"SELECT 1;\n", timeout=8)
     assert newcomer.returncode and b"permission denied for database" in error
@@ -499,13 +502,13 @@ COMMIT;
 
     restore_grants()
     execute(login).check_returncode()
-    pool_control("ENABLE full_restore_1").check_returncode()
+    pool_control(f"ENABLE {database}").check_returncode()
     direct_blocked()
     execute(f"GRANT CONNECT ON DATABASE {database} TO {roles}").check_returncode()
     for _ in range(5):
         reopened = connection(worker, database)
-        result, errors = reopened.communicate(b"SELECT current_user;\n", timeout=8)
-        if not reopened.returncode and not errors and result.strip() == worker.encode():
+        result, errors = reopened.communicate(b"SELECT current_user,current_database();\n", timeout=8)
+        if not reopened.returncode and not errors and result.strip() == f"{worker}|{database}".encode():
             break
         time.sleep(0.5)
     else:

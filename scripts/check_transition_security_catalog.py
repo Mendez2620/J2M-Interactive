@@ -195,6 +195,27 @@ def verify_transition_columns(revision, catalog):
         raise ValueError("Unexpected transition column definition")
 
 
+def verify_serial_definitions(revision, catalog):
+    """Validate the SERIAL declarations emitted for the Alembic integer primary keys."""
+    from scripts.check_transition_relation_manifest import expected_relations
+
+    sequences = {
+        relation.removeprefix("S:") for relation in expected_relations(revision)
+        if relation.startswith("S:")
+    }
+    expected = {}
+    for sequence in sequences:
+        table = sequence.removesuffix("_id_seq")
+        expected[f"sequence:{sequence}"] = [1, 1, 2147483647, 1, 1, False, table, "id", "a"]
+        if catalog.get(f"column:{table}.id") != [
+            "integer", True, "", "", f"nextval('{sequence}'::regclass)", None,
+        ]:
+            raise ValueError("Unexpected serial column definition")
+    observed = {key: value for key, value in catalog.items() if key.startswith("sequence:")}
+    if observed != expected:
+        raise ValueError("Unexpected sequence definition or ownership dependency")
+
+
 def verify_fixture_security(revision, catalog):
     """Check source-derived security invariants, independent of before/after drift checks."""
     from scripts.check_transition_relation_manifest import verify_relation_manifest
@@ -203,6 +224,7 @@ def verify_fixture_security(revision, catalog):
                  if key.startswith("relation:")}
     verify_relation_manifest(revision, [f"{row[0]}:{name}" for name, row in relations.items()])
     verify_transition_columns(revision, catalog)
+    verify_serial_definitions(revision, catalog)
     expected_rls = LEGACY_RLS
     if revision == "c3d4e5f6a7b8":
         expected_rls |= TARGET_RLS_ADDITIONS

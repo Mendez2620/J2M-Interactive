@@ -15,13 +15,18 @@ WHERE relnamespace='public'::regnamespace AND relkind IN ('r','p','S','v','m','f
 """
 
 
-def verify_relation_manifest(revision, observed):
+def expected_relations(revision):
     manifest = json.loads(Path(__file__).with_name("j2m_transition_relation_manifest.json").read_text(encoding="utf-8"))
     expected = set(manifest["legacy"])
     if revision == manifest["target"]:
         expected.update(manifest["additions"])
     elif revision != manifest["initial"]:
         raise ValueError("Unsupported revision")
+    return expected
+
+
+def verify_relation_manifest(revision, observed):
+    expected = expected_relations(revision)
     actual = set(observed)
     if len(actual) != len(observed) or actual != expected:
         raise ValueError(
