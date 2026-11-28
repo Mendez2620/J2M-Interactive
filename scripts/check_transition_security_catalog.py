@@ -241,12 +241,5 @@ def verify_fixture_security(revision, catalog):
                 if key.startswith("trigger:")}
     if triggers != {name: ["O", mask, routine, True] for name, (mask, routine) in TRIGGERS.items()}:
         raise ValueError("Unexpected fixture trigger definition")
-    membership = {key: value for key, value in catalog.items()
-                  if key.startswith(("membership:j2m_", "effective-membership:j2m_"))}
-    if membership != {
-        "membership:j2m_migrator:j2m_owner:postgres": [False, False, True],
-        "effective-membership:j2m_migrator:j2m_owner": [True, False, True],
-        "effective-membership:j2m_owner:pg_database_owner": [True, True, True],
-        "effective-membership:j2m_migrator:pg_database_owner": [True, False, True],
-    }:
-        raise ValueError("Unexpected fixture role membership")
+    from scripts.transition_membership_manifest import verify_fixture_memberships
+    verify_fixture_memberships(catalog)
