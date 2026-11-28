@@ -188,7 +188,12 @@ pool de 2 más 1 overflow (3), migrador con 2 conexiones como máximo
 14 conexiones de cliente. Revalidar lotes y cualquier conexión directa,
 límites por combinación usuario/base del pooler, conexiones gestionadas,
 sesiones históricas y reserva server-side. Los límites del servidor no
-equivalen a capacidad disponible del pooler. Si falta margen, detener el
+equivalen a capacidad disponible del pooler. El overlay candidato fija los
+procesos web y los tamaños de pool para web, worker y migrador. El check
+HTTP de disponibilidad comparte el pool del proceso Gunicorn que lo
+atiende. Una segunda réplica web o worker requiere volver a calcular el
+presupuesto. Las tres conexiones de respaldo y diagnóstico siguen siendo
+una reserva hasta acreditar la ventana completa. Si falta margen, detener el
 plan y reducir concurrencia/configuración antes de habilitar identidades.
 
 ## Autorización consolidada propuesta

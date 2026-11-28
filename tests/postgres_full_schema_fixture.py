@@ -101,7 +101,7 @@ def exercise_application_schema(network, run, sql, connection, pool_control, ca)
     for _, suffix in services.values():
         env[f"J2M_{suffix}_ENV_FILE"] = str(root / f"{suffix}.env")
 
-    def app(*args, role="j2m_migrator", database="full_schema", ca_override=None):
+    def app(*args, role="j2m_migrator", database="full_schema", ca_override=None, dedicated=False):
         service, _ = services[role]
         for login, (_, suffix) in services.items():
             path = root / f"{suffix}.env"
@@ -114,7 +114,7 @@ def exercise_application_schema(network, run, sql, connection, pool_control, ca)
             ]), encoding="utf-8")
         # Bootstrap only the disposable source from an empty catalog.
         # The transition itself uses the standalone guarded migrator.
-        dedicated = args[:3] == ("python", "-m", "scripts.run_certified_migration")
+        dedicated = dedicated or args[:3] == ("python", "-m", "scripts.run_certified_migration")
         options = (["-e", "PGOPTIONS=-c role=j2m_owner"]
                    if role == "j2m_migrator" and not dedicated else [])
         compose = ["docker", "compose", "-p", project, "-f", "compose.selfhost.yml",
@@ -150,9 +150,81 @@ def exercise_application_schema(network, run, sql, connection, pool_control, ca)
             "ctx=app.app_context(); ctx.push(); conn=db.session.connection(); "
             "assert conn.connection.driver_connection.info.ssl_in_use; "
             'observed=tuple(conn.execute(text("SELECT current_user,session_user,current_database()")).one()); '
-            f"assert observed == {(expected_role, role, database)!r}"
+            f"assert observed == {(expected_role, role, database)!r}; "
+            "import os; "
+            "assert db.engine.pool.size() == 2; "
+            f"assert int(os.environ['DATABASE_MAX_OVERFLOW']) == {int(role != 'j2m_migrator')}; "
+            "assert os.environ['J2M_PROCESS_TYPE'] != 'web' or os.environ['WEB_CONCURRENCY'] == '2'"
         )
         app("python", "-c", probe, role=role, database=database)
+
+    migration_probe = """
+from unittest.mock import patch
+from sqlalchemy import create_engine, text
+from sqlalchemy.pool import NullPool
+from app.extensions import db
+from run import app
+from scripts import run_certified_migration as migration
+import os
+import time
+
+with app.app_context():
+    peer_engine = create_engine(db.engine.url, poolclass=NullPool)
+    with peer_engine.connect() as peer:
+        lock = text("SELECT pg_try_advisory_lock(:key)")
+        unlock = text("SELECT pg_advisory_unlock(:key)")
+        params = {"key": migration.LOCK_KEY}
+        assert peer.scalar(lock, params)
+        peer.commit()
+        try:
+            migration.rehearse_upgrade(db.engine, app.config, environment=os.environ)
+        except RuntimeError as error:
+            assert str(error) == "Migration lock already held"
+        else:
+            raise AssertionError("A second migrator acquired an occupied bigint lock")
+        assert peer.scalar(unlock, params)
+        peer.commit()
+
+        original_upgrade = migration.command.upgrade
+        observed_pids = []
+
+        def check_lock_and_identity(config, target):
+            connection = config.attributes["j2m_migration_connection"]
+            for step in (lambda: None, lambda: original_upgrade(config, target)):
+                step()
+                connection.commit()
+                login, role, database, pid = migration._identity(connection)
+                assert (login, role, database) == ("j2m_migrator", "j2m_owner", "full_schema")
+                observed_pids.append(pid)
+                assert not peer.scalar(lock, params)
+                peer.commit()
+            assert observed_pids[0] == observed_pids[1]
+
+        with patch.object(migration.command, "upgrade", side_effect=check_lock_and_identity):
+            migration.rehearse_upgrade(db.engine, app.config, environment=os.environ)
+        assert peer.scalar(lock, params)
+        assert peer.scalar(unlock, params)
+        for _ in range(20):
+            alive = peer.scalar(text("SELECT EXISTS (SELECT FROM pg_stat_activity WHERE pid = :pid)"),
+                                {"pid": observed_pids[0]})
+            peer.commit()
+            if not alive:
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError("The migration backend remained connected")
+
+        try:
+            migration.rehearse_upgrade(db.engine, app.config, environment=os.environ)
+        except RuntimeError as error:
+            assert str(error) == "Source revision no longer eligible"
+        else:
+            raise AssertionError("The migration was replayed at the target revision")
+        assert peer.scalar(lock, params)
+        assert peer.scalar(unlock, params)
+    peer_engine.dispose()
+print("Dedicated migrator bigint lock, commit boundaries, role cleanup and replay denial verified.")
+"""
 
     for i, head in enumerate(("9d0e1f2a3b4c", "c3d4e5f6a7b8")):
         if i == 0:
@@ -170,7 +242,7 @@ def exercise_application_schema(network, run, sql, connection, pool_control, ca)
                 raise RuntimeError("Connection accepted an unrelated CA or failed for the wrong reason")
             app("python", "-c", SEED)
         else:
-            app("python", "-m", "scripts.run_certified_migration")
+            app("python", "-c", migration_probe, dedicated=True)
         sql(BACKUP_GRANTS, database="full_schema").check_returncode()
         assert sql("SELECT version_num FROM alembic_version",
                    database="full_schema").stdout.strip() == head.encode()
