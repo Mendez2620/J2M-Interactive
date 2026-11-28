@@ -11,7 +11,9 @@ from scripts.selfhost_transition_preflight import disabled, read_config
 
 ROLES = ("web", "worker", "migrator", "backup")
 CONTAINER_CA = "/run/j2m/supabase-ca.pem"
-WALLET_SECRET_PREFIXES = ("GOOGLE_WALLET_", "APPLE_WALLET_")
+WALLET_PREFIXES = ("GOOGLE_", "APPLE_")
+TRANSITION_WALLET_FIELDS = {"GOOGLE_WALLET_MODE", "APPLE_WALLET_MODE",
+                            "GOOGLE_WALLET_RECONCILIATION_ENABLED"}
 
 
 def validate_identity_files(files, expected_host, project_ref):
@@ -31,7 +33,13 @@ def validate_identity_files(files, expected_host, project_ref):
             raise ValueError("Environment file reused across roles")
         identities.add(identity)
         values = read_config(path)
-        if any(key.startswith("PG") or key == "GOOGLE_APPLICATION_CREDENTIALS" for key in values):
+        # Compose format: raw preserves quotes and whitespace that read_config
+        # would otherwise normalize. Require identical parsed values for every
+        # assignment, not just DATABASE_URL.
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+        if any(f"{key}={value}" not in lines or "\x00" in value for key, value in values.items()):
+            raise ValueError("Expected unquoted raw identity assignments")
+        if any(key.upper().startswith("PG") for key in values):
             raise ValueError("Unexpected PostgreSQL override")
         if role == "backup":
             if set(values) - {"DATABASE_URL", "DATABASE_SSL_ROOT_CERT"}:
@@ -40,13 +48,10 @@ def validate_identity_files(files, expected_host, project_ref):
                 ca = Path(values["DATABASE_SSL_ROOT_CERT"])
                 if not ca.is_absolute() or ca.is_symlink() or not ca.is_file():
                     raise ValueError("Expected a regular host root certificate")
-        elif (not disabled(values) or any(key.startswith(WALLET_SECRET_PREFIXES) and key not in
-                                          {"GOOGLE_WALLET_MODE", "APPLE_WALLET_MODE",
-                                           "GOOGLE_WALLET_RECONCILIATION_ENABLED"} for key in values)):
-            raise ValueError("Unexpected Wallet configuration in transition files")
-        raw_url = "DATABASE_URL=" + values["DATABASE_URL"]
-        if raw_url not in path.read_text(encoding="utf-8-sig").splitlines():
-            raise ValueError("Expected raw Compose database URL without quotes")
+        elif (not disabled(values) or any(key.startswith(WALLET_PREFIXES) and key not in
+                                          TRANSITION_WALLET_FIELDS for key in values)
+              or values.get("DATABASE_SSLMODE", "verify-full") != "verify-full"):
+            raise ValueError("Unexpected Wallet or TLS configuration in transition files")
         url = urlsplit(values["DATABASE_URL"])
         options = parse_qsl(url.query, keep_blank_values=True, strict_parsing=True)
         params = dict(options)

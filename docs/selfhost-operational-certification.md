@@ -103,3 +103,46 @@ afinidad o limpieza incierta, respaldo sin autenticación o discrepancia
 contable, presión de disco, fallo TLS o backend equivocado mantienen
 NO-GO. La sonda aprobada con la identidad histórica no certifica por sí
 misma los roles futuros ni una barrera operativa en Supavisor.
+
+
+## Controles adicionales de archivos y sonda
+
+El validador de candidatos rechaza discrepancias entre la interpretación
+normalizada y los valores de Compose raw en todas las asignaciones. Los
+archivos de transición no contienen campos de Google o Apple distintos
+de los modos deshabilitados y la reconciliación deshabilitada, incluso
+si el proveedor no los usaría. DATABASE_SSLMODE, si aparece, debe ser
+verify-full. La validación sigue siendo estructural: no acredita ACL,
+arranque de Flask, compatibilidad de claves de aplicación ni conexión
+real. Conservar las claves HMAC y de cifrado estables que necesite cada
+proceso; no rotarlas por accidente al separar contraseñas de PostgreSQL.
+
+La sonda admite ahora un rol candidato explícito (web, worker, migrator
+o backup). Exige la identidad SQL current_user y session_user en ambas
+sesiones antes de adquirir el lock y después de COMMIT. Para candidatos
+se exige CA verificada del host explícita mediante --ca-file, destino
+Session pooler 5432 y TLS verify-full. No se utiliza la ruta de CA del
+contenedor como ruta de Windows. El diagnóstico sigue requiriendo
+autorización específica y no habilita la transición.
+
+    python -m scripts.probe_authorized_pooler --env-file <archivo-privado-del-rol> --expected-host <host-verificado> --expected-project-ref <proyecto-verificado> --expected-role j2m_web --ca-file <CA-verificada-del-host> --authorize-session-lock-probe
+
+Repetir para worker, migrator y backup solo cuando existan las
+identidades autorizadas. La identidad de migración se prueba primero
+sin SET ROLE; su capacidad limitada para asumir al propietario se
+certifica por separado. La documentación de Supabase confirma el
+formato ROLE.PROJECT_REF para el pooler compartido y advierte que cada
+rol puede abrir su propio pool de conexiones: dimensionar el presupuesto
+total antes de habilitar todos los servicios.
+
+El inventario reportado indica escritura de service_role sobre las 42
+tablas existentes. La barrera debe considerar también Data API,
+funciones RPC, vistas, grants predeterminados y consumidores externos.
+No confundir ausencia de grants para anon/authenticated con cierre
+de service_role. No revocar masivamente privilegios de roles gestionados
+ni cambiar las claves del proyecto durante la preparación.
+
+Referencias:
+- https://supabase.com/docs/guides/database/connecting-to-postgres
+- https://supabase.com/docs/guides/database/connection-management
+- https://supabase.com/docs/guides/api/securing-your-api

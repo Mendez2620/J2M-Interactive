@@ -63,3 +63,25 @@ class SelfHostIdentityFilesTests(unittest.TestCase):
         self.replace("web", "GOOGLE_WALLET_MODE=disabled", "GOOGLE_WALLET_MODE=real")
         with self.assertRaises(ValueError):
             self.validate()
+
+
+    def test_raw_compose_values_cannot_disagree_with_normalized_values(self):
+        for replacement in ('"disabled"', "'disabled'", " disabled", "disabled "):
+            with self.subTest(replacement=replacement):
+                previous = self.paths["web"].read_text()
+                self.replace("web", "APPLE_WALLET_MODE=disabled", "APPLE_WALLET_MODE=" + replacement)
+                with self.assertRaises(ValueError):
+                    self.validate()
+                self.paths["web"].write_text(previous)
+
+    def test_provider_credentials_and_tls_conflict_are_rejected(self):
+        previous = self.paths["web"].read_text()
+        for assignment in ("GOOGLE_SERVICE_ACCOUNT_JSON=synthetic", "APPLE_KEY_PATH=/private/key",
+                           "APPLE_PASS_AUTH_KEYS=synthetic", "GOOGLE_APPLICATION_CREDENTIALS=/private/key",
+                           "DATABASE_SSLMODE=require", "pgoptions=synthetic"):
+            with self.subTest(assignment=assignment):
+                self.paths["web"].write_text(previous + assignment + "\n")
+                with self.assertRaises(ValueError):
+                    self.validate()
+        self.paths["web"].write_text(previous + "DATABASE_SSLMODE=verify-full\n")
+        self.validate()
