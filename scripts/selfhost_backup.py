@@ -794,7 +794,7 @@ def database_backup(env_file: Path, output_dir: Path, key_file: Path, retries: i
                     network: str = "bridge", timeout: int = 900,
                     allow_insecure_synthetic: bool = False,
                     backup_id: str | None = None, retain: bool = True,
-                    acquire_lock: bool = True) -> Path:
+                    acquire_lock: bool = True, *, restricted_snapshot: str | None = None) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     key = load_dpapi_key(key_file)
     root_cert = None
@@ -809,6 +809,20 @@ def database_backup(env_file: Path, output_dir: Path, key_file: Path, retries: i
             raise ValueError("DATABASE_SSL_ROOT_CERT debe ser un archivo regular existente.")
         container_root_cert = "/run/j2m/database-root-ca.crt"
     database_url = _read_database_url(env_file, allow_insecure_synthetic, container_root_cert)
+    dump_options = ""
+    if restricted_snapshot is not None:
+        parsed = urlsplit(database_url)
+        if (allow_insecure_synthetic or retain or acquire_lock or backup_id is None
+                or parsed.username != "j2m_backup" or parsed.hostname != "db"
+                or parsed.path != "/full_schema" or root_cert is None or parsed.fragment
+                or parsed.port not in (None, 5432)
+                or dict(parse_qsl(parsed.query)) != {
+                    "sslmode": "verify-full", "sslrootcert": container_root_cert,
+                }
+                or os.environ.get("J2M_SYNTHETIC_BACKUP_TEST") != "1"
+                or not re.fullmatch(r"[0-9A-F]{8}-[0-9A-F]{8}-[0-9]+", restricted_snapshot)):
+            raise ValueError("El respaldo restringido exige un snapshot sintético integral verificado.")
+        dump_options = f" --enable-row-security --schema=public --snapshot={restricted_snapshot}"
     lock_file = output_dir.parent / ".operations.lock"
     log_path = output_dir.parent / "logs" / "backup.jsonl"
     with (exclusive_lock(lock_file) if acquire_lock else nullcontext()):
@@ -828,7 +842,7 @@ def database_backup(env_file: Path, output_dir: Path, key_file: Path, retries: i
                 command.extend(["--mount", f"type=bind,src={root_cert},dst={container_root_cert},readonly"])
             command.extend(["-e", "DATABASE_URL", "postgres:17-alpine", "sh", "-eu", "-c",
                        'test -s /etc/ssl/certs/ca-certificates.crt && '
-                       'pg_dump --format=custom --no-owner --no-acl "$DATABASE_URL"'])
+                       'pg_dump --format=custom --no-owner --no-acl' + dump_options + ' "$DATABASE_URL"'])
             child_env = os.environ.copy()
             child_env["DATABASE_URL"] = database_url
             try:
@@ -890,7 +904,9 @@ def integral_backup(env_file: Path, media_root: Path | None, output_dir: Path,
                     timeout: int = 900,
                     allow_insecure_synthetic: bool = False,
                     media_volume: str | None = None,
-                    media_image: str | None = None) -> Path:
+                    media_image: str | None = None, *,
+                    restricted_snapshot: str | None = None,
+                    verify_restored_coverage=None) -> Path:
     """Create a DB-first consistent set and publish its authenticated index last.
 
     Media writes persist and fsync their new object before the database commit,
@@ -898,12 +914,16 @@ def integral_backup(env_file: Path, media_root: Path | None, output_dir: Path,
     to the completed database snapshot exists when the subsequent media scan
     starts. A concurrent rewrite of an inventoried object fails closed.
     """
+    if (restricted_snapshot is None) != (verify_restored_coverage is None):
+        raise ValueError("El respaldo restringido exige una comprobación independiente de cobertura.")
     output_dir.mkdir(parents=True, exist_ok=True)
     with exclusive_lock(output_dir.parent / ".operations.lock"):
         backup_id = secrets.token_hex(16)
         database = database_backup(env_file, output_dir, key_file, retries, network,
                                    timeout, allow_insecure_synthetic, backup_id,
-                                   retain=False, acquire_lock=False)
+                                   retain=False, acquire_lock=False,
+                                   **({"restricted_snapshot": restricted_snapshot}
+                                      if restricted_snapshot is not None else {}))
         media = None
         index = None
         try:
@@ -917,7 +937,11 @@ def integral_backup(env_file: Path, media_root: Path | None, output_dir: Path,
             # Restore the exact dump and compare its managed references before
             # publishing the common index. An incomplete/cross-tenant set is
             # never selectable by retention, cloud copy or weekly restore.
-            validate_integral_snapshot(database, media, key_file, backup_id, timeout)
+            if restricted_snapshot is None:
+                validate_integral_snapshot(database, media, key_file, backup_id, timeout)
+            else:
+                validate_integral_snapshot(database, media, key_file, backup_id, timeout,
+                                           verify_restored_coverage=verify_restored_coverage)
             components = []
             for kind, path in (("postgresql", database), ("media", media)):
                 components.append({"kind": kind, "filename": path.name,
@@ -925,6 +949,8 @@ def integral_backup(env_file: Path, media_root: Path | None, output_dir: Path,
             payload = {"schema": 1, "backup_id": backup_id,
                        "created_at": datetime.now(timezone.utc).isoformat(),
                        "consistency": "database-first-append-only-media", "components": components}
+            if restricted_snapshot is not None:
+                payload["database_profile"] = "synthetic-restricted-rls"
             index = output_dir / f"j2m-set-{backup_id}.j2mbackup"
             _encrypted_json_bundle(payload, index, load_dpapi_key(key_file),
                                    "integral-set", backup_id)
@@ -947,6 +973,10 @@ def verify_integral_set(index: Path, key_file: Path) -> bool:
         payload = _decrypt_json_bundle(index, key)
         backup_id = _safe_backup_id(payload["backup_id"])
         if payload.get("schema") != 1 or len(payload.get("components", [])) != 2:
+            return False
+        if "database_profile" in payload and (
+                payload["database_profile"] != "synthetic-restricted-rls"
+                or os.environ.get("J2M_SYNTHETIC_BACKUP_TEST") != "1"):
             return False
         expected = {"postgresql", "media"}
         for component in payload["components"]:
@@ -1353,7 +1383,7 @@ def _restored_media_references(name: str, archived: set[str]) -> set[str]:
 def restore_isolated(backup: Path, key_file: Path, lock_file: Path | None = None,
                      timeout: int = 900, media_backup_path: Path | None = None,
                      backup_id: str | None = None,
-                     acquire_lock: bool = True) -> RestoreReport:
+                     acquire_lock: bool = True, *, verify_restored_coverage=None) -> RestoreReport:
     lock = exclusive_lock(lock_file or backup.parent / ".operations.lock") \
         if acquire_lock else nullcontext()
     with lock:
@@ -1369,6 +1399,8 @@ def restore_isolated(backup: Path, key_file: Path, lock_file: Path | None = None
                        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
         try:
             _wait_postgres(name)
+            if verify_restored_coverage is not None:
+                _psql(name, "CREATE ROLE j2m_backup NOLOGIN; DROP SCHEMA public")
             _restore_database_stream(backup, key, name, timeout)
             revision = _psql(name, "SELECT version_num FROM alembic_version")
             if revision != EXPECTED_ALEMBIC_HEAD:
@@ -1395,6 +1427,13 @@ def restore_isolated(backup: Path, key_file: Path, lock_file: Path | None = None
                     raise ValueError("Falta el identificador del conjunto de medios.")
                 archived = set(inspect_media_backup(media_backup_path, key_file, backup_id))
                 _restored_media_references(name, archived)
+            if verify_restored_coverage is not None:
+                def query(statement):
+                    return _psql(name, statement)
+
+                verify_transition_accounting(query)
+                if verify_restored_coverage(query) is not True:
+                    raise RuntimeError("La restauración no coincide con el inventario independiente.")
             return RestoreReport(revision, *counts)
         finally:
             subprocess.run(["docker", "rm", "-f", name], stdout=subprocess.DEVNULL,
@@ -1403,20 +1442,22 @@ def restore_isolated(backup: Path, key_file: Path, lock_file: Path | None = None
 
 def validate_integral_snapshot(database_backup: Path, media_backup_path: Path,
                                key_file: Path, backup_id: str,
-                               timeout: int = 900) -> RestoreReport:
+                               timeout: int = 900, *, verify_restored_coverage=None) -> RestoreReport:
     return restore_isolated(database_backup, key_file, timeout=timeout,
                             media_backup_path=media_backup_path,
-                            backup_id=backup_id, acquire_lock=False)
+                            backup_id=backup_id, acquire_lock=False,
+                            verify_restored_coverage=verify_restored_coverage)
 
 
-def _integral_components(index: Path, key_file: Path) -> tuple[str, Path, Path]:
+def _integral_components(index: Path, key_file: Path) -> tuple[str, Path, Path, bool]:
     if not verify_integral_set(index, key_file):
         raise ValueError("El conjunto integral no superó la autenticación completa.")
     payload = _decrypt_json_bundle(index, load_dpapi_key(key_file))
     backup_id = _safe_backup_id(payload["backup_id"])
     components = {item["kind"]: index.parent / item["filename"]
                   for item in payload["components"]}
-    return backup_id, components["postgresql"], components["media"]
+    return (backup_id, components["postgresql"], components["media"],
+            payload.get("database_profile") == "synthetic-restricted-rls")
 
 
 def verify_transition_accounting(query):
@@ -1512,7 +1553,7 @@ def restore_integral_isolated(index: Path, key_file: Path, image: str,
                 not re.fullmatch(r"[0-9a-f]{64}", expected_index_sha256)
                 or not secrets.compare_digest(_hash_file(index), expected_index_sha256)):
             raise RuntimeError("El índice no coincide con el conjunto aprobado.")
-        backup_id, database, media = _integral_components(index, key_file)
+        backup_id, database, media, restricted = _integral_components(index, key_file)
         key = load_dpapi_key(key_file)
         suffix = secrets.token_hex(6)
         pg_name = "j2m-restore-pg-" + suffix
@@ -1540,6 +1581,8 @@ def restore_integral_isolated(index: Path, key_file: Path, image: str,
                 if observed != postgres_image or not re.fullmatch(r"postgres \(PostgreSQL\) 17\.[0-9]+(?: .*)?", version):
                     raise RuntimeError("Identidad o versión PostgreSQL inesperada.")
             _wait_postgres(pg_name)
+            if restricted:
+                _psql(pg_name, "CREATE ROLE j2m_backup NOLOGIN; DROP SCHEMA public")
             _restore_database_stream(database, key, pg_name, timeout)
             archived = set(inspect_media_backup(media, key_file, backup_id))
             referenced = _restored_media_references(pg_name, archived)

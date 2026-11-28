@@ -230,3 +230,46 @@ con TLS verify-full. Comprueba el login `j2m_migrator` antes de asumir
 Alembic. Si la revisión de origen difiere o el resultado es incierto,
 la ejecución se detiene. Inspeccionar el head efectivo antes de plantear
 otra ejecución. La ruta legada de Compose permanece intacta.
+
+### Evidencia adicional de catálogo y respaldo
+
+El fixture PostgreSQL compara un inventario de propietarios, ACL, columnas,
+secuencias, funciones, triggers, políticas, defaults y membresías directas y
+efectivas. El ensayo de gateway usa roles descartables para modelar privilegios
+heredados, permisos de PUBLIC y ejecución de una función SECURITY DEFINER. La
+revocación sintética queda limitada a los objetos nombrados por el ensayo.
+La conciliación contra una matriz aprobada del proveedor sigue pendiente.
+
+El runner incluye una modalidad sintética para j2m_backup. Exige TLS verify-full,
+el destino db/full_schema, el identificador de un snapshot exportado y una
+comprobación independiente del contenido restaurado. La prueba mantiene viva la
+transacción exportadora y compara relaciones, filas y estado de las secuencias
+en una fuente sintética sin escritores. Las secuencias no usan MVCC. Un ensayo
+operativo tendrá que impedir cambios de secuencias desde todos los escritores
+hasta cerrar el respaldo. El índice integral solo se publica después de la
+restauración, la verificación contable y la comparación de cobertura.
+Los runners operativos y su programación no cambian.
+
+### Puntos de aprobación
+
+- **A.** Antes de aprovisionar, contrastar el inventario inicial con la lista
+  de esquemas expuestos por Data API y GraphQL, los endpoints REST y RPC y los
+  consumidores externos de la credencial service_role e histórica. Clasificar
+  las funciones privilegiadas y los objetos gestionados por el proveedor.
+  Acotar cualquier transferencia de propiedad a objetos J2M y comprobar
+  capacidad de SET ROLE y transferencia antes de ejecutar DDL. Abortar ante
+  discrepancias de ACL, membresías o consumidores sin atribución.
+- **B.** Autorizar separadamente el mantenimiento y la barrera de escritores
+  enumerados. Comprobar drenaje directo y por pooler, adquirir el lock de
+  respaldos y verificar la restauración del conjunto exacto y la contabilidad
+  antes de migrar. Ante resultado incierto conservar la barrera y comprobar
+  la revisión y el estado efectivos. Evitar reejecutar una migración incierta.
+- **C.** Autorizar la reapertura solo después de acreditar la revisión, el
+  upstream HTTPS, el pin y la ausencia de escritores adicionales. Reponer
+  los permisos exactos aprobados, comprobar los accesos efectivos y reanudar
+  las tareas con sus intervalos vigentes. Ante ambigüedad cerrar el ingreso
+  y restablecer la barrera.
+
+Los tiempos de los subensayos son evidencia sintética. La ventana completa
+todavía requiere integrar la coordinación de tareas, el supervisor y la
+reapertura en una misma ejecución.

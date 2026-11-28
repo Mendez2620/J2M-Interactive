@@ -1,9 +1,13 @@
 """Verify dump coverage against both migrated J2M schemas in the synthetic role harness."""
+from concurrent.futures import ThreadPoolExecutor
 from difflib import unified_diff
+from unittest.mock import patch
+from time import monotonic
 from pathlib import Path
 import os
 import re
 import subprocess
+import secrets
 import sys
 import json
 
@@ -11,8 +15,11 @@ from postgres_scoped_grants_fixture import prove_scoped_grants_and_fence
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from scripts.selfhost_backup import verify_transition_accounting
+from scripts.selfhost_backup import (
+    integral_backup, restore_integral_isolated, verify_integral_set, verify_transition_accounting,
+)
 from scripts.check_transition_relation_manifest import RELATION_QUERY, verify_relation_manifest
+from scripts.check_transition_security_catalog import CATALOG_QUERY, verify_catalog
 
 SEED = """
 from run import app
@@ -72,6 +79,165 @@ FROM pg_sequences WHERE schemaname='public' ORDER BY sequencename;
 """
 
 
+def prove_alternate_write_barrier(sql, database):
+    def read():
+        result = sql(CATALOG_QUERY, database=database)
+        result.check_returncode()
+        return json.loads(result.stdout)
+
+    approved = read()
+    # Reconcile against a captured catalog before and after exercising scoped
+    # revocation. Reserved provider roles are intentionally absent from this
+    # synthetic server; these disposable names model their privilege paths.
+    statement = """
+BEGIN;
+CREATE ROLE j2m_fixture_gateway NOLOGIN;
+CREATE ROLE j2m_fixture_writer NOLOGIN;
+GRANT j2m_fixture_writer TO j2m_fixture_gateway WITH INHERIT TRUE, SET FALSE;
+CREATE SCHEMA fixture_unrelated;
+CREATE TABLE fixture_unrelated.data (id integer);
+GRANT INSERT ON fixture_unrelated.data TO j2m_fixture_writer;
+GRANT UPDATE (name) ON public.businesses TO j2m_fixture_writer;
+GRANT UPDATE ON public.businesses TO PUBLIC;
+CREATE FUNCTION public.fixture_gateway_write() RETURNS void LANGUAGE sql SECURITY DEFINER
+SET search_path = pg_catalog AS $$ UPDATE public.businesses SET name=name WHERE false $$;
+DO $$ BEGIN
+    IF NOT pg_has_role('j2m_fixture_gateway','j2m_fixture_writer','USAGE')
+       OR NOT has_column_privilege('j2m_fixture_gateway','public.businesses','name','UPDATE')
+       OR NOT has_function_privilege('j2m_fixture_gateway','public.fixture_gateway_write()','EXECUTE')
+    THEN RAISE EXCEPTION 'Unexpected initial access'; END IF;
+END $$;
+REVOKE UPDATE ON public.businesses FROM PUBLIC;
+REVOKE UPDATE (name) ON public.businesses FROM j2m_fixture_writer;
+REVOKE EXECUTE ON FUNCTION public.fixture_gateway_write() FROM PUBLIC;
+DO $$ BEGIN
+    IF has_column_privilege('j2m_fixture_gateway','public.businesses','name','UPDATE')
+       OR has_function_privilege('j2m_fixture_gateway','public.fixture_gateway_write()','EXECUTE')
+       OR NOT has_table_privilege('j2m_fixture_gateway','fixture_unrelated.data','INSERT')
+    THEN RAISE EXCEPTION 'Scoped barrier mismatch'; END IF;
+END $$;
+SET LOCAL ROLE j2m_fixture_gateway;
+DO $$ BEGIN
+    BEGIN
+        PERFORM public.fixture_gateway_write();
+        RAISE EXCEPTION 'Gateway retained RPC access';
+    EXCEPTION WHEN insufficient_privilege THEN NULL;
+    END;
+END $$;
+ROLLBACK;
+"""
+    sql(statement, database=database).check_returncode()
+    verify_catalog(approved, read())
+
+    sql("GRANT UPDATE (name) ON public.businesses TO j2m_backup", database=database).check_returncode()
+    try:
+        try:
+            verify_catalog(approved, read())
+        except ValueError as error:
+            assert "changed=1" in str(error)
+        else:
+            raise AssertionError("Unexpected column grant was accepted")
+    finally:
+        sql("REVOKE UPDATE (name) ON public.businesses FROM j2m_backup", database=database).check_returncode()
+    verify_catalog(approved, read())
+
+
+def prove_restricted_integral_backup(network, sql, root, ca):
+    """Run the real integral backup with an independently exported snapshot."""
+    database = "full_schema"
+    output = root / "restricted-backups"
+    env_file = root / "restricted-backup.env"
+    env_file.write_text(f"DATABASE_URL=postgresql://j2m_backup:synthetic-only@db/{database}\n"
+                        f"DATABASE_SSL_ROOT_CERT={ca}\n", encoding="utf-8")
+    key_file = root / "synthetic-key"
+    logo = "businesses/1/logo/" + "a" * 32 + ".png"
+    logo_path = root / "media" / logo
+    logo_path.parent.mkdir(parents=True)
+    from PIL import Image
+    Image.new("RGBA", (2, 2), (255, 0, 0, 128)).save(logo_path)
+    sql(f"UPDATE public.businesses SET logo_path='{logo}' WHERE id=1", database=database).check_returncode()
+    coverage_queries = sql(DATA_QUERIES, database=database)
+    coverage_queries.check_returncode()
+    queries = coverage_queries.stdout.decode().splitlines()
+
+    def run_backup(expect_incomplete=False):
+        start = monotonic()
+        name = network.removesuffix("-internal")
+        process = subprocess.Popen(
+            ["docker", "exec", "-i", name, "psql", "-XqAt", "-v", "ON_ERROR_STOP=1",
+             "-U", "postgres", "-d", database],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, encoding="utf-8",
+        )
+
+        def read_snapshot():
+            process.stdin.write("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;\n"
+                                "SELECT pg_export_snapshot();\n" + RELATION_QUERY + ";\n"
+                                + "\n".join(queries) + "\n")
+            process.stdin.flush()
+            return [process.stdout.readline().rstrip("\r\n") for _ in range(len(queries) + 2)]
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            try:
+                snapshot_id, relations, *expected = executor.submit(read_snapshot).result(timeout=20)
+                if not snapshot_id or len(expected) != len(queries) or not all(expected):
+                    raise RuntimeError("Independent source inventory was incomplete")
+
+                def coverage(restored):
+                    # Include the exact relation set, otherwise new empty relations
+                    # could disappear without affecting the row comparison.
+                    destination = json.loads(restored(RELATION_QUERY))
+                    return (destination == json.loads(relations)
+                            and all(restored(statement) == row
+                                    for statement, row in zip(queries, expected, strict=True)))
+
+                with patch.dict(os.environ, {"J2M_SYNTHETIC_BACKUP_TEST": "1"}), patch(
+                    "scripts.selfhost_backup.load_dpapi_key", return_value=bytes(range(32))
+                ):
+                    try:
+                        index = integral_backup(
+                            env_file, root / "media", output, key_file, retries=1, network=network,
+                            timeout=180, restricted_snapshot=snapshot_id, verify_restored_coverage=coverage,
+                        )
+                    except RuntimeError as error:
+                        if not expect_incomplete or "inventario independiente" not in str(error):
+                            raise
+                    else:
+                        assert not expect_incomplete, "Incomplete RLS dump was certified"
+                        assert verify_integral_set(index, key_file)
+                        tag = "j2m-interactive:" + secrets.token_hex(20)
+                        source = os.environ.get("J2M_ROLE_FIXTURE_IMAGE", "j2m-interactive:wallet-demo-synthetic")
+                        subprocess.run(["docker", "image", "tag", source, tag], check=True, timeout=20)
+                        try:
+                            report = restore_integral_isolated(index, key_file, tag, timeout=180)
+                            assert report.businesses == 2 and report.customers == 2
+                        finally:
+                            subprocess.run(["docker", "image", "rm", tag], check=True, timeout=20,
+                                           stdout=subprocess.DEVNULL)
+                print(f"Restricted integral backup ({'RLS rejection' if expect_incomplete else 'verified'}): "
+                      f"{monotonic() - start:.2f}s")
+            finally:
+                process.stdin.close()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=10)
+                process.stdout.close()
+
+    run_backup()
+    before = {path.name for path in output.iterdir()}
+    sql("ALTER TABLE platform_admins ENABLE ROW LEVEL SECURITY; "
+        "CREATE POLICY synthetic_incomplete ON platform_admins FOR SELECT TO j2m_backup USING (false)",
+        database=database).check_returncode()
+    try:
+        run_backup(expect_incomplete=True)
+        assert {path.name for path in output.iterdir()} == before
+    finally:
+        sql("DROP POLICY synthetic_incomplete ON platform_admins; "
+            "ALTER TABLE platform_admins DISABLE ROW LEVEL SECURITY", database=database).check_returncode()
+
+
 def exercise_application_schema(network, run, sql, connection, pool_control, ca):
     sql("CREATE DATABASE full_schema OWNER j2m_owner").check_returncode()
 
@@ -107,7 +273,7 @@ def exercise_application_schema(network, run, sql, connection, pool_control, ca)
             path = root / f"{suffix}.env"
             path.write_text("\n".join([
                 *base_env, "GOOGLE_WALLET_MODE=disabled", "APPLE_WALLET_MODE=disabled",
-                "DATABASE_SSLMODE=verify-full",
+                "DATABASE_SSLMODE=verify-full", "DATABASE_POOL_TIMEOUT=1",
                 f"DATABASE_URL=postgresql://{login}:synthetic-{login}@db/{database}"
                 "?sslmode=verify-full&sslrootcert=/run/j2m/supabase-ca.pem",
                 "",
@@ -157,6 +323,45 @@ def exercise_application_schema(network, run, sql, connection, pool_control, ca)
             "assert os.environ['J2M_PROCESS_TYPE'] != 'web' or os.environ['WEB_CONCURRENCY'] == '2'"
         )
         app("python", "-c", probe, role=role, database=database)
+
+    def check_effective_pool(role, database):
+        # Run against the actual SQLAlchemy engine inside the candidate overlay.
+        # For web, launch two independent processes sharing the same login.
+        probe = """
+from contextlib import ExitStack
+import os
+import subprocess
+import sys
+from sqlalchemy import text
+from sqlalchemy.exc import TimeoutError
+from app.extensions import db
+from run import app
+
+env = os.environ
+process_type = env["J2M_PROCESS_TYPE"]
+expected = 2 if process_type == "migrator" else 3
+child = sys.argv[1] == "child"
+with app.app_context(), ExitStack() as stack:
+    for _ in range(expected):
+        connection = stack.enter_context(db.engine.connect())
+        assert connection.scalar(text("SELECT 1")) == 1
+    try:
+        with db.engine.connect():
+            raise AssertionError("Connection limit was not enforced")
+    except TimeoutError:
+        pass
+    if process_type == "web":
+        assert env["WEB_CONCURRENCY"] == "2"
+        if child:
+            assert connection.scalar(text(
+                "SELECT count(*) FROM pg_stat_activity WHERE usename=session_user "
+                "AND datname=current_database()"
+            )) == 6
+        else:
+            subprocess.run([sys.executable, "-c", sys.argv[1], "child"], check=True, timeout=15)
+"""
+        # Pass the same script as data so the second web process can execute it.
+        app("python", "-c", probe, probe, dedicated=True, role=role, database=database)
 
     migration_probe = """
 from unittest.mock import patch
@@ -230,6 +435,7 @@ print("Dedicated migrator bigint lock, commit boundaries, role cleanup and repla
         if i == 0:
             app("flask", "--app", "run.py", "db", "upgrade", head)
             check_tls("j2m_migrator", "full_schema")
+            check_effective_pool("j2m_migrator", "full_schema")
             from nginx_recovery_ci import write_certificates
 
             wrong = root / "wrong-ca"
@@ -280,6 +486,8 @@ print("Dedicated migrator bigint lock, commit boundaries, role cleanup and repla
 
         verify_transition_accounting(query)
         if i == 1:
+            prove_alternate_write_barrier(sql, "full_schema")
+            prove_restricted_integral_backup(network, sql, root, ca)
             sql(BACKUP_GRANTS, database=destination).check_returncode()
             flow = (ROOT / "tests/postgres_referral_worker_flow.py").read_text()
             checked = set()
@@ -287,6 +495,7 @@ print("Dedicated migrator bigint lock, commit boundaries, role cleanup and repla
             def run_service(role, source=flow):
                 if role not in checked:
                     check_tls(role, destination)
+                    check_effective_pool(role, destination)
                     checked.add(role)
                 app("python", "-c", source, role=role, database=destination)
 
