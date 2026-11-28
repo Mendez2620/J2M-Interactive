@@ -27,8 +27,12 @@ WITH entries(kind, identity, detail) AS (
      WHERE c.relnamespace='public'::regnamespace
     UNION ALL
     SELECT 'routine', p.oid::regprocedure::text, jsonb_build_array(
-        pg_get_userbyid(p.proowner),p.prosecdef,to_jsonb(p.proacl),pg_get_functiondef(p.oid))
-      FROM pg_proc p WHERE p.pronamespace='public'::regnamespace AND p.prokind IN ('f','p','w')
+        pg_get_userbyid(p.proowner),p.prosecdef,to_jsonb(p.proacl),pg_get_functiondef(p.oid),
+        p.prosrc,to_jsonb(p.proconfig),jsonb_build_array(
+            l.lanname,format_type(p.prorettype,NULL),p.prokind,p.provolatile,p.proisstrict,
+            p.proparallel,p.proleakproof,p.proretset,p.procost,p.prorows,p.prosupport::oid=0))
+      FROM pg_proc p JOIN pg_language l ON l.oid=p.prolang
+     WHERE p.pronamespace='public'::regnamespace AND p.prokind IN ('f','p','w')
     UNION ALL
     SELECT 'trigger', c.relname::text||'.'||t.tgname::text,
         jsonb_build_array(t.tgenabled,t.tgtype,t.tgfoid::regprocedure::text,
@@ -151,6 +155,8 @@ def verify_fixture_security(revision, catalog):
                 if key.startswith("routine:")}
     if routines.keys() != ROUTINES or any(row[:3] != ["j2m_owner", False, None] for row in routines.values()):
         raise ValueError("Unexpected routine owner, identity or execution context")
+    from scripts.transition_routine_manifest import verify_routine_definitions
+    verify_routine_definitions(routines)
     triggers = {key.removeprefix("trigger:"): row[:4] for key, row in catalog.items()
                 if key.startswith("trigger:")}
     if triggers != {name: ["O", mask, routine, True] for name, (mask, routine) in TRIGGERS.items()}:
