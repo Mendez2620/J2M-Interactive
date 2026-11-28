@@ -210,12 +210,13 @@ class Phase75TestCase(unittest.TestCase):
         replay = self.create_stamp(self.customer, "phase75-stamp")
         self.assertFalse(first.replay)
         self.assertTrue(replay.replay)
+        business_id, customer_id = self.business.id, self.customer.id
         service = SuccessfulWalletService()
         run_google_wallet_sync_worker(service=service, max_cycles=1, poll_seconds=1)
-        self.assertEqual(service.balances, [(self.business.id, self.customer.id, 1)])
-        self.assertEqual(Transaction.query.filter_by(customer_id=self.customer.id).count(), 1)
+        self.assertEqual(service.balances, [(business_id, customer_id, 1)])
+        self.assertEqual(Transaction.query.filter_by(customer_id=customer_id).count(), 1)
         self.assertEqual(LoyaltyLedgerEntry.query.filter(
-            LoyaltyLedgerEntry.customer_id == self.customer.id,
+            LoyaltyLedgerEntry.customer_id == customer_id,
             LoyaltyLedgerEntry.transaction_id.isnot(None),
         ).count(), 1)
         job = GoogleWalletSyncJob.query.one()
@@ -243,28 +244,31 @@ class Phase75TestCase(unittest.TestCase):
         stale.status = "processing"
         stale.locked_at = _now() - timedelta(minutes=10)
         db.session.commit()
-        service = SuccessfulWalletService()
-        run_google_wallet_sync_worker(service=service, max_cycles=1)
-        self.assertCountEqual(service.balances, [
+        expected = [
             (self.business.id, self.customer.id, 2),
             (self.other_business.id, self.other_customer.id, 1),
-        ])
+        ]
+        service = SuccessfulWalletService()
+        run_google_wallet_sync_worker(service=service, max_cycles=1)
+        self.assertCountEqual(service.balances, expected)
         self.assertEqual(GoogleWalletSyncJob.query.filter_by(status="completed").count(), 3)
 
     def test_retry_is_persistent_and_admin_exposes_only_aggregate_state(self):
         self.create_stamp(self.customer, "phase75-retry")
+        admin_id, customer_id = self.admin.id, self.customer.id
         run_google_wallet_sync_worker(service=RetryingWalletService(), max_cycles=1)
         job = GoogleWalletSyncJob.query.one()
         self.assertEqual((job.status, job.attempts, job.last_status_code), ("pending", 1, 429))
         self.assertIsNotNone(job.next_attempt_at)
         with self.client.session_transaction() as session:
-            session["platform_admin_id"] = self.admin.id
-            session["platform_admin_session"] = issue_for(session["platform_admin_id"])
+            session["platform_admin_id"] = admin_id
+            session["platform_admin_session"] = issue_for(admin_id)
         dashboard = self.https_get("/admin").get_data(as_text=True)
         self.assertIn("1 reintentando", dashboard)
         self.assertIn("Último intento", dashboard)
-        self.assertNotIn(self.customer.full_name, dashboard)
-        self.assertNotIn(self.customer.qr_code_token, dashboard)
+        customer = db.session.get(Customer, customer_id)
+        self.assertNotIn(customer.full_name, dashboard)
+        self.assertNotIn(customer.qr_code_token, dashboard)
 
 
 if __name__ == "__main__":

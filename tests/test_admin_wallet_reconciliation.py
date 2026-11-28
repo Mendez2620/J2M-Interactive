@@ -327,6 +327,7 @@ class PostgresAdminWalletReconciliationTests(AdminWalletReconciliationTests):
         self.assertIn("Resultado parcial", history)
         self.assertIn("Autorización vencida o revocada", history)
         self.assertEqual(self.client.get(location).status_code, 404)
+        persisted = AdminWalletReview.query.one()
         persisted.result = {**persisted.result, "remaining": 0}
         db.session.commit()
         corrupt_history = self.client.get(self.path).get_data(as_text=True)

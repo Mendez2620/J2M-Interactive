@@ -500,8 +500,8 @@ def wallet_publication_metrics():
         "completed": statuses.get("completed", 0),
         "skipped": statuses.get("skipped", 0),
         "failed": statuses.get("failed", 0),
-        "stale_processing": GoogleWalletPublicationJob.query.filter(
+        "stale_processing": db.session.query(func.count(GoogleWalletPublicationJob.id)).filter(
             GoogleWalletPublicationJob.status == "processing",
             GoogleWalletPublicationJob.locked_at <= stale_before,
-        ).count(),
+        ).scalar(),
     }

@@ -121,6 +121,11 @@ jobs:
           evidence="$RUNNER_TEMP/j2m-transition-evidence"
           mkdir -m 700 "$evidence"
           python tests/legacy_wallet_transition_docker.py --reconstructed-legacy --journal "$evidence/evidence.jsonl"
+      - name: Verify A3 permission increment and restricted web HTTP flows
+        run: |
+          export J2M_A3_FIXTURE_IMAGE="j2m-interactive:transition-$(git rev-parse HEAD)"
+          export J2M_A3_LEGACY_IMAGE="j2m-interactive:reconstructed-dae140e3684be29c534be3e1725598d226b68e03"
+          python tests/a3_permission_coverage_ci.py
       - name: Verify split roles and restore the fenced backup on the historical reconstruction
         run: |
           docker build -f tests/Dockerfile.pgbouncer -t j2m-pgbouncer:synthetic .
