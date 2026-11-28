@@ -41,6 +41,20 @@ class TransitionRestoreTests(unittest.TestCase):
                 v.verify_exact_restore(index, key, digest, image, postgres_image=image)
 
 
+    def test_reconstructed_image_requires_synthetic_scope_and_both_pins(self):
+        tag = "j2m-interactive:reconstructed-" + v.LEGACY_TAG.rsplit(":", 1)[1]
+        with patch.dict(v.os.environ, {"J2M_SYNTHETIC_BACKUP_TEST": "0"}), \
+                patch.object(v.backup.subprocess, "run") as docker:
+            with self.assertRaises(ValueError):
+                v.backup.restore_integral_isolated(Path("unused"), Path("unused"), tag)
+            docker.assert_not_called()
+        with patch.dict(v.os.environ, {"J2M_SYNTHETIC_BACKUP_TEST": "1"}), \
+                patch.object(v.backup.subprocess, "run") as docker:
+            with self.assertRaisesRegex(ValueError, "hash de índice"):
+                v.backup.restore_integral_isolated(Path("unused"), Path("unused"), tag,
+                                                   expected_image_id="sha256:" + "c" * 64)
+            docker.assert_not_called()
+
     def test_rejects_docker_destination_override_before_inspecting(self):
         with patch.dict(v.os.environ, {"DOCKER_HOST": "tcp://example.invalid:2376"}), \
                 patch.object(v, "command") as docker:

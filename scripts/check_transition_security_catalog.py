@@ -2,13 +2,13 @@
 
 CATALOG_QUERY = """
 WITH entries(kind, identity, detail) AS (
-    SELECT 'relation', c.relname, jsonb_build_array(
+    SELECT 'relation', c.relname::text, jsonb_build_array(
         c.relkind, pg_get_userbyid(c.relowner), c.relrowsecurity,
         c.relforcerowsecurity, to_jsonb(c.relacl))
       FROM pg_class c WHERE c.relnamespace='public'::regnamespace
         AND c.relkind IN ('r','p','S','v','m','f')
     UNION ALL
-    SELECT 'column', c.relname||'.'||a.attname, jsonb_build_array(
+    SELECT 'column', c.relname::text||'.'||a.attname::text, jsonb_build_array(
         format_type(a.atttypid,a.atttypmod),a.attnotnull,a.attidentity,a.attgenerated,
         pg_get_expr(d.adbin,d.adrelid),to_jsonb(a.attacl))
       FROM pg_class c JOIN pg_attribute a ON a.attrelid=c.oid
@@ -16,7 +16,7 @@ WITH entries(kind, identity, detail) AS (
      WHERE c.relnamespace='public'::regnamespace AND c.relkind IN ('r','p','v','m','f')
        AND a.attnum>0 AND NOT a.attisdropped
     UNION ALL
-    SELECT 'sequence', c.relname, jsonb_build_array(
+    SELECT 'sequence', c.relname::text, jsonb_build_array(
         s.seqstart,s.seqincrement,s.seqmax,s.seqmin,s.seqcache,s.seqcycle,
         ref.relname,a.attname,d.deptype)
       FROM pg_sequence s JOIN pg_class c ON c.oid=s.seqrelid
@@ -30,12 +30,13 @@ WITH entries(kind, identity, detail) AS (
         pg_get_userbyid(p.proowner),p.prosecdef,to_jsonb(p.proacl),pg_get_functiondef(p.oid))
       FROM pg_proc p WHERE p.pronamespace='public'::regnamespace AND p.prokind IN ('f','p','w')
     UNION ALL
-    SELECT 'trigger', c.relname||'.'||t.tgname,
-        jsonb_build_array(t.tgenabled,pg_get_triggerdef(t.oid))
+    SELECT 'trigger', c.relname::text||'.'||t.tgname::text,
+        jsonb_build_array(t.tgenabled,t.tgtype,t.tgfoid::regprocedure::text,
+                          t.tgqual IS NULL,pg_get_triggerdef(t.oid))
       FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid
      WHERE c.relnamespace='public'::regnamespace AND NOT t.tgisinternal
     UNION ALL
-    SELECT 'policy', tablename||'.'||policyname, jsonb_build_array(permissive,roles,cmd,qual,with_check)
+    SELECT 'policy', tablename::text||'.'||policyname::text, jsonb_build_array(permissive,roles,cmd,qual,with_check)
       FROM pg_policies WHERE schemaname='public'
     UNION ALL
     SELECT 'default-acl', pg_get_userbyid(d.defaclrole)||':'||
@@ -43,7 +44,7 @@ WITH entries(kind, identity, detail) AS (
       FROM pg_default_acl d LEFT JOIN pg_namespace n ON n.oid=d.defaclnamespace
      WHERE d.defaclnamespace IN (0,'public'::regnamespace)
     UNION ALL
-    SELECT 'schema', nspname, jsonb_build_array(pg_get_userbyid(nspowner),to_jsonb(nspacl))
+    SELECT 'schema', nspname::text, jsonb_build_array(pg_get_userbyid(nspowner),to_jsonb(nspacl))
       FROM pg_namespace WHERE nspname='public'
     UNION ALL
     SELECT 'membership', pg_get_userbyid(member)||':'||pg_get_userbyid(roleid)||':'||
@@ -56,7 +57,7 @@ WITH entries(kind, identity, detail) AS (
       FROM pg_roles a CROSS JOIN pg_roles b
      WHERE a.oid<>b.oid AND NOT a.rolsuper AND pg_has_role(a.oid,b.oid,'MEMBER')
     UNION ALL
-    SELECT 'role', rolname, jsonb_build_array(rolsuper,rolinherit,rolcreaterole,
+    SELECT 'role', rolname::text, jsonb_build_array(rolsuper,rolinherit,rolcreaterole,
         rolcreatedb,rolcanlogin,rolreplication,rolbypassrls,rolconnlimit)
       FROM pg_roles
 )
@@ -92,6 +93,24 @@ validate_referral_incentive_record_subject() prevent_referral_participant_audit_
 prevent_referral_program_audit_mutation() prevent_customer_auth_audit_mutation()
 """.split())
 
+# PostgreSQL tgtype masks: BEFORE (2), EACH ROW (1), and event bits.
+TRIGGERS = {
+    "referral_eligibility_decisions.trg_referral_decisions_append_only":
+        (27, "prevent_referral_decision_mutation()"),
+    "referral_incentive_rule_audits.trg_referral_rule_audits_append_only":
+        (27, "prevent_referral_incentive_history_mutation()"),
+    "referral_incentive_records.trg_referral_incentive_records_append_only":
+        (27, "prevent_referral_incentive_history_mutation()"),
+    "referral_incentive_records.trg_referral_incentive_record_subject":
+        (7, "validate_referral_incentive_record_subject()"),
+    "referral_participant_audits.trg_referral_participant_audits_append_only":
+        (27, "prevent_referral_participant_audit_mutation()"),
+    "referral_program_audits.trg_referral_program_audits_append_only":
+        (27, "prevent_referral_program_audit_mutation()"),
+    "customer_auth_audits.trg_customer_auth_audits_append_only":
+        (27, "prevent_customer_auth_audit_mutation()"),
+}
+
 
 def verify_fixture_security(revision, catalog):
     """Check source-derived security invariants, independent of before/after drift checks."""
@@ -107,9 +126,22 @@ def verify_fixture_security(revision, catalog):
     if actual_rls != expected_rls:
         raise ValueError("Unexpected row-level security matrix")
     for kind, owner, _, force_rls, acl in relations.values():
-        granted = [] if acl is None else [grant for grant in acl if not grant.startswith("j2m_owner=")]
-        if kind not in {"r", "S"} or owner != "j2m_owner" or force_rls or granted != ["j2m_backup=r/j2m_owner"]:
+        owner_permissions = {"r": "arwdDxtm", "S": "rwU"}.get(kind)
+        expected_acl = {f"j2m_owner={owner_permissions}/j2m_owner", "j2m_backup=r/j2m_owner"}
+        if (owner_permissions is None or owner != "j2m_owner" or force_rls or acl is None
+                or len(acl) != 2 or set(acl) != expected_acl):
             raise ValueError("Unexpected relation owner or direct ACL")
+    policies = {key: row for key, row in catalog.items() if key.startswith("policy:")}
+    expected_policies = {
+        f"policy:{table}.synthetic_backup_coverage": ["PERMISSIVE", ["j2m_backup"], "SELECT", "true", None]
+        for table in expected_rls
+    }
+    if policies != expected_policies:
+        raise ValueError("Unexpected row-level policy definition")
+    for role, inherit, login in (("j2m_owner", True, False), ("j2m_backup", True, True),
+                                  ("j2m_migrator", False, True)):
+        if catalog.get(f"role:{role}") != [False, inherit, False, False, login, False, False, -1]:
+            raise ValueError("Unexpected fixture role attributes")
     for key, row in catalog.items():
         if key.startswith("column:") and row[-1]:
             raise ValueError("Unexpected column grant before service provisioning")
@@ -117,8 +149,12 @@ def verify_fixture_security(revision, catalog):
             raise ValueError("Unexpected fixture default grant")
     routines = {key.removeprefix("routine:"): row for key, row in catalog.items()
                 if key.startswith("routine:")}
-    if routines.keys() != ROUTINES or any(row[0] != "j2m_owner" or row[1] for row in routines.values()):
+    if routines.keys() != ROUTINES or any(row[:3] != ["j2m_owner", False, None] for row in routines.values()):
         raise ValueError("Unexpected routine owner, identity or execution context")
+    triggers = {key.removeprefix("trigger:"): row[:4] for key, row in catalog.items()
+                if key.startswith("trigger:")}
+    if triggers != {name: ["O", mask, routine, True] for name, (mask, routine) in TRIGGERS.items()}:
+        raise ValueError("Unexpected fixture trigger definition")
     membership = {key: value for key, value in catalog.items()
                   if key.startswith(("membership:j2m_", "effective-membership:j2m_"))}
     if membership != {

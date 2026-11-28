@@ -9,7 +9,6 @@ from pathlib import Path
 import os
 import re
 import subprocess
-import secrets
 import sys
 import json
 
@@ -18,8 +17,9 @@ from postgres_scoped_grants_fixture import prove_scoped_grants_and_fence
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from scripts.selfhost_backup import (
-    exclusive_lock, integral_backup, restore_integral_isolated, verify_integral_set, verify_transition_accounting,
+    _hash_file, exclusive_lock, integral_backup, restore_integral_isolated, verify_integral_set, verify_transition_accounting,
 )
+from scripts.historical_transition_evidence import LEGACY_SHA
 from scripts.check_transition_relation_manifest import RELATION_QUERY, verify_relation_manifest
 from scripts.check_transition_security_catalog import CATALOG_QUERY, verify_catalog, verify_fixture_security
 
@@ -209,15 +209,25 @@ def certify_pre_migration_backup(network, sql, root, ca):
                     else:
                         assert expected_error is None, "Unexpected backup certification"
                         assert verify_integral_set(index, key_file)
-                        tag = "j2m-interactive:" + secrets.token_hex(20)
-                        source = os.environ.get("J2M_ROLE_FIXTURE_IMAGE", "j2m-interactive:wallet-demo-synthetic")
-                        subprocess.run(["docker", "image", "tag", source, tag], check=True, timeout=20)
-                        try:
-                            report = restore_integral_isolated(index, key_file, tag, timeout=180)
-                            assert report.alembic_revision == expected_head and report.businesses == 2 and report.customers == 2
-                        finally:
-                            subprocess.run(["docker", "image", "rm", tag], check=True, timeout=20,
-                                           stdout=subprocess.DEVNULL)
+                        tag = "j2m-interactive:reconstructed-" + LEGACY_SHA
+                        image_id = subprocess.check_output(
+                            ["docker", "image", "inspect", "--format", "{{.Id}}", tag],
+                            text=True, timeout=15,
+                        ).strip()
+                        label = subprocess.check_output(
+                            ["docker", "image", "inspect", "--format",
+                             '{{index .Config.Labels "org.opencontainers.image.revision"}}', image_id],
+                            text=True, timeout=15,
+                        ).strip()
+                        if label != LEGACY_SHA:
+                            raise RuntimeError("Historical reconstruction revision label does not match")
+                        digest = _hash_file(index)
+                        report = restore_integral_isolated(
+                            index, key_file, tag, timeout=180, expected_image_id=image_id,
+                            expected_index_sha256=digest,
+                        )
+                        assert report.alembic_revision == expected_head and report.businesses == 2 and report.customers == 2
+                        print(f"Reconstructed legacy={LEGACY_SHA} image={image_id} index_sha256={digest}")
                 print(f"Restricted integral backup ({'rejection' if expected_error else 'verified'}): "
                       f"{monotonic() - start:.2f}s")
             finally:
@@ -260,7 +270,10 @@ def certify_pre_migration_backup(network, sql, root, ca):
             sql("GRANT CONNECT ON DATABASE full_schema TO j2m_migrator",
                 database=database).check_returncode()
             yield
-        finally:
+        except Exception:
+            # Disposable database stays closed until the outer cleanup removes it.
+            raise
+        else:
             sql("GRANT CONNECT ON DATABASE full_schema TO PUBLIC; "
                 "REVOKE CONNECT ON DATABASE full_schema FROM j2m_backup,j2m_migrator",
                 database=database).check_returncode()
@@ -278,9 +291,17 @@ def exercise_application_schema(network, run, sql, connection, pool_control, ca,
         "services": {"web": {"volumes": [{"type": "bind", "source": str(media),
                                            "target": "/app/instance/media", "read_only": True}]}},
     }), encoding="utf-8")
+    candidate = os.environ.get("J2M_ROLE_FIXTURE_IMAGE", "j2m-interactive:wallet-demo-synthetic")
+    metadata = json.loads(subprocess.check_output(["docker", "image", "inspect", candidate], timeout=15))[0]
+    if candidate.startswith("j2m-interactive:transition-"):
+        checkout = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True, timeout=15).strip()
+        label = (metadata["Config"].get("Labels") or {}).get("org.opencontainers.image.revision")
+        if label != checkout or candidate != f"j2m-interactive:transition-{checkout}":
+            raise RuntimeError("Candidate image revision differs from the checkout")
+        print(f"Candidate checkout={checkout} image={metadata['Id']}")
     env = {
         **os.environ,
-        "J2M_IMAGE": os.environ.get("J2M_ROLE_FIXTURE_IMAGE", "j2m-interactive:wallet-demo-synthetic"),
+        "J2M_IMAGE": metadata["Id"],
         "J2M_ENV_FILE": str(ROOT / ".env.wallet-demo.example"),
         "J2M_CLOUDFLARED_ENV_FILE": str(ROOT / ".env.cloudflared.example"),
         "J2M_DATABASE_CA_FILE": str(ca),
@@ -560,10 +581,20 @@ print("Dedicated migrator bigint lock, commit boundaries, role cleanup and repla
         fixture_catalog.check_returncode()
         catalog = json.loads(fixture_catalog.stdout)
         verify_fixture_security(head, catalog)
-        for change in ("owner", "acl", "object", "membership"):
+        for change in ("owner", "owner_acl", "acl", "object", "membership", "policy", "role", "routine", "trigger"):
             drift = deepcopy(catalog)
             if change == "owner":
                 drift["relation:customers"][1] = "postgres"
+            elif change == "owner_acl":
+                drift["relation:customers"][-1].remove("j2m_owner=arwdDxtm/j2m_owner")
+            elif change == "policy":
+                drift["policy:referral_participants.synthetic_backup_coverage"][3] = "false"
+            elif change == "role":
+                drift["role:j2m_backup"][-2] = True
+            elif change == "trigger":
+                drift["trigger:customer_auth_audits.trg_customer_auth_audits_append_only"][0] = "D"
+            elif change == "routine":
+                drift["routine:prevent_customer_auth_audit_mutation()"][2] = ["=X/j2m_owner"]
             elif change == "acl":
                 drift["relation:customers"][-1].append("=w/j2m_owner")
             elif change == "object":
@@ -618,7 +649,6 @@ print("Dedicated migrator bigint lock, commit boundaries, role cleanup and repla
             prove_alternate_write_barrier(sql, "full_schema")
             for role in ("j2m_schema_web", "j2m_schema_worker"):
                 assert sql("SELECT 1", role, database="full_schema").returncode
-            operation.close()
             print("Legacy backup exclusion and writer admission gate held through migration.")
 
             sql(BACKUP_GRANTS, database=destination).check_returncode()

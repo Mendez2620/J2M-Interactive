@@ -87,10 +87,6 @@ jobs:
           after=$("${demo[@]}" exec -T db psql -U j2m_test -d j2m_test -Atc 'SELECT system_identifier FROM pg_control_system()')
           test -n "$before" && test "$before" = "$after"
           "${demo[@]}" exec -T app python -c "from urllib.request import urlopen; assert urlopen('http://127.0.0.1:8000/api/ready', timeout=5).status == 200"
-      - name: Verify split roles, complete dump and writer fence in isolated PostgreSQL
-        run: |
-          docker build -f tests/Dockerfile.pgbouncer -t j2m-pgbouncer:synthetic .
-          python tests/postgres_role_separation_ci.py
       - name: Verify restricted Wallet egress against synthetic TLS endpoints
         run: python tests/wallet_egress_ci.py
       - name: Verify isolated Nginx upstream recovery and rollback
@@ -125,6 +121,11 @@ jobs:
           evidence="$RUNNER_TEMP/j2m-transition-evidence"
           mkdir -m 700 "$evidence"
           python tests/legacy_wallet_transition_docker.py --reconstructed-legacy --journal "$evidence/evidence.jsonl"
+      - name: Verify split roles and restore the fenced backup on the historical reconstruction
+        run: |
+          docker build -f tests/Dockerfile.pgbouncer -t j2m-pgbouncer:synthetic .
+          export J2M_ROLE_FIXTURE_IMAGE="j2m-interactive:transition-$(git rev-parse HEAD)"
+          python tests/postgres_role_separation_ci.py
       - name: Terminate coordinator at fenced transition boundaries
         run: |
           for phase in fence restore restore-partial migrate verify https; do

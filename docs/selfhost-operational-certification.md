@@ -306,3 +306,46 @@ restauración previa a migrar son subetapas del fixture. La suspensión
 de tareas, la atestación HTTPS y la recuperación supervisada aún deben
 quedar unidas a ellas en una sola ventana de mantenimiento. Ninguna
 medición del fixture implica una capacidad de Supavisor certificada.
+
+### Identidades y cierre de la ventana descartable
+
+La restauración restringida usa la reconstrucción de dae140e creada desde
+Git en el job histórico. El fixture verifica la etiqueta de revisión,
+resuelve el ID inmutable y calcula el SHA-256 del índice autenticado.
+El restore recibe ambos valores y vuelve a comprobarlos. La reconstrucción
+acredita compatibilidad del código histórico. Verificar una imagen instalada
+requiere comparar su ID por separado.
+
+En el clúster descartable, se retiene CONNECT para el lector y luego
+para el migrador durante el cierre de admisión. Los escritores se
+mantienen cerrados hasta que el ensayo de roles termina correctamente.
+Ante una excepción, el cierre permanece activo hasta la limpieza del
+clúster. El supervisor histórico y la atestación HTTPS siguen ejecutándose
+como ensayos separados.
+
+Para la aprobación A, clasificar service_role, REST, Data API y GraphQL
+según esquemas expuestos y rol efectivo. Inventariar las funciones RPC por
+firma y privilegio EXECUTE, así como las funciones SECURITY DEFINER y su
+propietario. Confirmar también quién conserva la credencial legada, dónde
+puede usarse, y si una conexión directa o un consumidor externo puede
+escribir tras drenar el pooler. Verificar credenciales persistentes
+independientemente del estado de despliegue de Railway. Un consumidor sin
+atribuir impide B.
+
+Para B, enumerar el delta por objeto J2M, incluidas ACL por columna,
+secuencias y rutinas. Guardar el grantor y la opción de grant para preparar
+su inversa exacta. Tras cerrar ingreso y drenar escritores por ambas
+rutas, autenticar y restaurar el índice exacto antes de autorizar el
+migrador. Si falta una verificación o la revisión es incierta, mantener
+la barrera e inspeccionar los recursos vivos.
+
+Para C, acreditar el backend por HTTPS, un único worker, la contabilidad
+y los permisos efectivos antes de reponer el delta aprobado. Reabrir
+ingreso y reanudar tareas solo después de comprobar cada vía de escritura
+prevista. El ensayo descartable no acredita los permisos ni el
+comportamiento efectivo de Supavisor.
+
+La búsqueda de referencias a service_role y a rutas REST, GraphQL y RPC
+en app, scripts, workflows y la configuración Railway versionada solo
+encontró las referencias del runbook. La inspección de consumidores
+externos y esquemas publicados sigue siendo una condición operativa.

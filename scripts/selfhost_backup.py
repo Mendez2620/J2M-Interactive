@@ -1567,7 +1567,12 @@ def restore_integral_isolated(index: Path, key_file: Path, image: str,
     Optional identity constraints bind the transition rehearsal to one exact
     index and immutable Docker image without altering scheduled restore callers.
     """
-    if not re.fullmatch(r"j2m-interactive:[0-9a-f]{40}", image):
+    reconstructed = image == "j2m-interactive:reconstructed-dae140e3684be29c534be3e1725598d226b68e03"
+    if reconstructed:
+        _check_certification_head(_CERTIFICATION_LEGACY_HEAD)
+        if not expected_image_id or not expected_index_sha256:
+            raise ValueError("La reconstrucción exige el ID de imagen y hash de índice.")
+    elif not re.fullmatch(r"j2m-interactive:[0-9a-f]{40}", image):
         raise ValueError("La imagen debe estar fijada a un SHA aprobado exacto.")
     if expected_image_id is not None:
         if not re.fullmatch(r"sha256:[0-9a-f]{64}", expected_image_id):
@@ -1588,6 +1593,8 @@ def restore_integral_isolated(index: Path, key_file: Path, image: str,
                 or not secrets.compare_digest(_hash_file(index), expected_index_sha256)):
             raise RuntimeError("El índice no coincide con el conjunto aprobado.")
         backup_id, database, media, certification_head = _integral_components(index, key_file)
+        if reconstructed and certification_head != _CERTIFICATION_LEGACY_HEAD:
+            raise ValueError("La reconstrucción exige un conjunto sintético de la revisión legada.")
         key = load_dpapi_key(key_file)
         suffix = secrets.token_hex(6)
         pg_name = "j2m-restore-pg-" + suffix
