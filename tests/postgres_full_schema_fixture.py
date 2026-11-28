@@ -1,5 +1,7 @@
 """Verify dump coverage against both migrated J2M schemas in the synthetic role harness."""
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
+from contextlib import contextmanager
 from difflib import unified_diff
 from unittest.mock import patch
 from time import monotonic
@@ -16,10 +18,10 @@ from postgres_scoped_grants_fixture import prove_scoped_grants_and_fence
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from scripts.selfhost_backup import (
-    integral_backup, restore_integral_isolated, verify_integral_set, verify_transition_accounting,
+    exclusive_lock, integral_backup, restore_integral_isolated, verify_integral_set, verify_transition_accounting,
 )
 from scripts.check_transition_relation_manifest import RELATION_QUERY, verify_relation_manifest
-from scripts.check_transition_security_catalog import CATALOG_QUERY, verify_catalog
+from scripts.check_transition_security_catalog import CATALOG_QUERY, verify_catalog, verify_fixture_security
 
 SEED = """
 from run import app
@@ -142,7 +144,8 @@ ROLLBACK;
     verify_catalog(approved, read())
 
 
-def prove_restricted_integral_backup(network, sql, root, ca):
+@contextmanager
+def certify_pre_migration_backup(network, sql, root, ca):
     """Run the real integral backup with an independently exported snapshot."""
     database = "full_schema"
     output = root / "restricted-backups"
@@ -160,7 +163,7 @@ def prove_restricted_integral_backup(network, sql, root, ca):
     coverage_queries.check_returncode()
     queries = coverage_queries.stdout.decode().splitlines()
 
-    def run_backup(expect_incomplete=False):
+    def run_backup(expected_head="9d0e1f2a3b4c", expected_error=None):
         start = monotonic()
         name = network.removesuffix("-internal")
         process = subprocess.Popen(
@@ -198,23 +201,24 @@ def prove_restricted_integral_backup(network, sql, root, ca):
                         index = integral_backup(
                             env_file, root / "media", output, key_file, retries=1, network=network,
                             timeout=180, restricted_snapshot=snapshot_id, verify_restored_coverage=coverage,
+                            certification_head=expected_head, acquire_lock=False,
                         )
                     except RuntimeError as error:
-                        if not expect_incomplete or "inventario independiente" not in str(error):
+                        if expected_error is None or expected_error not in str(error):
                             raise
                     else:
-                        assert not expect_incomplete, "Incomplete RLS dump was certified"
+                        assert expected_error is None, "Unexpected backup certification"
                         assert verify_integral_set(index, key_file)
                         tag = "j2m-interactive:" + secrets.token_hex(20)
                         source = os.environ.get("J2M_ROLE_FIXTURE_IMAGE", "j2m-interactive:wallet-demo-synthetic")
                         subprocess.run(["docker", "image", "tag", source, tag], check=True, timeout=20)
                         try:
                             report = restore_integral_isolated(index, key_file, tag, timeout=180)
-                            assert report.businesses == 2 and report.customers == 2
+                            assert report.alembic_revision == expected_head and report.businesses == 2 and report.customers == 2
                         finally:
                             subprocess.run(["docker", "image", "rm", tag], check=True, timeout=20,
                                            stdout=subprocess.DEVNULL)
-                print(f"Restricted integral backup ({'RLS rejection' if expect_incomplete else 'verified'}): "
+                print(f"Restricted integral backup ({'rejection' if expected_error else 'verified'}): "
                       f"{monotonic() - start:.2f}s")
             finally:
                 process.stdin.close()
@@ -225,20 +229,44 @@ def prove_restricted_integral_backup(network, sql, root, ca):
                     process.wait(timeout=10)
                 process.stdout.close()
 
-    run_backup()
-    before = {path.name for path in output.iterdir()}
-    sql("ALTER TABLE platform_admins ENABLE ROW LEVEL SECURITY; "
-        "CREATE POLICY synthetic_incomplete ON platform_admins FOR SELECT TO j2m_backup USING (false)",
-        database=database).check_returncode()
-    try:
-        run_backup(expect_incomplete=True)
-        assert {path.name for path in output.iterdir()} == before
-    finally:
-        sql("DROP POLICY synthetic_incomplete ON platform_admins; "
-            "ALTER TABLE platform_admins DISABLE ROW LEVEL SECURITY", database=database).check_returncode()
+    # The disposable DB normally inherits CONNECT from PUBLIC. During the
+    # archive window only the exporter and the restricted reader may connect.
+    with exclusive_lock(root / ".operations.lock"):
+        sql("REVOKE CONNECT ON DATABASE full_schema FROM PUBLIC; "
+            "GRANT CONNECT ON DATABASE full_schema TO j2m_backup",
+            database=database).check_returncode()
+        try:
+            for role in ("j2m_schema_web", "j2m_schema_worker", "j2m_migrator"):
+                assert sql("SELECT 1", role, database=database).returncode
+            active = sql("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() "
+                         "AND pid<>pg_backend_pid() AND backend_type='client backend'", database=database)
+            active.check_returncode()
+            assert active.stdout.strip() == b"0"
+            assert sql("SELECT nextval('public.customers_id_seq')", "j2m_backup",
+                       database=database).returncode
+            run_backup()
+            before = {path.name for path in output.iterdir()}
+            run_backup(expected_head="c3d4e5f6a7b8", expected_error="head Alembic esperado")
+            assert {path.name for path in output.iterdir()} == before
+            sql("ALTER TABLE platform_admins ENABLE ROW LEVEL SECURITY; "
+                "CREATE POLICY synthetic_incomplete ON platform_admins FOR SELECT TO j2m_backup USING (false)",
+                database=database).check_returncode()
+            try:
+                run_backup(expected_error="inventario independiente")
+                assert {path.name for path in output.iterdir()} == before
+            finally:
+                sql("DROP POLICY synthetic_incomplete ON platform_admins; "
+                    "ALTER TABLE platform_admins DISABLE ROW LEVEL SECURITY", database=database).check_returncode()
+            sql("GRANT CONNECT ON DATABASE full_schema TO j2m_migrator",
+                database=database).check_returncode()
+            yield
+        finally:
+            sql("GRANT CONNECT ON DATABASE full_schema TO PUBLIC; "
+                "REVOKE CONNECT ON DATABASE full_schema FROM j2m_backup,j2m_migrator",
+                database=database).check_returncode()
 
 
-def exercise_application_schema(network, run, sql, connection, pool_control, ca):
+def exercise_application_schema(network, run, sql, connection, pool_control, ca, operation):
     sql("CREATE DATABASE full_schema OWNER j2m_owner").check_returncode()
 
     root = ca.parent
@@ -325,22 +353,108 @@ def exercise_application_schema(network, run, sql, connection, pool_control, ca)
         app("python", "-c", probe, role=role, database=database)
 
     def check_effective_pool(role, database):
-        # Run against the actual SQLAlchemy engine inside the candidate overlay.
-        # For web, launch two independent processes sharing the same login.
+        if role == "j2m_schema_web":
+            gunicorn_config = """
+from pathlib import Path
+from sqlalchemy import text
+from sqlalchemy.exc import TimeoutError
+
+def post_worker_init(worker):
+    from app.extensions import db
+    from run import app
+    with app.app_context():
+        worker.held_connections = [db.engine.connect() for _ in range(3)]
+        pids = [connection.scalar(text("SELECT pg_backend_pid()"))
+                for connection in worker.held_connections]
+        try:
+            with db.engine.connect():
+                raise AssertionError("Gunicorn pool overflow exceeded")
+        except TimeoutError:
+            pass
+    ready = Path(__file__).with_name(f"{worker.pid}.pending")
+    ready.write_text(",".join(map(str, pids)))
+    ready.rename(ready.with_suffix(".ready"))
+"""
+            controller = """
+from contextlib import ExitStack
+import os
+from pathlib import Path
+import subprocess
+import sys
+from tempfile import TemporaryDirectory
+import time
+from urllib.request import urlopen
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import TimeoutError
+
+assert os.environ["WEB_CONCURRENCY"] == "2"
+with TemporaryDirectory() as directory:
+    root = Path(directory)
+    config = root / "probe.py"
+    config.write_text(sys.argv[1])
+    process = subprocess.Popen(["gunicorn", "--config", str(config), "--bind",
+                                "127.0.0.1:18742", "--workers",
+                                os.environ["WEB_CONCURRENCY"], "run:app"])
+    try:
+        for _ in range(80):
+            assert process.poll() is None, "Gunicorn exited before saturation"
+            ready = list(root.glob("*.ready"))
+            if len(ready) == 2:
+                break
+            time.sleep(.1)
+        else:
+            raise AssertionError("Two Gunicorn workers did not saturate concurrently")
+        backend_pids = {int(pid) for file in ready for pid in file.read_text().split(",")}
+        assert len(backend_pids) == 6
+        base = make_url(os.environ["DATABASE_URL"]).set(drivername="postgresql+psycopg2")
+        with ExitStack() as budget:
+            for role, password, size, overflow in (
+                ("j2m_schema_worker", "synthetic-j2m_schema_worker", 2, 1),
+                ("j2m_migrator", "synthetic-j2m_migrator", 2, 0),
+                ("j2m_backup", "synthetic-only", 1, 0),
+                ("postgres", "synthetic-only", 2, 0),
+            ):
+                pool = create_engine(
+                    base.set(username=role, password=password), pool_size=size,
+                    max_overflow=overflow, pool_timeout=1,
+                )
+                budget.callback(pool.dispose)
+                for _ in range(size + overflow):
+                    held = budget.enter_context(pool.connect())
+                    backend_pids.add(held.scalar(text("SELECT pg_backend_pid()")))
+                try:
+                    with pool.connect():
+                        raise AssertionError("Auxiliary connection budget exceeded")
+                except TimeoutError:
+                    pass
+            live = {row[0] for row in held.execute(text(
+                "SELECT pid FROM pg_stat_activity WHERE datname=current_database() "
+                "AND backend_type='client backend'"
+            ))}
+            assert live == backend_pids and len(live) == 14, "Incomplete connection budget"
+            with urlopen("http://127.0.0.1:18742/api/health", timeout=3) as result:
+                assert result.status == 200
+        print("Fourteen simultaneous synthetic sessions verified, including six held by Gunicorn.")
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+"""
+            app("python", "-c", controller, gunicorn_config, dedicated=True, role=role, database=database)
+            return
         probe = """
 from contextlib import ExitStack
 import os
-import subprocess
-import sys
 from sqlalchemy import text
 from sqlalchemy.exc import TimeoutError
 from app.extensions import db
 from run import app
 
-env = os.environ
-process_type = env["J2M_PROCESS_TYPE"]
-expected = 2 if process_type == "migrator" else 3
-child = sys.argv[1] == "child"
+expected = 2 if os.environ["J2M_PROCESS_TYPE"] == "migrator" else 3
 with app.app_context(), ExitStack() as stack:
     for _ in range(expected):
         connection = stack.enter_context(db.engine.connect())
@@ -350,18 +464,8 @@ with app.app_context(), ExitStack() as stack:
             raise AssertionError("Connection limit was not enforced")
     except TimeoutError:
         pass
-    if process_type == "web":
-        assert env["WEB_CONCURRENCY"] == "2"
-        if child:
-            assert connection.scalar(text(
-                "SELECT count(*) FROM pg_stat_activity WHERE usename=session_user "
-                "AND datname=current_database()"
-            )) == 6
-        else:
-            subprocess.run([sys.executable, "-c", sys.argv[1], "child"], check=True, timeout=15)
 """
-        # Pass the same script as data so the second web process can execute it.
-        app("python", "-c", probe, probe, dedicated=True, role=role, database=database)
+        app("python", "-c", probe, dedicated=True, role=role, database=database)
 
     migration_probe = """
 from unittest.mock import patch
@@ -448,8 +552,33 @@ print("Dedicated migrator bigint lock, commit boundaries, role cleanup and repla
                 raise RuntimeError("Connection accepted an unrelated CA or failed for the wrong reason")
             app("python", "-c", SEED)
         else:
+            started = monotonic()
             app("python", "-c", migration_probe, dedicated=True)
+            print(f"Dedicated migration and fencing checks: {monotonic() - started:.2f}s")
         sql(BACKUP_GRANTS, database="full_schema").check_returncode()
+        fixture_catalog = sql(CATALOG_QUERY, database="full_schema")
+        fixture_catalog.check_returncode()
+        catalog = json.loads(fixture_catalog.stdout)
+        verify_fixture_security(head, catalog)
+        for change in ("owner", "acl", "object", "membership"):
+            drift = deepcopy(catalog)
+            if change == "owner":
+                drift["relation:customers"][1] = "postgres"
+            elif change == "acl":
+                drift["relation:customers"][-1].append("=w/j2m_owner")
+            elif change == "object":
+                drift["relation:unexpected"] = drift["relation:customers"]
+            else:
+                drift["effective-membership:j2m_backup:j2m_owner"] = [True, True, True]
+            try:
+                verify_fixture_security(head, drift)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"Fixture accepted {change} drift at {head}")
+        print(f"Declared relation ownership, ACL, RLS and membership verified for {head}.")
+        if i == 0:
+            operation.enter_context(certify_pre_migration_backup(network, sql, root, ca))
         assert sql("SELECT version_num FROM alembic_version",
                    database="full_schema").stdout.strip() == head.encode()
         observed_relations = sql(RELATION_QUERY, database="full_schema")
@@ -487,7 +616,11 @@ print("Dedicated migrator bigint lock, commit boundaries, role cleanup and repla
         verify_transition_accounting(query)
         if i == 1:
             prove_alternate_write_barrier(sql, "full_schema")
-            prove_restricted_integral_backup(network, sql, root, ca)
+            for role in ("j2m_schema_web", "j2m_schema_worker"):
+                assert sql("SELECT 1", role, database="full_schema").returncode
+            operation.close()
+            print("Legacy backup exclusion and writer admission gate held through migration.")
+
             sql(BACKUP_GRANTS, database=destination).check_returncode()
             flow = (ROOT / "tests/postgres_referral_worker_flow.py").read_text()
             checked = set()

@@ -73,3 +73,58 @@ def verify_catalog(expected, observed):
     unexpected = len(observed.keys() - expected.keys())
     if changed or missing or unexpected:
         raise ValueError(f"Security catalog drift: changed={changed}, missing={missing}, unexpected={unexpected}")
+# Declarative privileges for the migrated schema before fixture service grants.
+# Source: Alembic DDL plus the explicit SELECT-only fixture backup grants.
+LEGACY_RLS = frozenset("""
+apple_pass_update_sequence apple_pass_credentials apple_wallet_publications apple_wallet_push_jobs
+customer_linking_enrollments customer_credentials customer_sessions customer_auth_challenges customer_auth_audits
+customer_referral_activations google_wallet_publications google_wallet_publication_jobs
+referral_eligibilities referral_eligibility_decisions referral_incentive_rules
+referral_incentive_rule_audits referral_incentive_records referral_participants
+referral_participant_audits referral_program_audits
+""".split())
+TARGET_RLS_ADDITIONS = frozenset("""
+admin_wallet_reviews google_wallet_referral_jobs google_wallet_write_reservations platform_admin_sessions
+""".split())
+ROUTINES = frozenset("""
+prevent_referral_decision_mutation() prevent_referral_incentive_history_mutation()
+validate_referral_incentive_record_subject() prevent_referral_participant_audit_mutation()
+prevent_referral_program_audit_mutation() prevent_customer_auth_audit_mutation()
+""".split())
+
+
+def verify_fixture_security(revision, catalog):
+    """Check source-derived security invariants, independent of before/after drift checks."""
+    from scripts.check_transition_relation_manifest import verify_relation_manifest
+
+    relations = {key.removeprefix("relation:"): row for key, row in catalog.items()
+                 if key.startswith("relation:")}
+    verify_relation_manifest(revision, [f"{row[0]}:{name}" for name, row in relations.items()])
+    expected_rls = LEGACY_RLS
+    if revision == "c3d4e5f6a7b8":
+        expected_rls |= TARGET_RLS_ADDITIONS
+    actual_rls = {name for name, row in relations.items() if row[2]}
+    if actual_rls != expected_rls:
+        raise ValueError("Unexpected row-level security matrix")
+    for kind, owner, _, force_rls, acl in relations.values():
+        granted = [] if acl is None else [grant for grant in acl if not grant.startswith("j2m_owner=")]
+        if kind not in {"r", "S"} or owner != "j2m_owner" or force_rls or granted != ["j2m_backup=r/j2m_owner"]:
+            raise ValueError("Unexpected relation owner or direct ACL")
+    for key, row in catalog.items():
+        if key.startswith("column:") and row[-1]:
+            raise ValueError("Unexpected column grant before service provisioning")
+        if key.startswith("default-acl:"):
+            raise ValueError("Unexpected fixture default grant")
+    routines = {key.removeprefix("routine:"): row for key, row in catalog.items()
+                if key.startswith("routine:")}
+    if routines.keys() != ROUTINES or any(row[0] != "j2m_owner" or row[1] for row in routines.values()):
+        raise ValueError("Unexpected routine owner, identity or execution context")
+    membership = {key: value for key, value in catalog.items()
+                  if key.startswith(("membership:j2m_", "effective-membership:j2m_"))}
+    if membership != {
+        "membership:j2m_migrator:j2m_owner:postgres": [False, False, True],
+        "effective-membership:j2m_migrator:j2m_owner": [True, False, True],
+        "effective-membership:j2m_owner:pg_database_owner": [True, True, True],
+        "effective-membership:j2m_migrator:pg_database_owner": [True, False, True],
+    }:
+        raise ValueError("Unexpected fixture role membership")

@@ -273,3 +273,36 @@ Los runners operativos y su programación no cambian.
 Los tiempos de los subensayos son evidencia sintética. La ventana completa
 todavía requiere integrar la coordinación de tareas, el supervisor y la
 reapertura en una misma ejecución.
+
+### Respaldo previo a la migración y capacidad sintética
+
+La prueba restringida se ejecuta en 9d0e1f2a3b4c, antes del migrador.
+El fixture adquiere la exclusión de operaciones antes de exportar el
+snapshot, comprueba ausencia de otras sesiones en la base y cierra
+CONNECT a las identidades escritoras del ensayo durante la copia.
+j2m_backup conserva lectura y se prueba la denegación de nextval.
+La revisión se declara en la invocación, se comprueba en la restauración
+y se autentica en el índice del conjunto sintético. Una revisión errónea
+o una fila oculta por RLS debe impedir publicar un índice nuevo.
+El comando restringido exige la red interna del fixture, no admite
+destinos operativos y no altera el valor esperado por los runners legados.
+
+La matriz sintética comprueba propietarios, ACL de relaciones, ausencia
+de grants de columna antes de aprovisionar, RLS, identidad y modo de
+ejecución de las rutinas y membresías en ambos heads. La pertenencia
+implícita a pg_database_owner se modela por separado. Todavía falta
+declarar por objeto el contenido esperado de columnas, defaults,
+políticas, triggers y rutinas, y reconciliar los consumidores externos.
+La barrera usada sobre la base descartable no prescribe revocar
+CONNECT a PUBLIC ni a cuentas administradas en Supabase real.
+
+La sonda de capacidad usa dos procesos Gunicorn con tres conexiones
+cada uno y pools auxiliares con los tamaños candidatos de worker,
+migrador, respaldo y diagnóstico. Verifica los PID PostgreSQL desde
+una conexión ya contabilizada y prueba la denegación al superar cada
+pool. Los pools auxiliares modelan concurrencia, sin ejecutar en ese
+instante el runner de respaldo ni el migrador real. La sonda y la
+restauración previa a migrar son subetapas del fixture. La suspensión
+de tareas, la atestación HTTPS y la recuperación supervisada aún deben
+quedar unidas a ellas en una sola ventana de mantenimiento. Ninguna
+medición del fixture implica una capacidad de Supavisor certificada.

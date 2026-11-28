@@ -1,6 +1,7 @@
 """Synthetic PostgreSQL exercise for split roles and a durable writer fence."""
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from pathlib import Path
 import subprocess
 import tempfile
@@ -188,7 +189,8 @@ exec pgbouncer /tmp/j2m-pool.ini
                 time.sleep(0.25)
             else:
                 raise RuntimeError("Synthetic PostgreSQL did not enable TLS")
-            exercise_application_schema(network, run, sql, connection, pool_control, ca)
+            with ExitStack() as operation:
+                exercise_application_schema(network, run, sql, connection, pool_control, ca, operation)
         print("Synthetic per-role RLS, read-only dump coverage, durable writer fence and migrator verified.")
     finally:
         subprocess.run(["docker", "rm", "-f", name, pooler], capture_output=True, timeout=30)
