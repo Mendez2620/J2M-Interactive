@@ -32,10 +32,10 @@ def run(*arguments: str, check: bool = True, timeout: int = 60) -> str:
     return completed.stdout.strip()
 
 
-def write_certificates(directory: Path, *, hostnames=("localhost",)) -> tuple[Path, Path, Path]:
+def write_certificates(directory: Path, *, hostnames=("localhost",), authority_name="J2M synthetic CI CA") -> tuple[Path, Path, Path]:
     now = datetime.now(timezone.utc)
     ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "J2M synthetic CI CA")])
+    ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, authority_name)])
     ca = (
         x509.CertificateBuilder().subject_name(ca_name).issuer_name(ca_name)
         .public_key(ca_key.public_key()).serial_number(x509.random_serial_number())

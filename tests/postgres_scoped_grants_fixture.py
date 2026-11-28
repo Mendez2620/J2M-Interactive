@@ -89,7 +89,7 @@ def prove_scoped_grants_and_fence(sql, database, service_flow, connection, pool_
         return "; ".join(statements)
 
     for role in OBJECTS:
-        execute(f"CREATE ROLE {role} LOGIN PASSWORD 'synthetic-only'").check_returncode()
+        execute(f"CREATE ROLE {role} LOGIN PASSWORD 'synthetic-{role}'").check_returncode()
         execute(f"GRANT CONNECT ON DATABASE {database} TO {role}; "
                 f"GRANT USAGE ON SCHEMA public TO {role}").check_returncode()
         # Service accounts must not inherit the owner, a bypass role or public writes.

@@ -146,3 +146,72 @@ Referencias:
 - https://supabase.com/docs/guides/database/connecting-to-postgres
 - https://supabase.com/docs/guides/database/connection-management
 - https://supabase.com/docs/guides/api/securing-your-api
+
+## Inventario de relaciones y accesos alternativos
+
+El manifiesto scripts/j2m_transition_relation_manifest.json enumera las
+relaciones J2M de public que no pertenecen a extensiones. El catálogo
+legado autorizado contiene 42 tablas y 30 secuencias, sin vistas en ese
+conjunto. Las tres revisiones incrementales añaden cuatro tablas y una
+secuencia, además de claim_token en google_wallet_sync_jobs. El fixture
+compara los dos heads y rechaza relaciones sobrantes, faltantes y
+revisiones desconocidas. Esta comprobación se complementa con la matriz
+efectiva de roles del fixture existente. La lista de relaciones aún no
+constituye una autorización para transferir propiedad o aplicar grants.
+
+La vía pendiente por Data API es service_role, que tiene escritura
+efectiva sobre las tablas J2M. El catálogo observado contiene seis
+funciones de trigger en public y ninguna función pública de otro tipo.
+Los privilegios predeterminados y las membresías gestionadas requieren
+revisión por objeto; la ausencia de funciones SECURITY DEFINER en public
+no demuestra ausencia de caminos en otros esquemas. Para REST, GraphQL
+y RPC, contrastar esquemas realmente expuestos, roles efectivos y uso
+autorizado de service_role en Edge Functions, programadores y consumidores.
+El estado REMOVED de Railway es evidencia de despliegue, no de revocación
+de credenciales.
+
+El plan de barrera futura debe limitarse a relaciones, columnas, secuencias,
+funciones y defaults J2M explícitamente inventariados. Registrar ACL
+directas y efectivas antes del corte, probar negativamente cada camino
+por catálogo y desde consumidores autorizados, y preparar una reversión
+exclusiva de esos grants. Una vía de escritura sin atribución mantiene
+NO-GO. Conservar claves, políticas de otros proyectos y roles reservados.
+No aplicar el SQL de los fixtures al servicio administrado.
+
+## Presupuesto candidato de conexiones
+
+Primer techo de aplicación para medir, no una cuota contratada:
+web con 2 procesos y pool de 2 más 1 overflow por proceso (6), worker con
+pool de 2 más 1 overflow (3), migrador con 2 conexiones como máximo
+(incluido el lock dedicado), respaldo con 1 conexión sin paralelismo y
+2 conexiones reservadas para diagnóstico y recuperación. Total candidato:
+14 conexiones de cliente. Revalidar lotes y cualquier conexión directa,
+límites por combinación usuario/base del pooler, conexiones gestionadas,
+sesiones históricas y reserva server-side. Los límites del servidor no
+equivalen a capacidad disponible del pooler. Si falta margen, detener el
+plan y reducir concurrencia/configuración antes de habilitar identidades.
+
+## Autorización consolidada propuesta
+
+- **A. Aprovisionamiento.** Autorizar solo los seis candidatos, credenciales
+  fuera de Git, membresía del migrador limitada al propietario y ACL
+  enumerada para objetos J2M. Antes de transferir propiedad comprobar
+  CREATEROLE, capacidad de SET ROLE y reglas del rol administrado en el
+  ensayo. Probar conexión TLS, permisos efectivos, recuperación separada
+  y cobertura de respaldo. Abortar si un objeto o consumidor no está
+  clasificado o si el proveedor impide un paso.
+- **B. Mantenimiento y migración.** Autorizar una ventana para cerrar
+  admisión, suspender los tres runners, drenar escritores y adquirir el
+  lock compartido. Aplicar la barrera J2M aprobada y autenticar/restaurar
+  el respaldo exacto. Punto de control independiente antes de ejecutar
+  Alembic. Si falta respaldo reproducible o el estado es ambiguo,
+  mantener la barrera. No usar downgrade.
+- **C. Verificación y reapertura.** Autorizar por separado la reapertura
+  después de validar la revisión, contabilidad, roles, HTTPS, worker único
+  y recuperación. Restaurar exclusivamente los accesos aprobados y
+  reanudar tareas con los intervalos existentes.
+
+La duración de indisponibilidad sigue sin estimarse con evidencia hasta
+cronometrar la secuencia completa con los archivos independientes, la
+coordinación de tareas y el respaldo completo. No presentar los tiempos
+del fixture de relaciones como estimación de una ventana real.

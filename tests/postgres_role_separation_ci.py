@@ -1,15 +1,18 @@
 """Synthetic PostgreSQL exercise for split roles and a durable writer fence."""
 
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 import subprocess
+import tempfile
 import time
 from uuid import uuid4
 
+from nginx_recovery_ci import write_certificates
 from postgres_full_schema_fixture import exercise_application_schema
 
 SETUP = """
 CREATE ROLE j2m_owner NOLOGIN;
-CREATE ROLE j2m_migrator LOGIN NOINHERIT PASSWORD 'synthetic-only';
+CREATE ROLE j2m_migrator LOGIN NOINHERIT PASSWORD 'synthetic-j2m_migrator';
 GRANT j2m_owner TO j2m_migrator;
 CREATE ROLE j2m_web LOGIN PASSWORD 'synthetic-only';
 CREATE ROLE j2m_worker LOGIN PASSWORD 'synthetic-only';
@@ -57,14 +60,19 @@ def main():
         return subprocess.run(["docker", "exec", "-i", name, *args], capture_output=True,
                               timeout=20, **kwargs)
 
+    def password(role):
+        if role in {"j2m_migrator", "j2m_schema_web", "j2m_schema_worker"}:
+            return f"synthetic-{role}"
+        return "synthetic-only"
+
     def sql(statement, role="postgres", database="j2m_test"):
-        return run("env", "PGPASSWORD=synthetic-only", "psql", "-XAt", "-v", "ON_ERROR_STOP=1",
+        return run("env", f"PGPASSWORD={password(role)}", "psql", "-XAt", "-v", "ON_ERROR_STOP=1",
                    "-h", "127.0.0.1", "-U", role, "-d", database, "-c", statement)
 
     def connection(role, database, *, direct=False):
         endpoint = ["-h", "127.0.0.1"] if direct else ["-h", pooler, "-p", "6432"]
         return subprocess.Popen(
-            ["docker", "exec", "-i", name, "env", "PGPASSWORD=synthetic-only",
+            ["docker", "exec", "-i", name, "env", f"PGPASSWORD={password(role)}",
              "psql", "-XqAt", *endpoint, "-U", role, "-d", database],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
@@ -127,8 +135,8 @@ def main():
                 peer.kill()
                 peer.wait(timeout=8)
         start_pooler = """cat > /tmp/j2m-users <<'EOF'
-"j2m_schema_web" "synthetic-only"
-"j2m_schema_worker" "synthetic-only"
+"j2m_schema_web" "synthetic-j2m_schema_web"
+"j2m_schema_worker" "synthetic-j2m_schema_worker"
 "j2m_pool_admin" "synthetic-only"
 EOF
 cat > /tmp/j2m-pool.ini <<'EOF'
@@ -162,7 +170,25 @@ exec pgbouncer /tmp/j2m-pool.ini
             time.sleep(0.25)
         else:
             raise RuntimeError("Synthetic PgBouncer unavailable")
-        exercise_application_schema(network, run, sql, connection, pool_control)
+        with tempfile.TemporaryDirectory(prefix="j2m-role-tls-") as folder:
+            ca, cert, key = write_certificates(Path(folder), hostnames=("db",))
+            for path in (ca, cert, key):
+                subprocess.run(["docker", "cp", str(path), f"{name}:/tmp/{path.name}"],
+                               check=True, capture_output=True, timeout=20)
+            run("sh", "-ec", "chown postgres:postgres /tmp/server.crt /tmp/server.key; "
+                "chmod 600 /tmp/server.key; chmod 644 /tmp/server.crt", check=True)
+            for statement in ("ALTER SYSTEM SET ssl_cert_file='/tmp/server.crt'",
+                              "ALTER SYSTEM SET ssl_key_file='/tmp/server.key'",
+                              "ALTER SYSTEM SET ssl='on'"):
+                sql(statement).check_returncode()
+            sql("SELECT pg_reload_conf()").check_returncode()
+            for _ in range(20):
+                if sql("SHOW ssl").stdout.strip() == b"on":
+                    break
+                time.sleep(0.25)
+            else:
+                raise RuntimeError("Synthetic PostgreSQL did not enable TLS")
+            exercise_application_schema(network, run, sql, connection, pool_control, ca)
         print("Synthetic per-role RLS, read-only dump coverage, durable writer fence and migrator verified.")
     finally:
         subprocess.run(["docker", "rm", "-f", name, pooler], capture_output=True, timeout=30)
