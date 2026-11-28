@@ -21,7 +21,9 @@ from scripts.selfhost_backup import (
     _restored_media_references,
     _select_backup,
     _hash_file,
+    database_backup,
     encrypt_stream,
+    restore_isolated,
     media_backup,
     media_backup_from_docker,
     remote_retention_plan,
@@ -48,6 +50,36 @@ class MediaBackupPhase8E1BTestCase(unittest.TestCase):
             media_backup_from_docker("j2m-cutover-ready_j2m-media-copy",
                                      "j2m-interactive:" + "f" * 40,
                                      Path("unused"), Path("unused"), self.BACKUP_ID)
+
+    def test_restricted_backup_rejects_other_host_or_network_before_dump(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(
+            os.environ, {"J2M_SYNTHETIC_BACKUP_TEST": "1"},
+        ), patch("scripts.selfhost_backup.load_dpapi_key", return_value=self.KEY), patch(
+            "scripts.selfhost_backup._run_streaming_dump",
+        ) as dump:
+            root = Path(temporary)
+            ca = root / "test-ca"
+            ca.write_text("synthetic test placeholder")
+            env = root / "backup.env"
+            for host, network in (("unexpected", "j2m-roles-abcd1234-internal"), ("db", "bridge")):
+                with self.subTest(host=host, network=network):
+                    env.write_text(f"DATABASE_URL=postgresql://j2m_backup:test@{host}/full_schema\n"
+                                   f"DATABASE_SSL_ROOT_CERT={ca}\n")
+                    with self.assertRaises(ValueError):
+                        database_backup(env, root / "output", root / "key", network=network,
+                                        backup_id=self.BACKUP_ID, retain=False, acquire_lock=False,
+                                        restricted_snapshot="00000001-00000002-1")
+            dump.assert_not_called()
+
+    def test_legacy_revision_override_requires_synthetic_scope_and_verifier(self):
+        for synthetic, verifier in (("0", lambda _: True), ("1", None)):
+            with self.subTest(synthetic=synthetic), patch.dict(
+                os.environ, {"J2M_SYNTHETIC_BACKUP_TEST": synthetic},
+            ):
+                with self.assertRaises(ValueError):
+                    restore_isolated(Path("unused"), Path("unused"),
+                                     certification_head="9d0e1f2a3b4c",
+                                     verify_restored_coverage=verifier)
 
     def _asset(self, root: Path, business: int, kind: str, name: str, content: bytes) -> Path:
         target = root / f"businesses/{business}/{kind}/{name}.png"

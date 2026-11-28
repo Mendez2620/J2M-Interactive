@@ -1,4 +1,4 @@
-"""Draft fixture for scoped J2M service grants; exercised only against the restored synthetic schema."""
+"""Scoped J2M service-grant rehearsal against disposable PostgreSQL schemas."""
 from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
@@ -7,7 +7,7 @@ import time
 # Deliberately explicit: the fixture does not turn newly migrated objects into grants.
 OBJECTS = {
     "j2m_schema_web": {
-        "tables": {"businesses": "SELECT", "customers": "SELECT",
+        "tables": {"alembic_version": "SELECT", "businesses": "SELECT", "customers": "SELECT",
                    "transactions": "SELECT,INSERT", "loyalty_ledger_entries": "SELECT,INSERT"},
         "sequences": ("transactions_id_seq", "loyalty_ledger_entries_id_seq"),
     },
@@ -39,7 +39,9 @@ CUSTOMER_SEQUENCES = ("customers_id_seq", "referral_participants_id_seq",
 MIGRATOR_LOCK = (-1783214642, 9815)
 
 
-def prove_scoped_grants_and_fence(sql, database, service_flow, connection, pool_control):
+def prove_scoped_grants_and_fence(sql, database, service_flow, connection, pool_control, *, nominal=False, before_open=None, recovery_only=False):
+    if database not in {"full_schema", "full_restore_1"}:
+        raise ValueError("Unexpected synthetic writer database")
     def execute(statement, role="postgres"):
         return sql(statement, role, database=database)
 
@@ -89,9 +91,9 @@ def prove_scoped_grants_and_fence(sql, database, service_flow, connection, pool_
         return "; ".join(statements)
 
     for role in OBJECTS:
-        execute(f"CREATE ROLE {role} LOGIN PASSWORD 'synthetic-only'").check_returncode()
-        execute(f"GRANT CONNECT ON DATABASE {database} TO {role}; "
-                f"GRANT USAGE ON SCHEMA public TO {role}").check_returncode()
+        if execute(f"SELECT count(*) FROM pg_roles WHERE rolname='{role}'").stdout.strip() == b"0":
+            execute(f"CREATE ROLE {role} LOGIN PASSWORD 'synthetic-{role}'").check_returncode()
+        execute(f"GRANT USAGE ON SCHEMA public TO {role}").check_returncode()
         # Service accounts must not inherit the owner, a bypass role or public writes.
         properties = execute(f"""
             SELECT json_build_array(rolsuper,rolbypassrls,rolcreaterole,
@@ -100,8 +102,6 @@ def prove_scoped_grants_and_fence(sql, database, service_flow, connection, pool_
         """).stdout
         if json.loads(properties) != [False, False, False, False]:
             raise RuntimeError("Unexpected synthetic service role privilege")
-        if not execute("SET ROLE j2m_owner", role).returncode:
-            raise RuntimeError("Synthetic service assumed owner")
 
     execute(fixture_grants()).check_returncode()
     web, worker = OBJECTS
@@ -128,7 +128,7 @@ def prove_scoped_grants_and_fence(sql, database, service_flow, connection, pool_
         SELECT to_jsonb(l) FROM public.loyalty_ledger_entries l ORDER BY id;
     """
     before = execute(accounting).stdout
-    execute("GRANT j2m_owner TO j2m_schema_worker").check_returncode()
+    execute("GRANT j2m_owner TO j2m_schema_worker WITH INHERIT FALSE, SET FALSE").check_returncode()
     rejected = execute(manifest)
     assert rejected.returncode and b"Unexpected J2M service identity" in rejected.stderr
     execute("REVOKE j2m_owner FROM j2m_schema_worker").check_returncode()
@@ -224,7 +224,7 @@ def prove_scoped_grants_and_fence(sql, database, service_flow, connection, pool_
         ("GRANT DELETE ON public.customers TO PUBLIC", "REVOKE DELETE ON public.customers FROM PUBLIC"),
         (f"GRANT UPDATE ON SEQUENCE public.transactions_id_seq TO {worker}",
          f"REVOKE UPDATE ON SEQUENCE public.transactions_id_seq FROM {worker}"),
-        (f"GRANT j2m_owner TO {worker}", f"REVOKE j2m_owner FROM {worker}"),
+        (f"GRANT j2m_owner TO {worker} WITH INHERIT FALSE, SET FALSE", f"REVOKE j2m_owner FROM {worker}"),
     ):
         execute(grant).check_returncode()
         try:
@@ -236,6 +236,22 @@ def prove_scoped_grants_and_fence(sql, database, service_flow, connection, pool_
         finally:
             execute(revoke).check_returncode()
         assert_service_manifest(json.loads(execute(inventory_sql).stdout))
+
+    if before_open is not None:
+        before_open()
+    execute(f"GRANT CONNECT ON DATABASE {database} TO {web},{worker}").check_returncode()
+    for role in OBJECTS:
+        if not execute("SET ROLE j2m_owner", role).returncode:
+            raise RuntimeError("Synthetic service assumed owner")
+    if recovery_only:
+        pool_control(f"ENABLE {database}").check_returncode()
+        for role in OBJECTS:
+            with connection(role, database) as peer:
+                stdout, stderr = peer.communicate(b"SELECT current_user,current_database();\n", timeout=10)
+                if peer.returncode or stdout.strip() != f"{role}|{database}".encode():
+                    raise RuntimeError("Authenticated recovery pool connection failed")
+        service_flow(web, (root / "tests/postgres_manager_login_flow.py").read_text())
+        return
 
     service_flow(web, (root / "tests/postgres_manager_login_flow.py").read_text())
     service_flow(web, (root / "tests/postgres_platform_admin_flow.py").read_text())
@@ -341,13 +357,14 @@ COMMIT;
         _, rejected = newcomer.communicate(b"SELECT 1;\n", timeout=8)
         assert newcomer.returncode and b"disabled" in rejected.lower()
 
+    pool_control(f"ENABLE {database}").check_returncode()
     peer = connection(worker, database)
     try:
         peer.stdin.write(b"BEGIN; SELECT current_user,pg_backend_pid(); COMMIT; SELECT pg_backend_pid();\n")
         peer.stdin.flush()
         current, pid = peer.stdout.readline().strip().split(b"|")
         assert current == worker.encode() and peer.stdout.readline().strip() == pid
-        pool_control("DISABLE full_restore_1").check_returncode()
+        pool_control(f"DISABLE {database}").check_returncode()
         pool_blocked()
         # Database CONNECT is an independent gate even if the role remains LOGIN.
         execute(f"GRANT CONNECT ON DATABASE {database} TO j2m_backup,j2m_migrator; "
@@ -356,23 +373,24 @@ COMMIT;
         peer.stdin.write(b"BEGIN; SELECT count(*) FROM public.google_wallet_referral_jobs;\n")
         peer.stdin.flush()
         assert peer.stdout.readline().strip().isdigit()
-        coordinator = connection("postgres", database, direct=True)
-        send(coordinator, "SELECT pg_backend_pid();")
-        fence_pid = int(coordinator.stdout.readline())
-        try:
-            send(coordinator, " ".join(script.splitlines()))
-            await_lock(fence_pid)
-            kill(coordinator)
-            terminate_backend(fence_pid)
-            # The aborted fence must not be mistaken for a committed revocation.
-            state = execute(f"SELECT rolcanlogin,has_any_column_privilege(rolname,"
-                            f"'public.google_wallet_referral_jobs','UPDATE') FROM pg_roles WHERE rolname='{worker}'")
-            assert state.stdout.strip() == b"t|t"
-            assert execute(accounting).stdout == before
-            direct_blocked()
-            pool_blocked()
-        finally:
-            kill(coordinator)
+        if not nominal:
+            coordinator = connection("postgres", database, direct=True)
+            send(coordinator, "SELECT pg_backend_pid();")
+            fence_pid = int(coordinator.stdout.readline())
+            try:
+                send(coordinator, " ".join(script.splitlines()))
+                await_lock(fence_pid)
+                kill(coordinator)
+                terminate_backend(fence_pid)
+                # The aborted fence must not be mistaken for a committed revocation.
+                state = execute(f"SELECT rolcanlogin,has_any_column_privilege(rolname,"
+                                f"'public.google_wallet_referral_jobs','UPDATE') FROM pg_roles WHERE rolname='{worker}'")
+                assert state.stdout.strip() == b"t|t"
+                assert execute(accounting).stdout == before
+                direct_blocked()
+                pool_blocked()
+            finally:
+                kill(coordinator)
         with ThreadPoolExecutor(max_workers=1) as executor:
             fence = executor.submit(execute, "SELECT pg_backend_pid(); " + script)
             for _ in range(40):
@@ -437,7 +455,7 @@ COMMIT;
         assert_service_manifest(json.loads(restored_inventory.stdout))
 
     def refence():
-        pool_control("DISABLE full_restore_1").check_returncode()
+        pool_control(f"DISABLE {database}").check_returncode()
         execute(script).check_returncode()
         assert execute(f"SELECT count(*) {active}").stdout.strip() == b"0"
         direct_blocked()
@@ -475,37 +493,39 @@ COMMIT;
         finally:
             kill(coordinator)
 
-    interrupted(fixture_grants(), transaction=True)
-    assert execute(f"SELECT has_table_privilege('{web}','public.transactions','INSERT')").stdout.strip() == b"f"
-    refence()
-    restore_grants()
-    interrupted(fixture_grants() + ";")
-    assert execute(f"SELECT has_table_privilege('{web}','public.transactions','INSERT')").stdout.strip() == b"t"
-    pool_blocked()
-    refence()
-    restore_grants()
     login = f"ALTER ROLE {web} LOGIN; ALTER ROLE {worker} LOGIN;"
-    interrupted(login)
-    pool_blocked()
-    refence()
-    restore_grants()
-    execute(login).check_returncode()
-    interrupted("ENABLE full_restore_1;", pool=True)
-    newcomer = connection(worker, database)
-    _, error = newcomer.communicate(b"SELECT 1;\n", timeout=8)
-    assert newcomer.returncode and b"permission denied for database" in error
-    refence()
-    print("Killed a blocked fence and four reopening coordinators; connection gate and accounting verified.")
+    if not nominal:
+        interrupted(fixture_grants(), transaction=True)
+        assert execute(f"SELECT has_table_privilege('{web}','public.transactions','INSERT')").stdout.strip() == b"f"
+        refence()
+        restore_grants()
+        interrupted(fixture_grants() + ";")
+        assert execute(f"SELECT has_table_privilege('{web}','public.transactions','INSERT')").stdout.strip() == b"t"
+        pool_blocked()
+        refence()
+        restore_grants()
+        interrupted(login)
+        pool_blocked()
+        refence()
+        restore_grants()
+        execute(login).check_returncode()
+        interrupted(f"ENABLE {database};", pool=True)
+        newcomer = connection(worker, database)
+        _, error = newcomer.communicate(b"SELECT 1;\n", timeout=8)
+        assert newcomer.returncode and b"permission denied for database" in error
+        refence()
+        print("Killed a blocked fence and four reopening coordinators; connection gate and accounting verified.")
+
 
     restore_grants()
     execute(login).check_returncode()
-    pool_control("ENABLE full_restore_1").check_returncode()
+    pool_control(f"ENABLE {database}").check_returncode()
     direct_blocked()
     execute(f"GRANT CONNECT ON DATABASE {database} TO {roles}").check_returncode()
     for _ in range(5):
         reopened = connection(worker, database)
-        result, errors = reopened.communicate(b"SELECT current_user;\n", timeout=8)
-        if not reopened.returncode and not errors and result.strip() == worker.encode():
+        result, errors = reopened.communicate(b"SELECT current_user,current_database();\n", timeout=8)
+        if not reopened.returncode and not errors and result.strip() == f"{worker}|{database}".encode():
             break
         time.sleep(0.5)
     else:

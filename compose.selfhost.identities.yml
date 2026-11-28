@@ -1,0 +1,39 @@
+# Optional overlay for the future authorized identity cutover.
+x-j2m-database-ca: &j2m-database-ca
+  type: bind
+  source: ${J2M_DATABASE_CA_FILE:?set the verified database CA file}
+  target: /run/j2m/supabase-ca.pem
+  read_only: true
+  bind:
+    create_host_path: false
+
+services:
+  web:
+    environment:
+      WEB_CONCURRENCY: '2'
+      DATABASE_POOL_SIZE: '2'
+      DATABASE_MAX_OVERFLOW: '1'
+    env_file: !override
+      - path: ${J2M_WEB_ENV_FILE:?set the dedicated web environment file}
+        format: raw
+    volumes:
+      - *j2m-database-ca
+  google-wallet-worker:
+    environment:
+      DATABASE_POOL_SIZE: '2'
+      DATABASE_MAX_OVERFLOW: '1'
+    env_file: !override
+      - path: ${J2M_WORKER_ENV_FILE:?set the dedicated worker environment file}
+        format: raw
+    volumes:
+      - *j2m-database-ca
+  migrator:
+    environment:
+      DATABASE_POOL_SIZE: '2'
+      DATABASE_MAX_OVERFLOW: '0'
+    command: ["python", "-m", "scripts.run_certified_migration"]
+    env_file: !override
+      - path: ${J2M_MIGRATOR_ENV_FILE:?set the dedicated migrator environment file}
+        format: raw
+    volumes:
+      - *j2m-database-ca

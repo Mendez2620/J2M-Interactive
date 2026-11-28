@@ -13,7 +13,7 @@ from pathlib import Path
 
 from legacy_transition_digest import logical_digest as snapshot_digest
 from postgres_full_schema_fixture import BACKUP_GRANTS
-from nginx_recovery_ci import NGINX_IMAGE, production_ids, proxy_config, run, write_certificates
+from nginx_recovery_ci import NGINX_IMAGE, nonce_https_request, production_ids, proxy_config, run, write_certificates
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -115,16 +115,7 @@ def attest(folder, selected=img):
     def request(route, nonce):
         if route == "ready":
             interrupt_boundary("https")
-        http_input = (f"GET /api/{route} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n"
-                      f"X-J2M-Probe: {nonce}\r\n\r\n").encode()
-        client = ("import socket,ssl,json; c=ssl.create_default_context(cafile='/proof/ca.crt'); "
-                  "s=c.wrap_socket(socket.create_connection(('proxy',8443),3),server_hostname='localhost'); "
-                  f"s.sendall({http_input!r}); b=s.makefile('rb'); status=int(b.readline().split()[1]); "
-                  "headers={k.lower():v.strip() for k,v in (line.decode().split(':',1) "
-                  "for line in iter(b.readline,b'\\r\\n'))}; "
-                  "print(json.dumps([status,headers.get('x-j2m-revision')]))")
-        return json.loads(r("docker", "run", "--rm", "--network", p, "--mount",
-                            f"type=bind,src={folder},dst=/proof,readonly", new, "python", "-c", client))
+        return nonce_https_request(p, folder, new, route, nonce)
 
     return prove_https(snapshot, request, lambda: r("docker", "logs", n["proxy"]),
                        revision=sha if selected == new else None)

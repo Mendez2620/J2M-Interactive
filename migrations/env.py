@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 import logging
 from logging.config import fileConfig
 
@@ -94,9 +95,10 @@ def run_migrations_online():
     if conf_args.get("process_revision_directives") is None:
         conf_args["process_revision_directives"] = process_revision_directives
 
-    connectable = get_engine()
+    dedicated = config.attributes.get("j2m_migration_connection")
+    manager = nullcontext(dedicated) if dedicated is not None else get_engine().connect()
 
-    with connectable.connect() as connection:
+    with manager as connection:
         context.configure(
             connection=connection,
             target_metadata=get_metadata(),

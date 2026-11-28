@@ -4,11 +4,11 @@ import re
 import subprocess
 
 
-def logical_digest(container, database):
+def logical_digest(container, database, *, user="j2m_test"):
     # Compare the full logical schema, rows, and sequence state. PostgreSQL
     # emits a fresh psql restriction key for each dump.
     dump = subprocess.check_output(
-        ["docker", "exec", container, "pg_dump", "-U", "j2m_test", "--no-owner",
+        ["docker", "exec", container, "pg_dump", "-U", user, "--no-owner",
          "--no-acl", database], timeout=25,
     )
     if not dump or len(dump) > 8 * 1024 * 1024:

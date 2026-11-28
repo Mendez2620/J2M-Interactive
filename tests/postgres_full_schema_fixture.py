@@ -1,15 +1,27 @@
 """Verify dump coverage against both migrated J2M schemas in the synthetic role harness."""
+from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
+from contextlib import ExitStack, contextmanager
 from difflib import unified_diff
+from unittest.mock import patch
+from time import monotonic, sleep
 from pathlib import Path
+import os
 import re
 import subprocess
 import sys
+import json
 
 from postgres_scoped_grants_fixture import prove_scoped_grants_and_fence
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from scripts.selfhost_backup import verify_transition_accounting
+from scripts.selfhost_backup import (
+    _hash_file, exclusive_lock, integral_backup, restore_integral_isolated, verify_integral_set, verify_transition_accounting,
+)
+from scripts.historical_transition_evidence import Backend, FINAL_HEAD, LEGACY_SHA, prove_https
+from scripts.check_transition_relation_manifest import RELATION_QUERY, verify_relation_manifest
+from scripts.check_transition_security_catalog import CATALOG_QUERY, verify_catalog, verify_fixture_security
 
 SEED = """
 from run import app
@@ -69,17 +81,563 @@ FROM pg_sequences WHERE schemaname='public' ORDER BY sequencename;
 """
 
 
-def exercise_application_schema(network, run, sql, connection, pool_control):
+def prove_incoming_membership_rejected(sql, database):
+    """Exercise the catalog query against a real, rollback-scoped incoming grant."""
+    from scripts.transition_membership_manifest import verify_fixture_memberships
+
+    for grant in ("", "CREATE ROLE fixture_external LOGIN; GRANT j2m_owner TO fixture_external;"):
+        result = sql(f"BEGIN; {grant} {CATALOG_QUERY} ROLLBACK;", database=database)
+        result.check_returncode()
+        catalog = json.loads(next(line for line in result.stdout.splitlines() if line.startswith(b"{")))
+        if not grant:
+            verify_fixture_memberships(catalog)
+            continue
+        try:
+            verify_fixture_memberships(catalog)
+        except ValueError:
+            if "membership:fixture_external:j2m_owner:postgres" not in catalog:
+                raise RuntimeError("The incoming grant did not reach the PostgreSQL catalog") from None
+        else:
+            raise AssertionError("Incoming membership from an external login was accepted")
+
+
+def prove_alternate_write_barrier(sql, database):
+    def read():
+        result = sql(CATALOG_QUERY, database=database)
+        result.check_returncode()
+        return json.loads(result.stdout)
+
+    approved = read()
+    # Reconcile against a captured catalog before and after exercising scoped
+    # revocation. Reserved provider roles are intentionally absent from this
+    # synthetic server; these disposable names model their privilege paths.
+    statement = """
+BEGIN;
+CREATE ROLE j2m_fixture_gateway NOLOGIN;
+CREATE ROLE j2m_fixture_writer NOLOGIN;
+GRANT j2m_fixture_writer TO j2m_fixture_gateway WITH INHERIT TRUE, SET FALSE;
+CREATE SCHEMA fixture_unrelated;
+CREATE TABLE fixture_unrelated.data (id integer);
+GRANT INSERT ON fixture_unrelated.data TO j2m_fixture_writer;
+GRANT UPDATE (name) ON public.businesses TO j2m_fixture_writer;
+GRANT UPDATE ON public.businesses TO PUBLIC;
+CREATE FUNCTION public.fixture_gateway_write() RETURNS void LANGUAGE sql SECURITY DEFINER
+SET search_path = pg_catalog AS $$ UPDATE public.businesses SET name=name WHERE false $$;
+DO $$ BEGIN
+    IF NOT pg_has_role('j2m_fixture_gateway','j2m_fixture_writer','USAGE')
+       OR NOT has_column_privilege('j2m_fixture_gateway','public.businesses','name','UPDATE')
+       OR NOT has_function_privilege('j2m_fixture_gateway','public.fixture_gateway_write()','EXECUTE')
+    THEN RAISE EXCEPTION 'Unexpected initial access'; END IF;
+END $$;
+REVOKE UPDATE ON public.businesses FROM PUBLIC;
+REVOKE UPDATE (name) ON public.businesses FROM j2m_fixture_writer;
+REVOKE EXECUTE ON FUNCTION public.fixture_gateway_write() FROM PUBLIC;
+DO $$ BEGIN
+    IF has_column_privilege('j2m_fixture_gateway','public.businesses','name','UPDATE')
+       OR has_function_privilege('j2m_fixture_gateway','public.fixture_gateway_write()','EXECUTE')
+       OR NOT has_table_privilege('j2m_fixture_gateway','fixture_unrelated.data','INSERT')
+    THEN RAISE EXCEPTION 'Scoped barrier mismatch'; END IF;
+END $$;
+SET LOCAL ROLE j2m_fixture_gateway;
+DO $$ BEGIN
+    BEGIN
+        PERFORM public.fixture_gateway_write();
+        RAISE EXCEPTION 'Gateway retained RPC access';
+    EXCEPTION WHEN insufficient_privilege THEN NULL;
+    END;
+END $$;
+ROLLBACK;
+"""
+    sql(statement, database=database).check_returncode()
+    verify_catalog(approved, read())
+
+    sql("GRANT UPDATE (name) ON public.businesses TO j2m_backup", database=database).check_returncode()
+    try:
+        try:
+            verify_catalog(approved, read())
+        except ValueError as error:
+            assert "changed=1" in str(error)
+        else:
+            raise AssertionError("Unexpected column grant was accepted")
+    finally:
+        sql("REVOKE UPDATE (name) ON public.businesses FROM j2m_backup", database=database).check_returncode()
+    verify_catalog(approved, read())
+
+
+@contextmanager
+def fence_legacy_writers(sql, connection, pool_control, database):
+    """Prove authenticated access before denying and draining the same writers."""
+    roles = ("j2m_schema_web", "j2m_schema_worker")
+    for role in roles:
+        sql(f"CREATE ROLE {role} LOGIN PASSWORD 'synthetic-{role}'; "
+            f"GRANT SELECT ON public.businesses TO {role}; "
+            f"GRANT UPDATE (name) ON public.businesses TO {role}",
+            database=database).check_returncode()
+        observed = sql("SELECT current_user, current_database(), "
+                       "has_column_privilege(current_user,'public.businesses','name','UPDATE')",
+                       role, database=database)
+        observed.check_returncode()
+        assert observed.stdout.strip() == f"{role}|{database}|t".encode()
+
+    with ExitStack() as peers:
+        persistent = []
+        for role in roles:
+            peer = peers.enter_context(connection(role, database))
+            peers.callback(lambda process=peer: process.kill() if process.poll() is None else None)
+            persistent.append(peer)
+            peer.stdin.write(b"\\set ON_ERROR_STOP on\nSELECT current_user,current_database();\n")
+            peer.stdin.flush()
+            with ThreadPoolExecutor(max_workers=1) as reader:
+                try:
+                    observed = reader.submit(peer.stdout.readline).result(timeout=8)
+                except TimeoutError:
+                    peer.kill()
+                    raise
+            assert observed.strip() == f"{role}|{database}".encode()
+        pool_control("DISABLE full_schema").check_returncode()
+        sql("REVOKE CONNECT ON DATABASE full_schema FROM PUBLIC,j2m_schema_web,j2m_schema_worker; "
+            "GRANT CONNECT ON DATABASE full_schema TO j2m_backup",
+            database=database).check_returncode()
+        sql("SELECT pg_terminate_backend(pid, 3000) FROM pg_stat_activity "
+            "WHERE datname=current_database() AND usename IN ('j2m_schema_web','j2m_schema_worker')",
+            database=database).check_returncode()
+        for peer in persistent:
+            output, stderr = peer.communicate(b"SELECT 1;\n", timeout=8)
+            assert peer.returncode and not output.strip() and stderr
+        for role in roles:
+            denied = sql("SELECT 1", role, database=database)
+            assert denied.returncode and b"permission denied for database" in denied.stderr
+            with connection(role, database) as rejected:
+                _, stderr = rejected.communicate(b"SELECT 1;\n", timeout=8)
+                assert rejected.returncode and b"disabled" in stderr.lower()
+            sql(f"REVOKE UPDATE (name) ON public.businesses FROM {role}; "
+                f"REVOKE SELECT ON public.businesses FROM {role}", database=database).check_returncode()
+
+
+SIMULATED_BACKUP_TASKS = ("local-backup", "external-copy", "restore-test")
+
+
+def run_simulated_backup_task(lock_file, suspension, task):
+    if task not in SIMULATED_BACKUP_TASKS:
+        raise ValueError("Unexpected synthetic task")
+    probe = """
+from pathlib import Path
+import sys
+from scripts.selfhost_backup import exclusive_lock
+
+with exclusive_lock(Path(sys.argv[1])):
+    if Path(sys.argv[2]).exists():
+        raise SystemExit(75)
+"""
+    return subprocess.run(
+        [sys.executable, "-c", probe, str(lock_file), str(suspension), task],
+        cwd=ROOT, capture_output=True, timeout=20,
+    )
+
+
+@contextmanager
+def certify_pre_migration_backup(network, sql, root, ca, pool_control, connection, image, *, nominal=False):
+    """Run the real integral backup with an independently exported snapshot."""
+    database = "full_schema"
+    output = root / "restricted-backups"
+    env_file = root / "restricted-backup.env"
+    env_file.write_text(f"DATABASE_URL=postgresql://j2m_backup:synthetic-only@db/{database}\n"
+                        f"DATABASE_SSL_ROOT_CERT={ca}\n", encoding="utf-8")
+    key_file = root / "synthetic-key"
+    logo = "businesses/1/logo/" + "a" * 32 + ".png"
+    logo_path = root / "media" / logo
+    logo_path.parent.mkdir(parents=True)
+    from PIL import Image
+    Image.new("RGBA", (2, 2), (255, 0, 0, 128)).save(logo_path)
+    sql(f"UPDATE public.businesses SET logo_path='{logo}' WHERE id=1", database=database).check_returncode()
+    coverage_queries = sql(DATA_QUERIES, database=database)
+    coverage_queries.check_returncode()
+    queries = coverage_queries.stdout.decode().splitlines()
+
+    def run_backup(expected_head="9d0e1f2a3b4c", expected_error=None):
+        start = monotonic()
+        name = network.removesuffix("-internal")
+        process = subprocess.Popen(
+            ["docker", "exec", "-i", name, "psql", "-XqAt", "-v", "ON_ERROR_STOP=1",
+             "-U", "postgres", "-d", database],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, encoding="utf-8",
+        )
+
+        def read_snapshot():
+            process.stdin.write("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;\n"
+                                "SELECT pg_export_snapshot();\n" + RELATION_QUERY + ";\n"
+                                + "\n".join(queries) + "\n")
+            process.stdin.flush()
+            return [process.stdout.readline().rstrip("\r\n") for _ in range(len(queries) + 2)]
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            try:
+                snapshot_id, relations, *expected = executor.submit(read_snapshot).result(timeout=20)
+                if not snapshot_id or len(expected) != len(queries) or not all(expected):
+                    raise RuntimeError("Independent source inventory was incomplete")
+
+                def coverage(restored):
+                    # Include the exact relation set, otherwise new empty relations
+                    # could disappear without affecting the row comparison.
+                    destination = json.loads(restored(RELATION_QUERY))
+                    return (destination == json.loads(relations)
+                            and all(restored(statement) == row
+                                    for statement, row in zip(queries, expected, strict=True)))
+
+                with patch.dict(os.environ, {"J2M_SYNTHETIC_BACKUP_TEST": "1"}), patch(
+                    "scripts.selfhost_backup.load_dpapi_key", return_value=bytes(range(32))
+                ):
+                    from scripts import selfhost_backup as backup
+                    verify_media = backup._restored_media_references
+                    def partial_restore(name, archived):
+                        pause_for_source_supervisor("restore-partial", network, root, image, sql,
+                                                    auxiliary=(name,))
+                        return verify_media(name, archived)
+                    try:
+                        with patch.object(backup, "_restored_media_references", side_effect=partial_restore):
+                            index = integral_backup(
+                                env_file, root / "media", output, key_file, retries=1, network=network,
+                                timeout=180, restricted_snapshot=snapshot_id, verify_restored_coverage=coverage,
+                                certification_head=expected_head, acquire_lock=False,
+                            )
+                    except RuntimeError as error:
+                        if expected_error is None or expected_error not in str(error):
+                            raise
+                    else:
+                        assert expected_error is None, "Unexpected backup certification"
+                        assert verify_integral_set(index, key_file)
+                        tag = "j2m-interactive:reconstructed-" + LEGACY_SHA
+                        image_id = subprocess.check_output(
+                            ["docker", "image", "inspect", "--format", "{{.Id}}", tag],
+                            text=True, timeout=15,
+                        ).strip()
+                        label = subprocess.check_output(
+                            ["docker", "image", "inspect", "--format",
+                             '{{index .Config.Labels "org.opencontainers.image.revision"}}', image_id],
+                            text=True, timeout=15,
+                        ).strip()
+                        if label != LEGACY_SHA:
+                            raise RuntimeError("Historical reconstruction revision label does not match")
+                        digest = _hash_file(index)
+                        report = restore_integral_isolated(
+                            index, key_file, tag, timeout=180, expected_image_id=image_id,
+                            expected_index_sha256=digest,
+                        )
+                        assert report.alembic_revision == expected_head and report.businesses == 2 and report.customers == 2
+                        print(f"Reconstructed legacy={LEGACY_SHA} image={image_id} index_sha256={digest}")
+                print(f"Restricted integral backup ({'rejection' if expected_error else 'verified'}): "
+                      f"{monotonic() - start:.2f}s")
+            finally:
+                process.stdin.close()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=10)
+                process.stdout.close()
+
+    # The disposable DB normally inherits CONNECT from PUBLIC. During the
+    # archive window only the exporter and the restricted reader may connect.
+    lock_file = root / ".operations.lock"
+    suspension = root / "tasks-suspended.json"
+
+    started = monotonic()
+    with suspension.open("x", encoding="utf-8") as state:
+        json.dump({"database": database, "network": network, "state": "suspended"}, state)
+        state.flush()
+        os.fsync(state.fileno())
+    for task in SIMULATED_BACKUP_TASKS:
+        if run_simulated_backup_task(lock_file, suspension, task).returncode != 75:
+            raise RuntimeError(f"Simulated task ignored durable suspension without a lock: {task}")
+    with exclusive_lock(lock_file):
+        for task in SIMULATED_BACKUP_TASKS:
+            competing_task = run_simulated_backup_task(lock_file, suspension, task)
+            if competing_task.returncode == 0 or b"Ya existe una" not in competing_task.stderr:
+                raise RuntimeError(f"Simulated task bypassed the transition lock: {task}")
+        fence_started = monotonic()
+        fence_legacy_writers(sql, connection, pool_control, database)
+        print(f"Authenticated writer closure and drain: {monotonic() - fence_started:.2f}s")
+        try:
+            for role in ("j2m_schema_web", "j2m_schema_worker", "j2m_migrator"):
+                denied = sql("SELECT 1", role, database=database)
+                assert denied.returncode and b"permission denied for database" in denied.stderr
+            active = sql("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() "
+                         "AND pid<>pg_backend_pid() AND backend_type='client backend'", database=database)
+            active.check_returncode()
+            assert active.stdout.strip() == b"0"
+            assert sql("SELECT nextval('public.customers_id_seq')", "j2m_backup",
+                       database=database).returncode
+            pause_for_source_supervisor("fence", network, root, image, sql)
+            run_backup()
+            pause_for_source_supervisor("restore", network, root, image, sql)
+            if not nominal:
+                before = {path.name for path in output.iterdir()}
+                run_backup(expected_head="c3d4e5f6a7b8", expected_error="head Alembic esperado")
+                assert {path.name for path in output.iterdir()} == before
+                sql("ALTER TABLE platform_admins ENABLE ROW LEVEL SECURITY; "
+                    "CREATE POLICY synthetic_incomplete ON platform_admins FOR SELECT TO j2m_backup USING (false)",
+                    database=database).check_returncode()
+                try:
+                    run_backup(expected_error="inventario independiente")
+                    assert {path.name for path in output.iterdir()} == before
+                finally:
+                    sql("DROP POLICY synthetic_incomplete ON platform_admins; "
+                        "ALTER TABLE platform_admins DISABLE ROW LEVEL SECURITY", database=database).check_returncode()
+            sql("GRANT CONNECT ON DATABASE full_schema TO j2m_migrator",
+                database=database).check_returncode()
+            yield
+        except Exception:
+            # Disposable database stays closed until the outer cleanup removes it.
+            raise
+        else:
+            sql("GRANT CONNECT ON DATABASE full_schema TO PUBLIC; "
+                "REVOKE CONNECT ON DATABASE full_schema FROM j2m_backup,j2m_migrator",
+                database=database).check_returncode()
+            for role in ("j2m_schema_web", "j2m_schema_worker"):
+                sql("SELECT 1", role, database=database).check_returncode()
+    suspension.unlink()
+    for task in SIMULATED_BACKUP_TASKS:
+        run_simulated_backup_task(lock_file, suspension, task).check_returncode()
+    print(f"Synthetic admission and task lock restored after {monotonic() - started:.2f}s.")
+
+
+def attest_fenced_origin(network, ca, image, revision, sql, *, reopened=False, nominal=False):
+    """Attest the migrated source with either fenced or restored service identities."""
+    from nginx_recovery_ci import NGINX_IMAGE, nonce_https_request, proxy_config, run, write_certificates
+
+    if not re.fullmatch(r"j2m-roles-[0-9a-f]{8}-internal", network):
+        raise ValueError("Unexpected synthetic HTTPS network")
+    prefix = network.removesuffix("-internal")
+    names = {role: f"{prefix}-attest-{role}" for role in ("web", "worker", "proxy")}
+    db = json.loads(run("docker", "inspect", prefix))[0]["Id"]
+    network_spec = json.loads(run("docker", "network", "inspect", network))[0]
+    if (not network_spec["Internal"] or {entry["Name"] for entry in network_spec["Containers"].values()}
+            != {prefix, f"{prefix}-pooler"}):
+        raise RuntimeError("Unexpected initial Docker network membership")
+    network_id = network_spec["Id"]
+    folder = ca.parent / ("https-reopened" if reopened else "https")
+    folder.mkdir(mode=0o755, exist_ok=True)
+    write_certificates(folder)
+    (folder / "nginx.conf").write_text(proxy_config().replace(
+        "access_log off;",
+        "log_format proof '$http_x_j2m_probe $uri $upstream_addr $upstream_status'; access_log /dev/stdout proof;",
+    ), encoding="utf-8")
+    started = monotonic()
+    selected = image
+    selected_revision = revision
+
+    def query(statement):
+        result = sql(statement, database="full_schema")
+        result.check_returncode()
+        return result.stdout.decode().strip()
+
+    def snapshot():
+        observed = json.loads(run("docker", "network", "inspect", network))[0]
+        services = {role: json.loads(run("docker", "inspect", name))[0] for role, name in names.items()}
+        if (observed["Id"] != network_id or not observed["Internal"]
+                or db not in observed["Containers"]
+                or query("SELECT version_num FROM alembic_version") != FINAL_HEAD):
+            raise RuntimeError("Fenced origin changed during HTTPS attestation")
+        for role in ("web", "worker", "proxy"):
+            service = services[role]
+            if (not service["State"]["Running"] or service["HostConfig"]["PortBindings"]
+                    or set(service["NetworkSettings"]["Networks"]) != {network}
+                    or service["Config"]["Labels"].get("j2m.synthetic.role") != role
+                    or (role != "proxy" and service["Image"] != selected)):
+                raise RuntimeError("Unexpected synthetic HTTPS service identity")
+        if observed["Containers"].keys() != {db, *(item["Id"] for item in services.values()), *pooler_ids}:
+            raise RuntimeError("Unexpected network member during attestation")
+        web = services["web"]
+        return Backend(web["Image"], web["Id"], web["NetworkSettings"]["Networks"][network]["IPAddress"])
+
+    pooler_ids = set(network_spec["Containers"]) - {db}
+    def start_services():
+        for role in ("web", "worker"):
+            command = () if role == "web" else ("flask", "--app", "run.py", "run-google-wallet-sync-worker")
+            process = "web" if role == "web" else "google-wallet-worker"
+            login = f"j2m_schema_{role}" if reopened else "j2m_backup"
+            password = f"synthetic-{login}" if reopened else "synthetic-only"
+            db_url = (f"postgresql://{login}:{password}@db/full_schema"
+                      "?sslmode=verify-full&sslrootcert=/run/j2m/supabase-ca.pem")
+            run("docker", "run", "-d", "--name", names[role], "--network", network,
+                "--network-alias", role, "--label", f"j2m.synthetic.role={role}",
+                "--env-file", str(ROOT / ".env.wallet-demo.example"),
+                "-e", f"J2M_PROCESS_TYPE={process}", "-e", f"J2M_RELEASE_IMAGE=j2m-interactive:{selected_revision or ''}",
+                "-e", f"DATABASE_URL={db_url}", "-e", "DATABASE_SSLMODE=verify-full",
+                "-e", "GOOGLE_WALLET_MODE=disabled", "-e", "APPLE_WALLET_MODE=disabled", "--mount",
+                f"type=bind,src={ca},dst=/run/j2m/supabase-ca.pem,readonly", selected, *command)
+    def attest():
+        for role in ("web", "worker"):
+            for _ in range(30):
+                health = subprocess.run(
+                    ["docker", "exec", names[role], "python", "scripts/container_healthcheck.py"],
+                    capture_output=True, timeout=10,
+                )
+                if health.returncode == 0:
+                    break
+                sleep(.25)
+            else:
+                raise RuntimeError(f"Synthetic {role} healthcheck did not pass")
+        def request(route, nonce):
+            if route == "ready" and not reopened:
+                pause_for_source_supervisor("https", network, ca.parent, image, sql,
+                                            auxiliary=tuple(names.values()))
+            return nonce_https_request(network, folder, image, route, nonce)
+
+        return prove_https(
+            snapshot, request,
+            lambda: run("docker", "logs", names["proxy"]), revision=selected_revision,
+        )
+
+    try:
+        start_services()
+        run("docker", "run", "-d", "--name", names["proxy"], "--network", network, "--network-alias", "proxy",
+            "--label", "j2m.synthetic.role=proxy", "--mount", f"type=bind,src={folder},dst=/etc/nginx/tls,readonly",
+            NGINX_IMAGE, "nginx", "-c", "/etc/nginx/tls/nginx.conf", "-g", "daemon off;")
+        backend = attest()
+        if reopened:
+            for role in ("web", "worker"):
+                login = f"j2m_schema_{role}"
+                probe = (
+                    "from run import app; from app.extensions import db; from sqlalchemy import text; "
+                    "app.app_context().push(); row=db.session.execute("
+                    "text('SELECT current_user,session_user,current_database()')).one(); "
+                    f"assert tuple(row) == {(login, login, 'full_schema')!r}"
+                )
+                run("docker", "exec", names[role], "python", "-c", probe)
+            verify_transition_accounting(query)
+            print(f"Reopened origin HTTPS and effective service identities: {monotonic() - started:.2f}s")
+            return
+        if nominal:
+            verify_transition_accounting(query)
+            print(f"Nominal fenced HTTPS: {monotonic() - started:.2f}s, backend={backend.container}")
+            return
+        run("docker", "rm", "-f", names["web"], names["worker"])
+        try:
+            snapshot()
+        except RuntimeError:
+            pass
+        except subprocess.CalledProcessError:
+            pass
+        else:
+            raise RuntimeError("Missing fenced backend was accepted")
+        for role in ("j2m_schema_web", "j2m_schema_worker"):
+            assert sql("SELECT 1", role, database="full_schema").returncode
+        legacy_tag = "j2m-interactive:reconstructed-" + LEGACY_SHA
+        legacy = json.loads(run("docker", "image", "inspect", legacy_tag))[0]
+        if legacy["Config"]["Labels"].get("org.opencontainers.image.revision") != LEGACY_SHA:
+            raise RuntimeError("Recovery image does not match the historical revision")
+        selected, selected_revision = legacy["Id"], None
+        start_services()
+        run("docker", "exec", names["proxy"], "nginx", "-c", "/etc/nginx/tls/nginx.conf", "-s", "reload")
+        recovered = attest()
+        if recovered.container == backend.container:
+            raise RuntimeError("Expected a different recovered backend")
+        verify_transition_accounting(query)
+        print(f"Same-origin fenced HTTPS and backend recovery: {monotonic() - started:.2f}s, "
+              f"target={backend.container}, recovered={recovered.container}")
+    finally:
+        for name in names.values():
+            subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=30)
+
+
+def pause_for_source_supervisor(boundary, network, root, image, sql, *, auxiliary=()):
+    checkpoint = os.environ.get("J2M_ROLE_SUPERVISION")
+    if checkpoint is None or boundary != os.environ.get("J2M_ROLE_BOUNDARY", "migrate"):
+        return
+    from legacy_transition_digest import logical_digest
+    from scripts.isolated_transition import _save
+
+    path = Path(checkpoint)
+    token = network.removesuffix("-internal")
+    if path.parent.resolve() != root.resolve() or token != os.environ.get("J2M_ROLE_SYNTHETIC_TOKEN"):
+        raise ValueError("Unexpected synthetic supervisor path or cluster")
+    indexes = list((root / "restricted-backups").glob("j2m-set-*.j2mbackup"))
+    has_index = boundary not in {"fence", "restore-partial"}
+    if len(indexes) != int(has_index):
+        raise RuntimeError("Unexpected certified backup count at checkpoint")
+    checkout = subprocess.check_output(
+        ["docker", "image", "inspect", "--format", '{{index .Config.Labels "org.opencontainers.image.revision"}}',
+         image], text=True, timeout=15,
+    ).strip()
+    record = {"phase": boundary, "status": "pending", "database": "full_schema",
+              "checkout": checkout, "network": network, "digest": logical_digest(token, "full_schema", user="postgres"),
+              "image": image, "index": indexes[0].name if has_index else None,
+              "index_sha256": _hash_file(indexes[0]) if has_index else None,
+              "auxiliary": {}}
+    for name in auxiliary:
+        info = json.loads(subprocess.check_output(["docker", "inspect", name], timeout=15))[0]
+        record["auxiliary"][name] = info["Id"]
+    cluster = sql("SELECT system_identifier, (SELECT oid FROM pg_database "
+                  "WHERE datname=current_database()) FROM pg_control_system()", database="full_schema")
+    cluster.check_returncode()
+    record["cluster"], record["database_oid"] = cluster.stdout.decode().strip().split("|")
+    _save(path, record)
+    while True:
+        sleep(1)
+
+
+def exercise_application_schema(network, run, sql, connection, pool_control, ca, operation):
+    nominal = os.environ.get("J2M_NOMINAL_TRANSITION") == "1"
     sql("CREATE DATABASE full_schema OWNER j2m_owner").check_returncode()
 
-    def app(*args, role="j2m_migrator", database="full_schema"):
-        options = ["-e", "PGOPTIONS=-c role=j2m_owner"] if role == "j2m_migrator" else []
-        subprocess.run(["docker", "run", "--rm", "--network", network,
-                        "--env-file", str(ROOT / ".env.wallet-demo.example"),
-                        "-e", f"DATABASE_URL=postgresql://{role}:synthetic-only@db/{database}",
-                        *options, "-e", "GOOGLE_WALLET_MODE=disabled",
-                        "-e", "APPLE_WALLET_MODE=disabled", "j2m-interactive:wallet-demo-synthetic", *args],
-                       check=True, timeout=90)
+    root = ca.parent
+    media = root / "media"
+    media.mkdir()
+    layer = root / "synthetic-compose.json"
+    layer.write_text(json.dumps({
+        "networks": {"j2m-private": {"external": True, "name": network, "driver": None}},
+        "services": {"web": {"volumes": [{"type": "bind", "source": str(media),
+                                           "target": "/app/instance/media", "read_only": True}]}},
+    }), encoding="utf-8")
+    candidate = os.environ.get("J2M_ROLE_FIXTURE_IMAGE", "j2m-interactive:wallet-demo-synthetic")
+    metadata = json.loads(subprocess.check_output(["docker", "image", "inspect", candidate], timeout=15))[0]
+    if candidate.startswith("j2m-interactive:transition-"):
+        checkout = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True, timeout=15).strip()
+        label = (metadata["Config"].get("Labels") or {}).get("org.opencontainers.image.revision")
+        if label != checkout or candidate != f"j2m-interactive:transition-{checkout}":
+            raise RuntimeError("Candidate image revision differs from the checkout")
+        print(f"Candidate checkout={checkout} image={metadata['Id']}")
+    env = {
+        **os.environ,
+        "J2M_IMAGE": metadata["Id"],
+        "J2M_ENV_FILE": str(ROOT / ".env.wallet-demo.example"),
+        "J2M_CLOUDFLARED_ENV_FILE": str(ROOT / ".env.cloudflared.example"),
+        "J2M_DATABASE_CA_FILE": str(ca),
+    }
+    project = network.removesuffix("-internal")
+    services = {"j2m_migrator": ("migrator", "MIGRATOR"),
+                "j2m_schema_web": ("web", "WEB"),
+                "j2m_schema_worker": ("google-wallet-worker", "WORKER")}
+    base_env = (ROOT / ".env.wallet-demo.example").read_text(encoding="utf-8").splitlines()
+    base_env = [line for line in base_env if not line.startswith(
+        ("DATABASE_URL=", "DATABASE_SSLMODE=", "GOOGLE_WALLET_MODE=", "APPLE_WALLET_MODE="))]
+    for _, suffix in services.values():
+        env[f"J2M_{suffix}_ENV_FILE"] = str(root / f"{suffix}.env")
+
+    def app(*args, role="j2m_migrator", database="full_schema", ca_override=None, dedicated=False):
+        service, _ = services[role]
+        for login, (_, suffix) in services.items():
+            path = root / f"{suffix}.env"
+            path.write_text("\n".join([
+                *base_env, "GOOGLE_WALLET_MODE=disabled", "APPLE_WALLET_MODE=disabled",
+                "DATABASE_SSLMODE=verify-full", "DATABASE_POOL_TIMEOUT=1",
+                f"DATABASE_URL=postgresql://{login}:synthetic-{login}@db/{database}"
+                "?sslmode=verify-full&sslrootcert=/run/j2m/supabase-ca.pem",
+                "",
+            ]), encoding="utf-8")
+        # Bootstrap only the disposable source from an empty catalog.
+        # The transition itself uses the standalone guarded migrator.
+        dedicated = dedicated or args[:3] == ("python", "-m", "scripts.run_certified_migration")
+        options = (["-e", "PGOPTIONS=-c role=j2m_owner"]
+                   if role == "j2m_migrator" and not dedicated else [])
+        compose = ["docker", "compose", "-p", project, "-f", "compose.selfhost.yml",
+                   "-f", "compose.selfhost.identities.yml", "-f", str(layer), "--profile", "migrate"]
+        process_env = {**env, "J2M_DATABASE_CA_FILE": str(ca_override or ca)}
+        return subprocess.run([*compose, "run", "--rm", "--no-deps", "-T", *options, service, *args],
+                              cwd=ROOT, env=process_env, check=ca_override is None,
+                              capture_output=ca_override is not None, timeout=90)
 
     def snapshot(database):
         commands = sql(DATA_QUERIES, database=database)
@@ -100,17 +658,275 @@ def exercise_application_schema(network, run, sql, connection, pool_control):
             lines.append(line)
         return rows, lines
 
+    def check_tls(role, database):
+        expected_role = "j2m_owner" if role == "j2m_migrator" else role
+        probe = (
+            "from run import app; from app.extensions import db; from sqlalchemy import text; "
+            "ctx=app.app_context(); ctx.push(); conn=db.session.connection(); "
+            "assert conn.connection.driver_connection.info.ssl_in_use; "
+            'observed=tuple(conn.execute(text("SELECT current_user,session_user,current_database()")).one()); '
+            f"assert observed == {(expected_role, role, database)!r}; "
+            "import os; "
+            "assert db.engine.pool.size() == 2; "
+            f"assert int(os.environ['DATABASE_MAX_OVERFLOW']) == {int(role != 'j2m_migrator')}; "
+            "assert os.environ['J2M_PROCESS_TYPE'] != 'web' or os.environ['WEB_CONCURRENCY'] == '2'"
+        )
+        app("python", "-c", probe, role=role, database=database)
+
+    def check_effective_pool(role, database):
+        if role == "j2m_schema_web":
+            gunicorn_config = """
+from pathlib import Path
+from sqlalchemy import text
+from sqlalchemy.exc import TimeoutError
+
+def post_worker_init(worker):
+    from app.extensions import db
+    from run import app
+    with app.app_context():
+        worker.held_connections = [db.engine.connect() for _ in range(3)]
+        pids = [connection.scalar(text("SELECT pg_backend_pid()"))
+                for connection in worker.held_connections]
+        try:
+            with db.engine.connect():
+                raise AssertionError("Gunicorn pool overflow exceeded")
+        except TimeoutError:
+            pass
+    ready = Path(__file__).with_name(f"{worker.pid}.pending")
+    ready.write_text(",".join(map(str, pids)))
+    ready.rename(ready.with_suffix(".ready"))
+"""
+            controller = """
+from contextlib import ExitStack
+import os
+from pathlib import Path
+import subprocess
+import sys
+from tempfile import TemporaryDirectory
+import time
+from urllib.request import urlopen
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import TimeoutError
+
+assert os.environ["WEB_CONCURRENCY"] == "2"
+with TemporaryDirectory() as directory:
+    root = Path(directory)
+    config = root / "probe.py"
+    config.write_text(sys.argv[1])
+    process = subprocess.Popen(["gunicorn", "--config", str(config), "--bind",
+                                "127.0.0.1:18742", "--workers",
+                                os.environ["WEB_CONCURRENCY"], "run:app"])
+    try:
+        for _ in range(80):
+            assert process.poll() is None, "Gunicorn exited before saturation"
+            ready = list(root.glob("*.ready"))
+            if len(ready) == 2:
+                break
+            time.sleep(.1)
+        else:
+            raise AssertionError("Two Gunicorn workers did not saturate concurrently")
+        backend_pids = {int(pid) for file in ready for pid in file.read_text().split(",")}
+        assert len(backend_pids) == 6
+        base = make_url(os.environ["DATABASE_URL"]).set(drivername="postgresql+psycopg2")
+        with ExitStack() as budget:
+            for role, password, size, overflow in (
+                ("j2m_schema_worker", "synthetic-j2m_schema_worker", 2, 1),
+                ("j2m_migrator", "synthetic-j2m_migrator", 2, 0),
+                ("j2m_backup", "synthetic-only", 1, 0),
+                ("postgres", "synthetic-only", 2, 0),
+            ):
+                pool = create_engine(
+                    base.set(username=role, password=password), pool_size=size,
+                    max_overflow=overflow, pool_timeout=1,
+                )
+                budget.callback(pool.dispose)
+                for _ in range(size + overflow):
+                    held = budget.enter_context(pool.connect())
+                    backend_pids.add(held.scalar(text("SELECT pg_backend_pid()")))
+                try:
+                    with pool.connect():
+                        raise AssertionError("Auxiliary connection budget exceeded")
+                except TimeoutError:
+                    pass
+            live = {row[0] for row in held.execute(text(
+                "SELECT pid FROM pg_stat_activity WHERE datname=current_database() "
+                "AND backend_type='client backend'"
+            ))}
+            assert live == backend_pids and len(live) == 14, "Incomplete connection budget"
+            with urlopen("http://127.0.0.1:18742/api/health", timeout=3) as result:
+                assert result.status == 200
+        print("Fourteen simultaneous synthetic sessions verified, including six held by Gunicorn.")
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+"""
+            app("python", "-c", controller, gunicorn_config, dedicated=True, role=role, database=database)
+            return
+        probe = """
+from contextlib import ExitStack
+import os
+from sqlalchemy import text
+from sqlalchemy.exc import TimeoutError
+from app.extensions import db
+from run import app
+
+expected = 2 if os.environ["J2M_PROCESS_TYPE"] == "migrator" else 3
+with app.app_context(), ExitStack() as stack:
+    for _ in range(expected):
+        connection = stack.enter_context(db.engine.connect())
+        assert connection.scalar(text("SELECT 1")) == 1
+    try:
+        with db.engine.connect():
+            raise AssertionError("Connection limit was not enforced")
+    except TimeoutError:
+        pass
+"""
+        app("python", "-c", probe, dedicated=True, role=role, database=database)
+
+    migration_probe = """
+from unittest.mock import patch
+from sqlalchemy import create_engine, text
+from sqlalchemy.pool import NullPool
+from app.extensions import db
+from run import app
+from scripts import run_certified_migration as migration
+import os
+import time
+
+with app.app_context():
+    peer_engine = create_engine(db.engine.url, poolclass=NullPool)
+    with peer_engine.connect() as peer:
+        lock = text("SELECT pg_try_advisory_lock(:key)")
+        unlock = text("SELECT pg_advisory_unlock(:key)")
+        params = {"key": migration.LOCK_KEY}
+        assert peer.scalar(lock, params)
+        peer.commit()
+        try:
+            migration.rehearse_upgrade(db.engine, app.config, environment=os.environ)
+        except RuntimeError as error:
+            assert str(error) == "Migration lock already held"
+        else:
+            raise AssertionError("A second migrator acquired an occupied bigint lock")
+        assert peer.scalar(unlock, params)
+        peer.commit()
+
+        original_upgrade = migration.command.upgrade
+        observed_pids = []
+
+        def check_lock_and_identity(config, target):
+            connection = config.attributes["j2m_migration_connection"]
+            for step in (lambda: None, lambda: original_upgrade(config, target)):
+                step()
+                connection.commit()
+                login, role, database, pid = migration._identity(connection)
+                assert (login, role, database) == ("j2m_migrator", "j2m_owner", "full_schema")
+                observed_pids.append(pid)
+                assert not peer.scalar(lock, params)
+                peer.commit()
+            assert observed_pids[0] == observed_pids[1]
+
+        with patch.object(migration.command, "upgrade", side_effect=check_lock_and_identity):
+            migration.rehearse_upgrade(db.engine, app.config, environment=os.environ)
+        assert peer.scalar(lock, params)
+        assert peer.scalar(unlock, params)
+        for _ in range(20):
+            alive = peer.scalar(text("SELECT EXISTS (SELECT FROM pg_stat_activity WHERE pid = :pid)"),
+                                {"pid": observed_pids[0]})
+            peer.commit()
+            if not alive:
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError("The migration backend remained connected")
+
+        try:
+            migration.rehearse_upgrade(db.engine, app.config, environment=os.environ)
+        except RuntimeError as error:
+            assert str(error) == "Source revision no longer eligible"
+        else:
+            raise AssertionError("The migration was replayed at the target revision")
+        assert peer.scalar(lock, params)
+        assert peer.scalar(unlock, params)
+    peer_engine.dispose()
+print("Dedicated migrator bigint lock, commit boundaries, role cleanup and replay denial verified.")
+"""
+
     for i, head in enumerate(("9d0e1f2a3b4c", "c3d4e5f6a7b8")):
-        app("flask", "--app", "run.py", "db", "upgrade", head)
         if i == 0:
+            app("flask", "--app", "run.py", "db", "upgrade", head)
+            check_tls("j2m_migrator", "full_schema")
+            check_effective_pool("j2m_migrator", "full_schema")
+            from nginx_recovery_ci import write_certificates
+
+            wrong = root / "wrong-ca"
+            wrong.mkdir()
+            wrong_ca, _, _ = write_certificates(wrong, hostnames=("db",), authority_name="Untrusted synthetic CI CA")
+            denied = app("python", "-c", "from run import app; from app.extensions import db; "
+                         "from sqlalchemy import text; app.app_context().push(); "
+                         "db.session.execute(text('SELECT 1'))", ca_override=wrong_ca)
+            if not denied.returncode or b"certificate verify failed" not in denied.stderr.lower():
+                raise RuntimeError("Connection accepted an unrelated CA or failed for the wrong reason")
             app("python", "-c", SEED)
+        else:
+            started = monotonic()
+            app("python", "-c", migration_probe, dedicated=True)
+            print(f"Dedicated migration and fencing checks: {monotonic() - started:.2f}s")
         sql(BACKUP_GRANTS, database="full_schema").check_returncode()
+        fixture_catalog = sql(CATALOG_QUERY, database="full_schema")
+        fixture_catalog.check_returncode()
+        catalog = json.loads(fixture_catalog.stdout)
+        verify_fixture_security(head, catalog)
+        for change in ("owner", "owner_acl", "acl", "object", "membership", "policy", "role", "routine", "trigger"):
+            drift = deepcopy(catalog)
+            if change == "owner":
+                drift["relation:customers"][1] = "postgres"
+            elif change == "owner_acl":
+                drift["relation:customers"][-1].remove("j2m_owner=arwdDxtm/j2m_owner")
+            elif change == "policy":
+                drift["policy:referral_participants.synthetic_backup_coverage"][3] = "false"
+            elif change == "role":
+                drift["role:j2m_backup"][-2] = True
+            elif change == "trigger":
+                drift["trigger:customer_auth_audits.trg_customer_auth_audits_append_only"][0] = "D"
+            elif change == "routine":
+                drift["routine:prevent_customer_auth_audit_mutation()"][2] = ["=X/j2m_owner"]
+            elif change == "acl":
+                drift["relation:customers"][-1].append("=w/j2m_owner")
+            elif change == "object":
+                drift["relation:unexpected"] = drift["relation:customers"]
+            else:
+                drift["effective-membership:j2m_backup:j2m_owner"] = [True, True, True]
+            try:
+                verify_fixture_security(head, drift)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"Fixture accepted {change} drift at {head}")
+        print(f"Declared relation ownership, ACL, RLS and membership verified for {head}.")
+        prove_incoming_membership_rejected(sql, "full_schema")
+        if i == 0:
+            operation.enter_context(certify_pre_migration_backup(network, sql, root, ca, pool_control, connection, metadata["Id"], nominal=nominal))
         assert sql("SELECT version_num FROM alembic_version",
                    database="full_schema").stdout.strip() == head.encode()
+        observed_relations = sql(RELATION_QUERY, database="full_schema")
+        observed_relations.check_returncode()
+        verify_relation_manifest(head, json.loads(observed_relations.stdout))
         assert sql("SELECT count(*) FROM customers", database="full_schema").stdout.strip() == b"2"
         assert sql("UPDATE public.customers SET current_stamps=1", "j2m_backup", database="full_schema").returncode
         assert sql("SET ROLE j2m_owner", "j2m_backup", database="full_schema").returncode
-        dump = run("env", "PGPASSWORD=synthetic-only", "pg_dump", "-h", "127.0.0.1",
+        backup_tls = ("env", "PGPASSWORD=synthetic-only", "PGSSLMODE=verify-full",
+                      "PGSSLROOTCERT=/tmp/ca.crt")
+        backup_identity = run(*backup_tls, "psql", "-XAt", "-v", "ON_ERROR_STOP=1",
+                              "-h", "db", "-U", "j2m_backup", "-d", "full_schema", "-c",
+                              "SELECT current_user,session_user,ssl FROM pg_stat_ssl WHERE pid=pg_backend_pid()",
+                              check=True)
+        assert backup_identity.stdout.strip() == b"j2m_backup|j2m_backup|t"
+        dump = run(*backup_tls, "pg_dump", "-h", "db",
                    "-U", "j2m_backup", "--enable-row-security", "--no-owner", "--no-acl",
                    "-Fc", "-n", "public", "full_schema", check=True).stdout
         destination = f"full_restore_{i}"
@@ -124,20 +940,58 @@ def exercise_application_schema(network, run, sql, connection, pool_control):
         if origin[0] != restored[0] or origin[1] != restored[1]:
             diff = list(unified_diff([line.decode() for line in origin[1]], [line.decode() for line in restored[1]], n=0))
             raise RuntimeError(f"Restored J2M fixture differs (data matched={origin[0] == restored[0]}): " + "\n".join(diff[:20]))
-        def query(statement):
-            result = sql(statement, database=destination)
+        def query(statement, database=destination):
+            result = sql(statement, database=database)
             result.check_returncode()
             return result.stdout.decode().strip()
 
         verify_transition_accounting(query)
         if i == 1:
-            sql(BACKUP_GRANTS, database=destination).check_returncode()
+            prove_alternate_write_barrier(sql, "full_schema")
+            for role in ("j2m_schema_web", "j2m_schema_worker"):
+                assert sql("SELECT 1", role, database="full_schema").returncode
+            print("Legacy backup exclusion and writer admission gate held through migration.")
+            pause_for_source_supervisor("migrate", network, root, metadata["Id"], sql)
+            if candidate.startswith("j2m-interactive:transition-"):
+                attest_fenced_origin(network, ca, metadata["Id"], checkout, sql, nominal=nominal)
+            pause_for_source_supervisor("verify", network, root, metadata["Id"], sql)
+
+
+            origin_database = "full_schema"
             flow = (ROOT / "tests/postgres_referral_worker_flow.py").read_text()
+            checked = set()
+
+            def run_service(role, source=flow):
+                if role not in checked:
+                    check_tls(role, origin_database)
+                    check_effective_pool(role, origin_database)
+                    checked.add(role)
+                app("python", "-c", source, role=role, database=origin_database)
+
+            def before_open():
+                for role in ("j2m_schema_web", "j2m_schema_worker"):
+                    result = sql("SELECT 1", role, database=origin_database)
+                    if not result.returncode or b"permission denied for database" not in result.stderr:
+                        raise RuntimeError("Direct admission opened before verification")
+                    with connection(role, origin_database) as peer:
+                        _, stderr = peer.communicate(b"SELECT 1;\n", timeout=8)
+                        if not peer.returncode or b"disabled" not in stderr.lower():
+                            raise RuntimeError("Pool admission opened before verification")
+                pause_for_source_supervisor("reopen", network, root, metadata["Id"], sql)
+
+            started = monotonic()
             prove_scoped_grants_and_fence(
-                sql, destination, lambda role, source=flow: app("python", "-c", source, role=role, database=destination),
-                connection, pool_control,
+                sql, origin_database, run_service,
+                connection, pool_control, nominal=nominal,
+                before_open=before_open,
             )
+            verify_transition_accounting(lambda statement: query(statement, origin_database))
+            print(f"Fenced-origin grants, drain and reopening (nominal={nominal}): {monotonic() - started:.2f}s")
+            if candidate.startswith("j2m-interactive:transition-"):
+                attest_fenced_origin(network, ca, metadata["Id"], checkout, sql, reopened=True)
             verify_transition_accounting(query)
+            if nominal:
+                continue
             # The lazy baseline is valid for an unused zero-balance account,
             # but must never certify an unexplained positive or negative balance.
             customer_id = query("""
@@ -169,7 +1023,7 @@ def exercise_application_schema(network, run, sql, connection, pool_control):
                 raise RuntimeError("A regressed customer sequence was accepted")
             query("SELECT setval('public.customers_id_seq', 2, true)")
             customer_flow = (ROOT / "tests/postgres_customer_http_flow.py").read_text()
-            app("python", "-c", customer_flow, role="j2m_schema_web", database=destination)
+            run_service("j2m_schema_web", customer_flow)
             verify_transition_accounting(query)
             query("INSERT INTO transactions (business_id,customer_id,type,points_amount,"
                   "stamps_amount,purchase_amount,timestamp) VALUES (1,1,'earn',0,1,0,now())")

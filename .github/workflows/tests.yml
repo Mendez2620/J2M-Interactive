@@ -71,6 +71,7 @@ jobs:
           J2M_IMAGE: j2m-interactive:pr70-ci
       - run: docker compose -p j2m-pr70-production-ci --env-file .env.selfhost.production-test.example -f compose.selfhost.yml -f compose.selfhost.test.yml -f compose.selfhost.production-test.yml config --quiet
       - run: docker compose -p j2m-pr70-loopback-ci --env-file .env.selfhost.production-test.example -f compose.selfhost.yml -f compose.selfhost.test.yml -f compose.selfhost.production-test.yml -f compose.selfhost.loopback-test.yml config --quiet
+      - run: python tests/selfhost_identity_compose_ci.py
       - run: docker build --tag j2m-staging:test .
       - name: Start isolated Wallet Demo rehearsal with Wallet disabled
         run: |
@@ -86,10 +87,6 @@ jobs:
           after=$("${demo[@]}" exec -T db psql -U j2m_test -d j2m_test -Atc 'SELECT system_identifier FROM pg_control_system()')
           test -n "$before" && test "$before" = "$after"
           "${demo[@]}" exec -T app python -c "from urllib.request import urlopen; assert urlopen('http://127.0.0.1:8000/api/ready', timeout=5).status == 200"
-      - name: Verify split roles, complete dump and writer fence in isolated PostgreSQL
-        run: |
-          docker build -f tests/Dockerfile.pgbouncer -t j2m-pgbouncer:synthetic .
-          python tests/postgres_role_separation_ci.py
       - name: Verify restricted Wallet egress against synthetic TLS endpoints
         run: python tests/wallet_egress_ci.py
       - name: Verify isolated Nginx upstream recovery and rollback
@@ -124,6 +121,12 @@ jobs:
           evidence="$RUNNER_TEMP/j2m-transition-evidence"
           mkdir -m 700 "$evidence"
           python tests/legacy_wallet_transition_docker.py --reconstructed-legacy --journal "$evidence/evidence.jsonl"
+      - name: Verify split roles and restore the fenced backup on the historical reconstruction
+        run: |
+          docker build -f tests/Dockerfile.pgbouncer -t j2m-pgbouncer:synthetic .
+          export J2M_ROLE_FIXTURE_IMAGE="j2m-interactive:transition-$(git rev-parse HEAD)"
+          J2M_NOMINAL_TRANSITION=1 python tests/postgres_role_separation_ci.py
+          python tests/postgres_role_separation_ci.py
       - name: Terminate coordinator at fenced transition boundaries
         run: |
           for phase in fence restore restore-partial migrate verify https; do
@@ -139,6 +142,46 @@ jobs:
             ${{ runner.temp }}/j2m-transition-evidence/evidence.jsonl.state/transition.json
             ${{ runner.temp }}/j2m-transition-evidence/supervised-*/supervisor.json
             ${{ runner.temp }}/j2m-transition-evidence/supervised-*/evidence.jsonl.state/transition.json
+          if-no-files-found: warn
+          retention-days: 30
+
+  supervised-origin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        boundary: [fence, restore-partial, restore, migrate, verify, https, reopen]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.lock
+      - name: Build disposable transition images
+        run: |
+          set -euo pipefail
+          legacy=dae140e3684be29c534be3e1725598d226b68e03
+          sha=$(git rev-parse HEAD)
+          historical=$(mktemp -d)
+          git archive "$legacy" | tar -x -C "$historical"
+          docker build --label "org.opencontainers.image.revision=$legacy" -t "j2m-interactive:reconstructed-$legacy" "$historical"
+          docker build --label "org.opencontainers.image.revision=$sha" -t "j2m-interactive:transition-$sha" .
+          docker build -f tests/Dockerfile.pgbouncer -t j2m-pgbouncer:synthetic .
+      - name: Supervise termination on the fenced origin
+        env:
+          BOUNDARY: ${{ matrix.boundary }}
+        run: python tests/legacy_transition_supervisor_ci.py --migrated-role-source --boundary "$BOUNDARY" --evidence-dir "$RUNNER_TEMP/j2m-supervised-origin"
+      - name: Preserve synthetic origin report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: supervised-origin-${{ matrix.boundary }}-${{ github.sha }}
+          path: ${{ runner.temp }}/j2m-supervised-origin/supervisor.json
           if-no-files-found: warn
           retention-days: 30
 

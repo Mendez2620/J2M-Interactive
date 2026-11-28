@@ -18,21 +18,31 @@ import psycopg2
 from scripts.selfhost_transition_preflight import read_config
 
 
-def connection_parameters(config, expected_host, expected_project_ref):
+PROBE_ROLES = ("postgres", "j2m_web", "j2m_worker", "j2m_migrator", "j2m_backup")
+
+
+def connection_parameters(config, expected_host, expected_project_ref, *, expected_role="postgres", ca_file=None):
+    if expected_role not in PROBE_ROLES:
+        raise ValueError("Unexpected diagnostic role")
     url = urlsplit(config["DATABASE_URL"])
     if (not re.fullmatch(r"[a-z0-9-]+(?:\.[a-z0-9-]+)*\.pooler\.supabase\.com", expected_host)
             or not re.fullmatch(r"[a-z0-9]{20}", expected_project_ref)
             or url.scheme not in {"postgres", "postgresql"}
             or url.hostname != expected_host or url.port not in {None, 5432}
             or url.path != "/postgres" or url.fragment
-            or unquote(url.username or "") != "postgres." + expected_project_ref
+            or unquote(url.username or "") != expected_role + "." + expected_project_ref
             or not url.password):
         raise ValueError("Expected exact Supabase session-pooler destination")
     pairs = parse_qsl(url.query, keep_blank_values=True, strict_parsing=True)
     if len({k for k, _ in pairs}) != len(pairs) or any(
             k not in {"sslmode", "sslrootcert"} for k, _ in pairs):
         raise ValueError("Unexpected database URL parameters")
-    ca = Path(config["DATABASE_SSL_ROOT_CERT"])
+    if expected_role != "postgres":
+        options = dict(pairs)
+        if (url.port != 5432 or options.get("sslmode") != "verify-full"
+                or not options.get("sslrootcert") or ca_file is None):
+            raise ValueError("Candidate probe requires verified TLS settings and explicit host CA")
+    ca = Path(ca_file if ca_file is not None else config["DATABASE_SSL_ROOT_CERT"])
     if ca.is_symlink() or not ca.is_file():
         raise ValueError("Expected local CA file")
     if any(name.upper().startswith("PG") for name in os.environ):
@@ -52,7 +62,7 @@ def scalar(conn, sql, parameters=()):
         return cur.fetchone()[0]
 
 
-def check_session_affinity(connect, parameters):
+def check_session_affinity(connect, parameters, *, expected_role=None):
     """Check and release only this probe's key; no session termination."""
     key = -(2**62 + randbelow(2**60))
     owner = peer = None
@@ -63,6 +73,10 @@ def check_session_affinity(connect, parameters):
     owner_attempted = peer_attempted = False
     cleanup_uncertain = False
     passed = False
+    def role_matches(conn):
+        return expected_role is None or scalar(
+            conn, "SELECT current_user = %s AND session_user = %s", (expected_role, expected_role)) is True
+
     try:
         owner = connect(**parameters)
         peer = connect(**parameters)
@@ -70,15 +84,15 @@ def check_session_affinity(connect, parameters):
         peer.set_session(readonly=True, autocommit=False)
         owner_pid = scalar(owner, "SELECT pg_backend_pid()")
         peer_pid = scalar(peer, "SELECT pg_backend_pid()")
-        if owner_pid == peer_pid:
-            raise RuntimeError("Expected separate sessions")
+        if owner_pid == peer_pid or not role_matches(owner) or not role_matches(peer):
+            raise RuntimeError("Expected independent sessions with the requested effective identity")
         owner_attempted = True
         owner_locked = scalar(owner, "SELECT pg_try_advisory_lock(%s)", (key,))
         owner_attempted = owner_locked
         if not owner_locked:
             raise RuntimeError("Diagnostic key occupied")
         owner.commit()
-        if scalar(owner, "SELECT pg_backend_pid()") != owner_pid:
+        if scalar(owner, "SELECT pg_backend_pid()") != owner_pid or not role_matches(owner):
             raise RuntimeError("Owner session affinity not demonstrated")
         peer_attempted = True
         peer_locked = scalar(peer, "SELECT pg_try_advisory_lock(%s)", (key,))
@@ -86,7 +100,7 @@ def check_session_affinity(connect, parameters):
         if peer_locked:
             raise RuntimeError("Peer unexpectedly acquired key")
         peer.commit()
-        if scalar(peer, "SELECT pg_backend_pid()") != peer_pid:
+        if scalar(peer, "SELECT pg_backend_pid()") != peer_pid or not role_matches(peer):
             raise RuntimeError("Peer session affinity not demonstrated")
         if not scalar(owner, "SELECT pg_advisory_unlock(%s)", (key,)):
             raise RuntimeError("Owner could not release diagnostic key")
@@ -133,6 +147,8 @@ def main():
     parser.add_argument("--env-file", type=Path, default=Path(".env.selfhost"))
     parser.add_argument("--expected-host", required=True)
     parser.add_argument("--expected-project-ref", required=True)
+    parser.add_argument("--expected-role", choices=PROBE_ROLES, default="postgres")
+    parser.add_argument("--ca-file", type=Path, help="Independently verified CA on the probe host")
     parser.add_argument("--authorize-session-lock-probe", action="store_true")
     args = parser.parse_args()
     if not args.authorize_session_lock_probe:
@@ -140,8 +156,9 @@ def main():
         return 2
     try:
         parameters = connection_parameters(read_config(args.env_file), args.expected_host,
-                                           args.expected_project_ref)
-        result = check_session_affinity(psycopg2.connect, parameters)
+                                           args.expected_project_ref, expected_role=args.expected_role,
+                                           ca_file=args.ca_file)
+        result = check_session_affinity(psycopg2.connect, parameters, expected_role=args.expected_role)
     except Exception:
         print("Pooler diagnostic blocked; private details suppressed.")
         return 1
