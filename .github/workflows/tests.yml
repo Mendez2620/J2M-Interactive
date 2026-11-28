@@ -71,6 +71,7 @@ jobs:
           J2M_IMAGE: j2m-interactive:pr70-ci
       - run: docker compose -p j2m-pr70-production-ci --env-file .env.selfhost.production-test.example -f compose.selfhost.yml -f compose.selfhost.test.yml -f compose.selfhost.production-test.yml config --quiet
       - run: docker compose -p j2m-pr70-loopback-ci --env-file .env.selfhost.production-test.example -f compose.selfhost.yml -f compose.selfhost.test.yml -f compose.selfhost.production-test.yml -f compose.selfhost.loopback-test.yml config --quiet
+      - run: python tests/selfhost_identity_compose_ci.py
       - run: docker build --tag j2m-staging:test .
       - name: Start isolated Wallet Demo rehearsal with Wallet disabled
         run: |
