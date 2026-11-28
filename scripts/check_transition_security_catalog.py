@@ -216,6 +216,34 @@ def verify_serial_definitions(revision, catalog):
         raise ValueError("Unexpected sequence definition or ownership dependency")
 
 
+def verify_historical_columns(revision, catalog):
+    """Compare historical columns to the reviewed reconstruction, never to live observations."""
+    import json
+    from pathlib import Path
+    from scripts.check_transition_relation_manifest import expected_relations
+    from scripts.historical_transition_evidence import INITIAL_HEAD, FINAL_HEAD, LEGACY_SHA
+
+    manifest = json.loads(Path(__file__).with_name("j2m_historical_column_manifest.json").read_text(encoding="utf-8"))
+    legacy_tables = {relation[2:] for relation in expected_relations(INITIAL_HEAD) if relation.startswith("r:")}
+    if (manifest.get("source_commit") != LEGACY_SHA or manifest.get("alembic_revision") != INITIAL_HEAD
+            or manifest.get("postgres_major") != 17 or manifest["tables"].keys() != legacy_tables
+            or revision not in {INITIAL_HEAD, FINAL_HEAD}):
+        raise ValueError("Invalid historical column manifest")
+    expected = {
+        f"column:{table}.{column}": fields
+        for table, columns in manifest["tables"].items()
+        for column, fields in columns.items()
+    }
+    prefixes = tuple(f"column:{table}." for table in manifest["tables"])
+    observed = {key: row for key, row in catalog.items() if key.startswith(prefixes)}
+    if revision == FINAL_HEAD:
+        # Validated independently by verify_transition_columns().
+        observed.pop("column:google_wallet_sync_jobs.claim_token", None)
+    if observed != expected:
+        delta = sorted(key for key in observed.keys() | expected.keys() if observed.get(key) != expected.get(key))
+        raise ValueError(f"Historical column drift ({len(delta)}): {', '.join(delta[:8])}")
+
+
 def verify_fixture_security(revision, catalog):
     """Check source-derived security invariants, independent of before/after drift checks."""
     from scripts.check_transition_relation_manifest import verify_relation_manifest
@@ -224,6 +252,7 @@ def verify_fixture_security(revision, catalog):
                  if key.startswith("relation:")}
     verify_relation_manifest(revision, [f"{row[0]}:{name}" for name, row in relations.items()])
     verify_transition_columns(revision, catalog)
+    verify_historical_columns(revision, catalog)
     verify_serial_definitions(revision, catalog)
     expected_rls = LEGACY_RLS
     if revision == "c3d4e5f6a7b8":

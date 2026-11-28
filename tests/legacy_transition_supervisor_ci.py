@@ -2,11 +2,13 @@
 
 import argparse
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import time
+from unittest.mock import patch
 from uuid import uuid4
 
 from nginx_recovery_ci import ROOT, production_ids, run
@@ -14,7 +16,7 @@ from legacy_transition_digest import logical_digest
 
 sys.path.insert(0, str(ROOT))
 from scripts.historical_transition_evidence import FINAL_HEAD, INITIAL_HEAD
-from scripts.selfhost_backup import verify_transition_accounting
+from scripts.selfhost_backup import _hash_file, verify_integral_set, verify_transition_accounting
 
 
 def identity(kind, name, token):
@@ -181,13 +183,130 @@ def exercise(directory, *, reconstructed=False, boundary='migrate'):
                 raise RuntimeError("Operational container IDs changed")
 
 
+def supervise_migrated_role_source(directory):
+    """Kill the actual restricted-backup coordinator and attest the live fenced source."""
+    from postgres_full_schema_fixture import SIMULATED_BACKUP_TASKS, run_simulated_backup_task
+
+    directory.mkdir(mode=0o700, exist_ok=False)
+    token = "j2m-roles-" + uuid4().hex[:8]
+    network, pooler = token + "-internal", token + "-pooler"
+    checkpoint = directory / "origin-checkpoint.json"
+    checkout = run("git", "rev-parse", "HEAD")
+    candidate = "j2m-interactive:transition-" + checkout
+    image = run("docker", "image", "inspect", "--format", "{{.Id}}", candidate)
+    before = production_ids()
+    env = dict(os.environ, J2M_ROLE_SUPERVISION=str(checkpoint), J2M_ROLE_SYNTHETIC_TOKEN=token,
+               J2M_ROLE_FIXTURE_IMAGE=candidate, J2M_NOMINAL_TRANSITION="1")
+    resources = (("container", token), ("container", pooler), ("network", network))
+    with (directory / "origin-coordinator.log").open("wb") as log:
+        child = subprocess.Popen([sys.executable, "-u", "tests/postgres_role_separation_ci.py"],
+                                 cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
+        try:
+            deadline = time.monotonic() + 180
+            while not checkpoint.exists() and child.poll() is None and time.monotonic() < deadline:
+                time.sleep(.2)
+            if not checkpoint.exists():
+                raise RuntimeError("Restricted-backup coordinator did not reach the migrated checkpoint")
+            evidence = json.loads(checkpoint.read_text(encoding="utf-8"))
+            observed = {name: identity(kind, name, token) for kind, name in resources}
+            docker_network = observed[network]
+            if (not docker_network["Internal"]
+                    or set(docker_network["Containers"]) != {observed[token]["Id"], observed[pooler]["Id"]}
+                    or any(observed[name]["HostConfig"]["PortBindings"] for name in (token, pooler))
+                    or (evidence["phase"], evidence["status"], evidence["database"],
+                        evidence["network"], evidence["image"]) != ("migrated", "pending", "full_schema", network, image)):
+                raise RuntimeError("Unverified source checkpoint identity")
+            child.kill()
+            child.wait(timeout=10)
+            for kind, name in resources:
+                if identity(kind, name, token)["Id"] != observed[name]["Id"]:
+                    raise RuntimeError("Source resource changed after coordinator death")
+
+            def query(statement):
+                return run("docker", "exec", token, "psql", "-XAt", "-v", "ON_ERROR_STOP=1",
+                           "-U", "postgres", "-d", "full_schema", "-c", statement)
+
+            if (query("SELECT system_identifier FROM pg_control_system()") != evidence["cluster"]
+                    or query("SELECT version_num FROM alembic_version") != FINAL_HEAD
+                    or logical_digest(token, "full_schema", user="postgres") != evidence["digest"]):
+                raise RuntimeError("Source cluster, revision or digest changed")
+            verify_transition_accounting(query)
+            if json.loads(checkpoint.read_text(encoding="utf-8")) != evidence:
+                raise RuntimeError("Pending journal changed after coordinator death")
+            index = directory / "restricted-backups" / Path(evidence["index"]).name
+            with patch.dict(os.environ, {"J2M_SYNTHETIC_BACKUP_TEST": "1"}), patch(
+                "scripts.selfhost_backup.load_dpapi_key", return_value=bytes(range(32))
+            ):
+                if _hash_file(index) != evidence["index_sha256"] or not verify_integral_set(index, directory / "synthetic-key"):
+                    raise RuntimeError("Authenticated backup index changed")
+            for role in ("j2m_schema_web", "j2m_schema_worker"):
+                for host, port, message in (("127.0.0.1", "5432", b"permission denied for database"),
+                                            (pooler, "6432", b"disabled")):
+                    check = subprocess.run(
+                        ["docker", "exec", token, "env", f"PGPASSWORD=synthetic-{role}", "psql", "-XAt",
+                         "-h", host, "-p", port, "-U", role, "-d", "full_schema", "-c", "SELECT 1"],
+                        capture_output=True, timeout=10,
+                    )
+                    if not check.returncode or message not in check.stderr.lower():
+                        raise RuntimeError("Expected writer denial after coordinator death")
+            for task in SIMULATED_BACKUP_TASKS:
+                result = run_simulated_backup_task(directory / ".operations.lock",
+                                                   directory / "tasks-suspended.json", task)
+                if result.returncode != 75:
+                    raise RuntimeError("A synthetic task escaped durable suspension")
+            replay_probe = """
+import os
+from run import app
+from app.extensions import db
+from scripts.run_certified_migration import rehearse_upgrade
+
+with app.app_context():
+    try:
+        rehearse_upgrade(db.engine, app.config, environment=os.environ)
+    except RuntimeError as error:
+        if str(error) != "Source revision no longer eligible":
+            raise
+    else:
+        raise AssertionError("Migration replay accepted")
+"""
+            replay = subprocess.run(
+                ["docker", "run", "--rm", "--network", network, "--env-file", str(directory / "MIGRATOR.env"),
+                 "-e", "J2M_PROCESS_TYPE=migrator", "--mount",
+                 f"type=bind,src={directory / 'ca.crt'},dst=/run/j2m/supabase-ca.pem,readonly",
+                 image, "python", "-c", replay_probe], capture_output=True, timeout=45,
+            )
+            if replay.returncode or logical_digest(token, "full_schema", user="postgres") != evidence["digest"]:
+                raise RuntimeError("Migration replay was accepted or changed the source")
+            report = {**evidence, "container": observed[token]["Id"], "pooler": observed[pooler]["Id"],
+                      "coordinator_terminated": True, "tasks_suspended": True,
+                      "actual_head": FINAL_HEAD, "writer_reconnect_denied": True,
+                      "source_accounting_verified": True, "migration_replayed": False, "reopened": False}
+            (directory / "supervisor.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+            print("Killed the restricted-backup coordinator; same migrated source, digest, writer denial and task suspension verified.")
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=10)
+            for kind, name in resources:
+                if run("docker", kind, "inspect", "--format", "{{.Id}}", name, check=False):
+                    resource = identity(kind, name, token)
+                    run("docker", kind, "rm", *(["-f"] if kind == "container" else []), resource["Id"])
+            if production_ids() != before:
+                raise RuntimeError("Operational container IDs changed")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--reconstructed-legacy", action="store_true")
+    parser.add_argument("--migrated-role-source", action="store_true")
     parser.add_argument("--evidence-dir", type=Path)
     parser.add_argument("--boundary", choices=("fence", "restore", "restore-partial", "migrate", "verify", "https"), default="migrate")
     options = parser.parse_args()
-    if options.evidence_dir:
+    if options.migrated_role_source:
+        if options.evidence_dir is None:
+            parser.error("--migrated-role-source requires --evidence-dir")
+        supervise_migrated_role_source(options.evidence_dir.resolve())
+    elif options.evidence_dir:
         exercise(options.evidence_dir, reconstructed=options.reconstructed_legacy, boundary=options.boundary)
     else:
         with tempfile.TemporaryDirectory() as folder:

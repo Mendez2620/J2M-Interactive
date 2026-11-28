@@ -1,8 +1,10 @@
 """Synthetic PostgreSQL exercise for split roles and a durable writer fence."""
 
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 from pathlib import Path
+import os
+import re
 import subprocess
 import tempfile
 import time
@@ -49,11 +51,16 @@ COMMIT;
 
 
 def main():
-    name = "j2m-roles-" + uuid4().hex[:8]
+    started = time.monotonic()
+    supervised = os.environ.get("J2M_ROLE_SUPERVISION")
+    name = os.environ.get("J2M_ROLE_SYNTHETIC_TOKEN") if supervised else "j2m-roles-" + uuid4().hex[:8]
+    if not name or not re.fullmatch(r"j2m-roles-[0-9a-f]{8}", name):
+        raise ValueError("Invalid synthetic cluster token")
+    label = f"j2m.synthetic.transition={name}"
     network = name + "-internal"
     pooler = name + "-pooler"
-    subprocess.run(["docker", "network", "create", "--internal", network], check=True, capture_output=True, timeout=30)
-    subprocess.run(["docker", "run", "-d", "--name", name, "--network", network, "--network-alias", "db",
+    subprocess.run(["docker", "network", "create", "--internal", "--label", label, network], check=True, capture_output=True, timeout=30)
+    subprocess.run(["docker", "run", "-d", "--name", name, "--label", label, "--network", network, "--network-alias", "db",
                     "-e", "POSTGRES_PASSWORD=synthetic-only", "-e", "POSTGRES_DB=j2m_test",
                     "postgres:17-alpine"], check=True, capture_output=True, timeout=60)
 
@@ -157,7 +164,7 @@ server_login_retry = 1
 EOF
 exec pgbouncer /tmp/j2m-pool.ini
 """
-        subprocess.run(["docker", "run", "-d", "--name", pooler, "--network", network,
+        subprocess.run(["docker", "run", "-d", "--name", pooler, "--label", label, "--network", network,
                         "--entrypoint", "sh", "j2m-pgbouncer:synthetic", "-ec", start_pooler],
                        check=True, capture_output=True, timeout=30)
 
@@ -172,7 +179,9 @@ exec pgbouncer /tmp/j2m-pool.ini
             time.sleep(0.25)
         else:
             raise RuntimeError("Synthetic PgBouncer unavailable")
-        with tempfile.TemporaryDirectory(prefix="j2m-role-tls-") as folder:
+        working = (nullcontext(Path(supervised).parent) if supervised
+                   else tempfile.TemporaryDirectory(prefix="j2m-role-tls-"))
+        with working as folder:
             ca, cert, key = write_certificates(Path(folder), hostnames=("db",))
             for path in (ca, cert, key):
                 subprocess.run(["docker", "cp", str(path), f"{name}:/tmp/{path.name}"],
@@ -192,6 +201,8 @@ exec pgbouncer /tmp/j2m-pool.ini
                 raise RuntimeError("Synthetic PostgreSQL did not enable TLS")
             with ExitStack() as operation:
                 exercise_application_schema(network, run, sql, connection, pool_control, ca, operation)
+        print(f"Synthetic fixture total (nominal={os.environ.get('J2M_NOMINAL_TRANSITION') == '1'}): "
+              f"{time.monotonic() - started:.2f}s")
         print("Synthetic per-role RLS, read-only dump coverage, durable writer fence and migrator verified.")
     finally:
         subprocess.run(["docker", "rm", "-f", name, pooler], capture_output=True, timeout=30)

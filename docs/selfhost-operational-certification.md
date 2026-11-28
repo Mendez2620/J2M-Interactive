@@ -399,3 +399,30 @@ declaración de columnas históricas fuera de las claves SERIAL también
 sigue pendiente. Las pruebas de Supavisor, la atribución externa y la
 validación de credenciales e imagen instaladas pertenecen a las puertas
 operativas A/B/C.
+
+### Columnas históricas y suspensión persistente
+
+El manifiesto histórico fija 493 columnas de 42 tablas. Se contrastaron
+las declaraciones SQL de una reconstrucción independiente de dae140e en
+PostgreSQL 17.12, migrada desde una base vacía hasta 9d0e1f2a3b4c, con el
+volcado DDL de ese esquema. El fixture compara tipos, nulabilidad y
+defaults en ambos heads y conserva el delta en un contrato separado.
+
+Antes del respaldo se comprueban escritores reales del fixture. Sus
+identidades deben autenticarse directamente y mantener sesiones en
+PgBouncer. Al aplicar la barrera se verifica CONNECT denegado, alias
+deshabilitado y drenaje de las sesiones persistentes. El manifiesto
+transitorio conserva un marcador de suspensión para cada prueba: los tres
+runners simulados deben rechazar el arranque aunque esté libre el lock.
+La prueba de proceso confirma que terminar al dueño del lock libera el
+archivo de exclusión y conserva el marcador de suspensión.
+
+CI ejecuta una ruta nominal y una ruta de regresión en clústeres
+distintos. La nominal excluye las interrupciones inyectadas y el
+reemplazo deliberado del backend. Ambas reutilizan los componentes de
+respaldo, migración, atestación y reapertura. La variante integrada del supervisor termina el coordinador completo
+tras confirmar la migración y antes de atestar HTTPS. Conserva el
+origen para volver a comprobar su identidad, contabilidad, digest,
+revisión, respaldo y barreras. Mantiene cerrado el ingreso en esa
+variante porque falta la atestación. Las demás fronteras continúan
+en el ensayo histórico separado. Los runners operativos siguen intactos.

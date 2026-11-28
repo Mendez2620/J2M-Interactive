@@ -1,7 +1,7 @@
 """Verify dump coverage against both migrated J2M schemas in the synthetic role harness."""
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from difflib import unified_diff
 from unittest.mock import patch
 from time import monotonic, sleep
@@ -165,7 +165,78 @@ ROLLBACK;
 
 
 @contextmanager
-def certify_pre_migration_backup(network, sql, root, ca, pool_control):
+def fence_legacy_writers(sql, connection, pool_control, database):
+    """Prove authenticated access before denying and draining the same writers."""
+    roles = ("j2m_schema_web", "j2m_schema_worker")
+    for role in roles:
+        sql(f"CREATE ROLE {role} LOGIN PASSWORD 'synthetic-{role}'; "
+            f"GRANT SELECT ON public.businesses TO {role}; "
+            f"GRANT UPDATE (name) ON public.businesses TO {role}",
+            database=database).check_returncode()
+        observed = sql("SELECT current_user, current_database(), "
+                       "has_column_privilege(current_user,'public.businesses','name','UPDATE')",
+                       role, database=database)
+        observed.check_returncode()
+        assert observed.stdout.strip() == f"{role}|{database}|t".encode()
+
+    with ExitStack() as peers:
+        persistent = []
+        for role in roles:
+            peer = peers.enter_context(connection(role, database))
+            peers.callback(lambda process=peer: process.kill() if process.poll() is None else None)
+            persistent.append(peer)
+            peer.stdin.write(b"\\set ON_ERROR_STOP on\nSELECT current_user,current_database();\n")
+            peer.stdin.flush()
+            with ThreadPoolExecutor(max_workers=1) as reader:
+                try:
+                    observed = reader.submit(peer.stdout.readline).result(timeout=8)
+                except TimeoutError:
+                    peer.kill()
+                    raise
+            assert observed.strip() == f"{role}|{database}".encode()
+        pool_control("DISABLE full_schema").check_returncode()
+        sql("REVOKE CONNECT ON DATABASE full_schema FROM PUBLIC,j2m_schema_web,j2m_schema_worker; "
+            "GRANT CONNECT ON DATABASE full_schema TO j2m_backup",
+            database=database).check_returncode()
+        sql("SELECT pg_terminate_backend(pid, 3000) FROM pg_stat_activity "
+            "WHERE datname=current_database() AND usename IN ('j2m_schema_web','j2m_schema_worker')",
+            database=database).check_returncode()
+        for peer in persistent:
+            output, stderr = peer.communicate(b"SELECT 1;\n", timeout=8)
+            assert peer.returncode and not output.strip() and stderr
+        for role in roles:
+            denied = sql("SELECT 1", role, database=database)
+            assert denied.returncode and b"permission denied for database" in denied.stderr
+            with connection(role, database) as rejected:
+                _, stderr = rejected.communicate(b"SELECT 1;\n", timeout=8)
+                assert rejected.returncode and b"disabled" in stderr.lower()
+            sql(f"REVOKE UPDATE (name) ON public.businesses FROM {role}; "
+                f"REVOKE SELECT ON public.businesses FROM {role}", database=database).check_returncode()
+
+
+SIMULATED_BACKUP_TASKS = ("local-backup", "external-copy", "restore-test")
+
+
+def run_simulated_backup_task(lock_file, suspension, task):
+    if task not in SIMULATED_BACKUP_TASKS:
+        raise ValueError("Unexpected synthetic task")
+    probe = """
+from pathlib import Path
+import sys
+from scripts.selfhost_backup import exclusive_lock
+
+with exclusive_lock(Path(sys.argv[1])):
+    if Path(sys.argv[2]).exists():
+        raise SystemExit(75)
+"""
+    return subprocess.run(
+        [sys.executable, "-c", probe, str(lock_file), str(suspension), task],
+        cwd=ROOT, capture_output=True, timeout=20,
+    )
+
+
+@contextmanager
+def certify_pre_migration_backup(network, sql, root, ca, pool_control, connection, *, nominal=False):
     """Run the real integral backup with an independently exported snapshot."""
     database = "full_schema"
     output = root / "restricted-backups"
@@ -262,30 +333,28 @@ def certify_pre_migration_backup(network, sql, root, ca, pool_control):
     # The disposable DB normally inherits CONNECT from PUBLIC. During the
     # archive window only the exporter and the restricted reader may connect.
     lock_file = root / ".operations.lock"
-
-    task_names = ("local-backup", "external-copy", "restore-test")
-
-    def simulated_backup_task(task):
-        return subprocess.run(
-            [sys.executable, "-c",
-             "from pathlib import Path; import sys; from scripts.selfhost_backup import exclusive_lock; "
-             "context = exclusive_lock(Path(sys.argv[1])); context.__enter__(); context.__exit__(None, None, None)",
-             str(lock_file), task], cwd=ROOT, capture_output=True, timeout=20,
-        )
+    suspension = root / "tasks-suspended.json"
 
     started = monotonic()
+    with suspension.open("x", encoding="utf-8") as state:
+        json.dump({"database": database, "network": network, "state": "suspended"}, state)
+        state.flush()
+        os.fsync(state.fileno())
+    for task in SIMULATED_BACKUP_TASKS:
+        if run_simulated_backup_task(lock_file, suspension, task).returncode != 75:
+            raise RuntimeError(f"Simulated task ignored durable suspension without a lock: {task}")
     with exclusive_lock(lock_file):
-        for task in task_names:
-            competing_task = simulated_backup_task(task)
+        for task in SIMULATED_BACKUP_TASKS:
+            competing_task = run_simulated_backup_task(lock_file, suspension, task)
             if competing_task.returncode == 0 or b"Ya existe una" not in competing_task.stderr:
                 raise RuntimeError(f"Simulated task bypassed the transition lock: {task}")
-        pool_control("DISABLE full_schema").check_returncode()
-        sql("REVOKE CONNECT ON DATABASE full_schema FROM PUBLIC; "
-            "GRANT CONNECT ON DATABASE full_schema TO j2m_backup",
-            database=database).check_returncode()
+        fence_started = monotonic()
+        fence_legacy_writers(sql, connection, pool_control, database)
+        print(f"Authenticated writer closure and drain: {monotonic() - fence_started:.2f}s")
         try:
             for role in ("j2m_schema_web", "j2m_schema_worker", "j2m_migrator"):
-                assert sql("SELECT 1", role, database=database).returncode
+                denied = sql("SELECT 1", role, database=database)
+                assert denied.returncode and b"permission denied for database" in denied.stderr
             active = sql("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() "
                          "AND pid<>pg_backend_pid() AND backend_type='client backend'", database=database)
             active.check_returncode()
@@ -293,18 +362,19 @@ def certify_pre_migration_backup(network, sql, root, ca, pool_control):
             assert sql("SELECT nextval('public.customers_id_seq')", "j2m_backup",
                        database=database).returncode
             run_backup()
-            before = {path.name for path in output.iterdir()}
-            run_backup(expected_head="c3d4e5f6a7b8", expected_error="head Alembic esperado")
-            assert {path.name for path in output.iterdir()} == before
-            sql("ALTER TABLE platform_admins ENABLE ROW LEVEL SECURITY; "
-                "CREATE POLICY synthetic_incomplete ON platform_admins FOR SELECT TO j2m_backup USING (false)",
-                database=database).check_returncode()
-            try:
-                run_backup(expected_error="inventario independiente")
+            if not nominal:
+                before = {path.name for path in output.iterdir()}
+                run_backup(expected_head="c3d4e5f6a7b8", expected_error="head Alembic esperado")
                 assert {path.name for path in output.iterdir()} == before
-            finally:
-                sql("DROP POLICY synthetic_incomplete ON platform_admins; "
-                    "ALTER TABLE platform_admins DISABLE ROW LEVEL SECURITY", database=database).check_returncode()
+                sql("ALTER TABLE platform_admins ENABLE ROW LEVEL SECURITY; "
+                    "CREATE POLICY synthetic_incomplete ON platform_admins FOR SELECT TO j2m_backup USING (false)",
+                    database=database).check_returncode()
+                try:
+                    run_backup(expected_error="inventario independiente")
+                    assert {path.name for path in output.iterdir()} == before
+                finally:
+                    sql("DROP POLICY synthetic_incomplete ON platform_admins; "
+                        "ALTER TABLE platform_admins DISABLE ROW LEVEL SECURITY", database=database).check_returncode()
             sql("GRANT CONNECT ON DATABASE full_schema TO j2m_migrator",
                 database=database).check_returncode()
             yield
@@ -317,12 +387,13 @@ def certify_pre_migration_backup(network, sql, root, ca, pool_control):
                 database=database).check_returncode()
             for role in ("j2m_schema_web", "j2m_schema_worker"):
                 sql("SELECT 1", role, database=database).check_returncode()
-    for task in task_names:
-        simulated_backup_task(task).check_returncode()
+    suspension.unlink()
+    for task in SIMULATED_BACKUP_TASKS:
+        run_simulated_backup_task(lock_file, suspension, task).check_returncode()
     print(f"Synthetic admission and task lock restored after {monotonic() - started:.2f}s.")
 
 
-def attest_fenced_origin(network, ca, image, revision, sql, *, reopened=False):
+def attest_fenced_origin(network, ca, image, revision, sql, *, reopened=False, nominal=False):
     """Attest the migrated source with either fenced or restored service identities."""
     from nginx_recovery_ci import NGINX_IMAGE, nonce_https_request, proxy_config, run, write_certificates
 
@@ -423,6 +494,10 @@ def attest_fenced_origin(network, ca, image, revision, sql, *, reopened=False):
             verify_transition_accounting(query)
             print(f"Reopened origin HTTPS and effective service identities: {monotonic() - started:.2f}s")
             return
+        if nominal:
+            verify_transition_accounting(query)
+            print(f"Nominal fenced HTTPS: {monotonic() - started:.2f}s, backend={backend.container}")
+            return
         run("docker", "rm", "-f", names["web"], names["worker"])
         try:
             snapshot()
@@ -452,7 +527,33 @@ def attest_fenced_origin(network, ca, image, revision, sql, *, reopened=False):
             subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=30)
 
 
+def pause_for_source_supervisor(network, root, image, sql):
+    checkpoint = os.environ.get("J2M_ROLE_SUPERVISION")
+    if checkpoint is None:
+        return
+    from legacy_transition_digest import logical_digest
+    from scripts.isolated_transition import _save
+
+    path = Path(checkpoint)
+    token = network.removesuffix("-internal")
+    if path.parent.resolve() != root.resolve() or token != os.environ.get("J2M_ROLE_SYNTHETIC_TOKEN"):
+        raise ValueError("Unexpected synthetic supervisor path or cluster")
+    indexes = list((root / "restricted-backups").glob("j2m-set-*.j2mbackup"))
+    if len(indexes) != 1:
+        raise RuntimeError("Unexpected exact backup count at migration checkpoint")
+    record = {"phase": "migrated", "status": "pending", "database": "full_schema",
+              "network": network, "digest": logical_digest(token, "full_schema", user="postgres"),
+              "image": image, "index": indexes[0].name, "index_sha256": _hash_file(indexes[0])}
+    cluster = sql("SELECT system_identifier FROM pg_control_system()", database="full_schema")
+    cluster.check_returncode()
+    record["cluster"] = cluster.stdout.decode().strip()
+    _save(path, record)
+    while True:
+        sleep(1)
+
+
 def exercise_application_schema(network, run, sql, connection, pool_control, ca, operation):
+    nominal = os.environ.get("J2M_NOMINAL_TRANSITION") == "1"
     sql("CREATE DATABASE full_schema OWNER j2m_owner").check_returncode()
 
     root = ca.parent
@@ -783,7 +884,7 @@ print("Dedicated migrator bigint lock, commit boundaries, role cleanup and repla
         print(f"Declared relation ownership, ACL, RLS and membership verified for {head}.")
         prove_incoming_membership_rejected(sql, "full_schema")
         if i == 0:
-            operation.enter_context(certify_pre_migration_backup(network, sql, root, ca, pool_control))
+            operation.enter_context(certify_pre_migration_backup(network, sql, root, ca, pool_control, connection, nominal=nominal))
         assert sql("SELECT version_num FROM alembic_version",
                    database="full_schema").stdout.strip() == head.encode()
         observed_relations = sql(RELATION_QUERY, database="full_schema")
@@ -824,8 +925,9 @@ print("Dedicated migrator bigint lock, commit boundaries, role cleanup and repla
             for role in ("j2m_schema_web", "j2m_schema_worker"):
                 assert sql("SELECT 1", role, database="full_schema").returncode
             print("Legacy backup exclusion and writer admission gate held through migration.")
+            pause_for_source_supervisor(network, root, metadata["Id"], sql)
             if candidate.startswith("j2m-interactive:transition-"):
-                attest_fenced_origin(network, ca, metadata["Id"], checkout, sql)
+                attest_fenced_origin(network, ca, metadata["Id"], checkout, sql, nominal=nominal)
 
 
             origin_database = "full_schema"
@@ -842,13 +944,15 @@ print("Dedicated migrator bigint lock, commit boundaries, role cleanup and repla
             started = monotonic()
             prove_scoped_grants_and_fence(
                 sql, origin_database, run_service,
-                connection, pool_control,
+                connection, pool_control, nominal=nominal,
             )
             verify_transition_accounting(lambda statement: query(statement, origin_database))
-            print(f"Fenced-origin grants, coordinator interruptions and reopening: {monotonic() - started:.2f}s")
+            print(f"Fenced-origin grants, drain and reopening (nominal={nominal}): {monotonic() - started:.2f}s")
             if candidate.startswith("j2m-interactive:transition-"):
                 attest_fenced_origin(network, ca, metadata["Id"], checkout, sql, reopened=True)
             verify_transition_accounting(query)
+            if nominal:
+                continue
             # The lazy baseline is valid for an unused zero-balance account,
             # but must never certify an unexplained positive or negative balance.
             customer_id = query("""

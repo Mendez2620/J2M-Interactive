@@ -39,7 +39,7 @@ CUSTOMER_SEQUENCES = ("customers_id_seq", "referral_participants_id_seq",
 MIGRATOR_LOCK = (-1783214642, 9815)
 
 
-def prove_scoped_grants_and_fence(sql, database, service_flow, connection, pool_control):
+def prove_scoped_grants_and_fence(sql, database, service_flow, connection, pool_control, *, nominal=False):
     if database not in {"full_schema", "full_restore_1"}:
         raise ValueError("Unexpected synthetic writer database")
     def execute(statement, role="postgres"):
@@ -91,7 +91,8 @@ def prove_scoped_grants_and_fence(sql, database, service_flow, connection, pool_
         return "; ".join(statements)
 
     for role in OBJECTS:
-        execute(f"CREATE ROLE {role} LOGIN PASSWORD 'synthetic-{role}'").check_returncode()
+        if execute(f"SELECT count(*) FROM pg_roles WHERE rolname='{role}'").stdout.strip() == b"0":
+            execute(f"CREATE ROLE {role} LOGIN PASSWORD 'synthetic-{role}'").check_returncode()
         execute(f"GRANT CONNECT ON DATABASE {database} TO {role}; "
                 f"GRANT USAGE ON SCHEMA public TO {role}").check_returncode()
         # Service accounts must not inherit the owner, a bypass role or public writes.
@@ -359,23 +360,24 @@ COMMIT;
         peer.stdin.write(b"BEGIN; SELECT count(*) FROM public.google_wallet_referral_jobs;\n")
         peer.stdin.flush()
         assert peer.stdout.readline().strip().isdigit()
-        coordinator = connection("postgres", database, direct=True)
-        send(coordinator, "SELECT pg_backend_pid();")
-        fence_pid = int(coordinator.stdout.readline())
-        try:
-            send(coordinator, " ".join(script.splitlines()))
-            await_lock(fence_pid)
-            kill(coordinator)
-            terminate_backend(fence_pid)
-            # The aborted fence must not be mistaken for a committed revocation.
-            state = execute(f"SELECT rolcanlogin,has_any_column_privilege(rolname,"
-                            f"'public.google_wallet_referral_jobs','UPDATE') FROM pg_roles WHERE rolname='{worker}'")
-            assert state.stdout.strip() == b"t|t"
-            assert execute(accounting).stdout == before
-            direct_blocked()
-            pool_blocked()
-        finally:
-            kill(coordinator)
+        if not nominal:
+            coordinator = connection("postgres", database, direct=True)
+            send(coordinator, "SELECT pg_backend_pid();")
+            fence_pid = int(coordinator.stdout.readline())
+            try:
+                send(coordinator, " ".join(script.splitlines()))
+                await_lock(fence_pid)
+                kill(coordinator)
+                terminate_backend(fence_pid)
+                # The aborted fence must not be mistaken for a committed revocation.
+                state = execute(f"SELECT rolcanlogin,has_any_column_privilege(rolname,"
+                                f"'public.google_wallet_referral_jobs','UPDATE') FROM pg_roles WHERE rolname='{worker}'")
+                assert state.stdout.strip() == b"t|t"
+                assert execute(accounting).stdout == before
+                direct_blocked()
+                pool_blocked()
+            finally:
+                kill(coordinator)
         with ThreadPoolExecutor(max_workers=1) as executor:
             fence = executor.submit(execute, "SELECT pg_backend_pid(); " + script)
             for _ in range(40):
@@ -478,27 +480,29 @@ COMMIT;
         finally:
             kill(coordinator)
 
-    interrupted(fixture_grants(), transaction=True)
-    assert execute(f"SELECT has_table_privilege('{web}','public.transactions','INSERT')").stdout.strip() == b"f"
-    refence()
-    restore_grants()
-    interrupted(fixture_grants() + ";")
-    assert execute(f"SELECT has_table_privilege('{web}','public.transactions','INSERT')").stdout.strip() == b"t"
-    pool_blocked()
-    refence()
-    restore_grants()
     login = f"ALTER ROLE {web} LOGIN; ALTER ROLE {worker} LOGIN;"
-    interrupted(login)
-    pool_blocked()
-    refence()
-    restore_grants()
-    execute(login).check_returncode()
-    interrupted(f"ENABLE {database};", pool=True)
-    newcomer = connection(worker, database)
-    _, error = newcomer.communicate(b"SELECT 1;\n", timeout=8)
-    assert newcomer.returncode and b"permission denied for database" in error
-    refence()
-    print("Killed a blocked fence and four reopening coordinators; connection gate and accounting verified.")
+    if not nominal:
+        interrupted(fixture_grants(), transaction=True)
+        assert execute(f"SELECT has_table_privilege('{web}','public.transactions','INSERT')").stdout.strip() == b"f"
+        refence()
+        restore_grants()
+        interrupted(fixture_grants() + ";")
+        assert execute(f"SELECT has_table_privilege('{web}','public.transactions','INSERT')").stdout.strip() == b"t"
+        pool_blocked()
+        refence()
+        restore_grants()
+        interrupted(login)
+        pool_blocked()
+        refence()
+        restore_grants()
+        execute(login).check_returncode()
+        interrupted(f"ENABLE {database};", pool=True)
+        newcomer = connection(worker, database)
+        _, error = newcomer.communicate(b"SELECT 1;\n", timeout=8)
+        assert newcomer.returncode and b"permission denied for database" in error
+        refence()
+        print("Killed a blocked fence and four reopening coordinators; connection gate and accounting verified.")
+
 
     restore_grants()
     execute(login).check_returncode()
