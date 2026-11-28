@@ -316,6 +316,9 @@ def run_google_wallet_sync_worker(*, stop_event=None, sleep_fn=time.sleep, servi
         except Exception as exc:
             db.session.rollback()
             logger.error("google_wallet_worker_cycle_failed error_type=%s", type(exc).__name__)
+        finally:
+            # Metrics open a read transaction even when Wallet is disabled.
+            db.session.remove()
         cycles += 1
         if max_cycles is not None and cycles >= max_cycles:
             break
