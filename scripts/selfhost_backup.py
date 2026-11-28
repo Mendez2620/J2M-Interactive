@@ -1265,8 +1265,9 @@ def _psql(name: str, sql: str, timeout: int = 30) -> str:
 
 
 def _wait_postgres(name: str) -> None:
+    # The image bootstrap daemon listens only on a Unix socket.
     for _ in range(30):
-        probe = subprocess.run(["docker", "exec", name, "pg_isready", "-U", "j2m_restore",
+        probe = subprocess.run(["docker", "exec", name, "pg_isready", "-h", "127.0.0.1", "-U", "j2m_restore",
                                 "-d", "j2m_restore"], stdout=subprocess.DEVNULL,
                                stderr=subprocess.DEVNULL, timeout=10)
         if probe.returncode == 0:

@@ -236,7 +236,7 @@ with exclusive_lock(Path(sys.argv[1])):
 
 
 @contextmanager
-def certify_pre_migration_backup(network, sql, root, ca, pool_control, connection, *, nominal=False):
+def certify_pre_migration_backup(network, sql, root, ca, pool_control, connection, image, *, nominal=False):
     """Run the real integral backup with an independently exported snapshot."""
     database = "full_schema"
     output = root / "restricted-backups"
@@ -288,12 +288,19 @@ def certify_pre_migration_backup(network, sql, root, ca, pool_control, connectio
                 with patch.dict(os.environ, {"J2M_SYNTHETIC_BACKUP_TEST": "1"}), patch(
                     "scripts.selfhost_backup.load_dpapi_key", return_value=bytes(range(32))
                 ):
+                    from scripts import selfhost_backup as backup
+                    verify_media = backup._restored_media_references
+                    def partial_restore(name, archived):
+                        pause_for_source_supervisor("restore-partial", network, root, image, sql,
+                                                    auxiliary=(name,))
+                        return verify_media(name, archived)
                     try:
-                        index = integral_backup(
-                            env_file, root / "media", output, key_file, retries=1, network=network,
-                            timeout=180, restricted_snapshot=snapshot_id, verify_restored_coverage=coverage,
-                            certification_head=expected_head, acquire_lock=False,
-                        )
+                        with patch.object(backup, "_restored_media_references", side_effect=partial_restore):
+                            index = integral_backup(
+                                env_file, root / "media", output, key_file, retries=1, network=network,
+                                timeout=180, restricted_snapshot=snapshot_id, verify_restored_coverage=coverage,
+                                certification_head=expected_head, acquire_lock=False,
+                            )
                     except RuntimeError as error:
                         if expected_error is None or expected_error not in str(error):
                             raise
@@ -361,7 +368,9 @@ def certify_pre_migration_backup(network, sql, root, ca, pool_control, connectio
             assert active.stdout.strip() == b"0"
             assert sql("SELECT nextval('public.customers_id_seq')", "j2m_backup",
                        database=database).returncode
+            pause_for_source_supervisor("fence", network, root, image, sql)
             run_backup()
+            pause_for_source_supervisor("restore", network, root, image, sql)
             if not nominal:
                 before = {path.name for path in output.iterdir()}
                 run_backup(expected_head="c3d4e5f6a7b8", expected_error="head Alembic esperado")
@@ -408,7 +417,7 @@ def attest_fenced_origin(network, ca, image, revision, sql, *, reopened=False, n
         raise RuntimeError("Unexpected initial Docker network membership")
     network_id = network_spec["Id"]
     folder = ca.parent / ("https-reopened" if reopened else "https")
-    folder.mkdir(mode=0o755)
+    folder.mkdir(mode=0o755, exist_ok=True)
     write_certificates(folder)
     (folder / "nginx.conf").write_text(proxy_config().replace(
         "access_log off;",
@@ -470,8 +479,14 @@ def attest_fenced_origin(network, ca, image, revision, sql, *, reopened=False, n
                 sleep(.25)
             else:
                 raise RuntimeError(f"Synthetic {role} healthcheck did not pass")
+        def request(route, nonce):
+            if route == "ready" and not reopened:
+                pause_for_source_supervisor("https", network, ca.parent, image, sql,
+                                            auxiliary=tuple(names.values()))
+            return nonce_https_request(network, folder, image, route, nonce)
+
         return prove_https(
-            snapshot, lambda route, nonce: nonce_https_request(network, folder, image, route, nonce),
+            snapshot, request,
             lambda: run("docker", "logs", names["proxy"]), revision=selected_revision,
         )
 
@@ -527,9 +542,9 @@ def attest_fenced_origin(network, ca, image, revision, sql, *, reopened=False, n
             subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=30)
 
 
-def pause_for_source_supervisor(network, root, image, sql):
+def pause_for_source_supervisor(boundary, network, root, image, sql, *, auxiliary=()):
     checkpoint = os.environ.get("J2M_ROLE_SUPERVISION")
-    if checkpoint is None:
+    if checkpoint is None or boundary != os.environ.get("J2M_ROLE_BOUNDARY", "migrate"):
         return
     from legacy_transition_digest import logical_digest
     from scripts.isolated_transition import _save
@@ -539,14 +554,25 @@ def pause_for_source_supervisor(network, root, image, sql):
     if path.parent.resolve() != root.resolve() or token != os.environ.get("J2M_ROLE_SYNTHETIC_TOKEN"):
         raise ValueError("Unexpected synthetic supervisor path or cluster")
     indexes = list((root / "restricted-backups").glob("j2m-set-*.j2mbackup"))
-    if len(indexes) != 1:
-        raise RuntimeError("Unexpected exact backup count at migration checkpoint")
-    record = {"phase": "migrated", "status": "pending", "database": "full_schema",
-              "network": network, "digest": logical_digest(token, "full_schema", user="postgres"),
-              "image": image, "index": indexes[0].name, "index_sha256": _hash_file(indexes[0])}
-    cluster = sql("SELECT system_identifier FROM pg_control_system()", database="full_schema")
+    has_index = boundary not in {"fence", "restore-partial"}
+    if len(indexes) != int(has_index):
+        raise RuntimeError("Unexpected certified backup count at checkpoint")
+    checkout = subprocess.check_output(
+        ["docker", "image", "inspect", "--format", '{{index .Config.Labels "org.opencontainers.image.revision"}}',
+         image], text=True, timeout=15,
+    ).strip()
+    record = {"phase": boundary, "status": "pending", "database": "full_schema",
+              "checkout": checkout, "network": network, "digest": logical_digest(token, "full_schema", user="postgres"),
+              "image": image, "index": indexes[0].name if has_index else None,
+              "index_sha256": _hash_file(indexes[0]) if has_index else None,
+              "auxiliary": {}}
+    for name in auxiliary:
+        info = json.loads(subprocess.check_output(["docker", "inspect", name], timeout=15))[0]
+        record["auxiliary"][name] = info["Id"]
+    cluster = sql("SELECT system_identifier, (SELECT oid FROM pg_database "
+                  "WHERE datname=current_database()) FROM pg_control_system()", database="full_schema")
     cluster.check_returncode()
-    record["cluster"] = cluster.stdout.decode().strip()
+    record["cluster"], record["database_oid"] = cluster.stdout.decode().strip().split("|")
     _save(path, record)
     while True:
         sleep(1)
@@ -884,7 +910,7 @@ print("Dedicated migrator bigint lock, commit boundaries, role cleanup and repla
         print(f"Declared relation ownership, ACL, RLS and membership verified for {head}.")
         prove_incoming_membership_rejected(sql, "full_schema")
         if i == 0:
-            operation.enter_context(certify_pre_migration_backup(network, sql, root, ca, pool_control, connection, nominal=nominal))
+            operation.enter_context(certify_pre_migration_backup(network, sql, root, ca, pool_control, connection, metadata["Id"], nominal=nominal))
         assert sql("SELECT version_num FROM alembic_version",
                    database="full_schema").stdout.strip() == head.encode()
         observed_relations = sql(RELATION_QUERY, database="full_schema")
@@ -925,9 +951,10 @@ print("Dedicated migrator bigint lock, commit boundaries, role cleanup and repla
             for role in ("j2m_schema_web", "j2m_schema_worker"):
                 assert sql("SELECT 1", role, database="full_schema").returncode
             print("Legacy backup exclusion and writer admission gate held through migration.")
-            pause_for_source_supervisor(network, root, metadata["Id"], sql)
+            pause_for_source_supervisor("migrate", network, root, metadata["Id"], sql)
             if candidate.startswith("j2m-interactive:transition-"):
                 attest_fenced_origin(network, ca, metadata["Id"], checkout, sql, nominal=nominal)
+            pause_for_source_supervisor("verify", network, root, metadata["Id"], sql)
 
 
             origin_database = "full_schema"
@@ -941,10 +968,22 @@ print("Dedicated migrator bigint lock, commit boundaries, role cleanup and repla
                     checked.add(role)
                 app("python", "-c", source, role=role, database=origin_database)
 
+            def before_open():
+                for role in ("j2m_schema_web", "j2m_schema_worker"):
+                    result = sql("SELECT 1", role, database=origin_database)
+                    if not result.returncode or b"permission denied for database" not in result.stderr:
+                        raise RuntimeError("Direct admission opened before verification")
+                    with connection(role, origin_database) as peer:
+                        _, stderr = peer.communicate(b"SELECT 1;\n", timeout=8)
+                        if not peer.returncode or b"disabled" not in stderr.lower():
+                            raise RuntimeError("Pool admission opened before verification")
+                pause_for_source_supervisor("reopen", network, root, metadata["Id"], sql)
+
             started = monotonic()
             prove_scoped_grants_and_fence(
                 sql, origin_database, run_service,
                 connection, pool_control, nominal=nominal,
+                before_open=before_open,
             )
             verify_transition_accounting(lambda statement: query(statement, origin_database))
             print(f"Fenced-origin grants, drain and reopening (nominal={nominal}): {monotonic() - started:.2f}s")

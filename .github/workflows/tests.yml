@@ -127,8 +127,6 @@ jobs:
           export J2M_ROLE_FIXTURE_IMAGE="j2m-interactive:transition-$(git rev-parse HEAD)"
           J2M_NOMINAL_TRANSITION=1 python tests/postgres_role_separation_ci.py
           python tests/postgres_role_separation_ci.py
-      - name: Terminate the restricted-backup coordinator at the migrated source
-        run: python tests/legacy_transition_supervisor_ci.py --migrated-role-source --evidence-dir "$RUNNER_TEMP/j2m-transition-evidence/migrated-role-source"
       - name: Terminate coordinator at fenced transition boundaries
         run: |
           for phase in fence restore restore-partial migrate verify https; do
@@ -141,10 +139,49 @@ jobs:
           name: historical-transition-${{ github.sha }}
           path: |
             ${{ runner.temp }}/j2m-transition-evidence/evidence.jsonl
-            ${{ runner.temp }}/j2m-transition-evidence/migrated-role-source/supervisor.json
             ${{ runner.temp }}/j2m-transition-evidence/evidence.jsonl.state/transition.json
             ${{ runner.temp }}/j2m-transition-evidence/supervised-*/supervisor.json
             ${{ runner.temp }}/j2m-transition-evidence/supervised-*/evidence.jsonl.state/transition.json
+          if-no-files-found: warn
+          retention-days: 30
+
+  supervised-origin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        boundary: [fence, restore-partial, restore, migrate, verify, https, reopen]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.lock
+      - name: Build disposable transition images
+        run: |
+          set -euo pipefail
+          legacy=dae140e3684be29c534be3e1725598d226b68e03
+          sha=$(git rev-parse HEAD)
+          historical=$(mktemp -d)
+          git archive "$legacy" | tar -x -C "$historical"
+          docker build --label "org.opencontainers.image.revision=$legacy" -t "j2m-interactive:reconstructed-$legacy" "$historical"
+          docker build --label "org.opencontainers.image.revision=$sha" -t "j2m-interactive:transition-$sha" .
+          docker build -f tests/Dockerfile.pgbouncer -t j2m-pgbouncer:synthetic .
+      - name: Supervise termination on the fenced origin
+        env:
+          BOUNDARY: ${{ matrix.boundary }}
+        run: python tests/legacy_transition_supervisor_ci.py --migrated-role-source --boundary "$BOUNDARY" --evidence-dir "$RUNNER_TEMP/j2m-supervised-origin"
+      - name: Preserve synthetic origin report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: supervised-origin-${{ matrix.boundary }}-${{ github.sha }}
+          path: ${{ runner.temp }}/j2m-supervised-origin/supervisor.json
           if-no-files-found: warn
           retention-days: 30
 

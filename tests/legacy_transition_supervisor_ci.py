@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -183,7 +184,75 @@ def exercise(directory, *, reconstructed=False, boundary='migrate'):
                 raise RuntimeError("Operational container IDs changed")
 
 
-def supervise_migrated_role_source(directory):
+def recover_verified_source(directory, token, network, pooler, image, checkout):
+    """Reattest the same fenced source and restore one verified admission path."""
+    from postgres_full_schema_fixture import (
+        SIMULATED_BACKUP_TASKS, attest_fenced_origin, run_simulated_backup_task,
+    )
+    from postgres_scoped_grants_fixture import prove_scoped_grants_and_fence
+    from scripts.selfhost_backup import exclusive_lock
+
+    marker = directory / "tasks-suspended.json"
+    marker_contents = marker.read_text(encoding="utf-8")
+    lock = directory / ".operations.lock"
+
+    def client(role, database, host, port):
+        password = f"synthetic-{role}" if role.startswith("j2m_schema_") else "synthetic-only"
+        return ["docker", "exec", "-i", token, "env", f"PGPASSWORD={password}", "psql",
+                "-XqAt", "-v", "ON_ERROR_STOP=1", "-h", host, "-p", str(port), "-U", role, "-d", database]
+
+    def sql(statement, role="postgres", database="full_schema"):
+        return subprocess.run([*client(role, database, "127.0.0.1", 5432), "-c", statement],
+                              capture_output=True, timeout=15)
+
+    def connection(role, database, *, direct=False):
+        return subprocess.Popen(client(role, database, "127.0.0.1" if direct else pooler, 5432 if direct else 6432),
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    def pool_control(statement):
+        return subprocess.run([*client("j2m_pool_admin", "pgbouncer", pooler, 6432), "-c", statement],
+                              capture_output=True, timeout=15)
+
+    def service_flow(role, source):
+        filename = "WEB.env" if role == "j2m_schema_web" else "WORKER.env"
+        run("docker", "run", "--rm", "--network", network, "--env-file", str(directory / filename),
+            "--mount", f"type=bind,src={directory / 'ca.crt'},dst=/run/j2m/supabase-ca.pem,readonly",
+            image, "python", "-c", source)
+
+    def assert_fenced():
+        for role in ("j2m_schema_web", "j2m_schema_worker"):
+            result = sql("SELECT 1", role)
+            if not result.returncode or b"permission denied for database" not in result.stderr:
+                raise RuntimeError("Service was admitted during grant preparation")
+            with connection(role, "full_schema") as peer:
+                _, stderr = peer.communicate(b"SELECT 1;\n", timeout=8)
+                if not peer.returncode or b"disabled" not in stderr.lower():
+                    raise RuntimeError("Pool was admitted during grant preparation")
+
+    started = time.monotonic()
+    try:
+        with exclusive_lock(lock):
+            assert_fenced()
+            attest_fenced_origin(network, directory / "ca.crt", image, checkout, sql, nominal=True)
+            prove_scoped_grants_and_fence(sql, "full_schema", service_flow, connection, pool_control,
+                                         nominal=True, before_open=assert_fenced, recovery_only=True)
+            attest_fenced_origin(network, directory / "ca.crt", image, checkout, sql, reopened=True)
+        marker.unlink()
+        for task in SIMULATED_BACKUP_TASKS:
+            run_simulated_backup_task(lock, marker, task).check_returncode()
+    except BaseException:
+        if not marker.exists():
+            marker.write_text(marker_contents, encoding="utf-8")
+        pool_control("DISABLE full_schema").check_returncode()
+        sql("REVOKE CONNECT ON DATABASE full_schema FROM PUBLIC,j2m_schema_web,j2m_schema_worker; "
+            "SELECT pg_terminate_backend(pid, 3000) FROM pg_stat_activity "
+            "WHERE datname=current_database() AND usename IN ('j2m_schema_web','j2m_schema_worker')").check_returncode()
+        assert_fenced()
+        raise
+    return round(time.monotonic() - started, 2)
+
+
+def supervise_migrated_role_source(directory, boundary="migrate"):
     """Kill the actual restricted-backup coordinator and attest the live fenced source."""
     from postgres_full_schema_fixture import SIMULATED_BACKUP_TASKS, run_simulated_backup_task
 
@@ -196,8 +265,10 @@ def supervise_migrated_role_source(directory):
     image = run("docker", "image", "inspect", "--format", "{{.Id}}", candidate)
     before = production_ids()
     env = dict(os.environ, J2M_ROLE_SUPERVISION=str(checkpoint), J2M_ROLE_SYNTHETIC_TOKEN=token,
-               J2M_ROLE_FIXTURE_IMAGE=candidate, J2M_NOMINAL_TRANSITION="1")
+               J2M_ROLE_FIXTURE_IMAGE=candidate, J2M_NOMINAL_TRANSITION="1", J2M_ROLE_BOUNDARY=boundary)
     resources = (("container", token), ("container", pooler), ("network", network))
+    auxiliary_ids = {}
+    expected_head = INITIAL_HEAD if boundary in {"fence", "restore", "restore-partial"} else FINAL_HEAD
     with (directory / "origin-coordinator.log").open("wb") as log:
         child = subprocess.Popen([sys.executable, "-u", "tests/postgres_role_separation_ci.py"],
                                  cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
@@ -206,39 +277,74 @@ def supervise_migrated_role_source(directory):
             while not checkpoint.exists() and child.poll() is None and time.monotonic() < deadline:
                 time.sleep(.2)
             if not checkpoint.exists():
-                raise RuntimeError("Restricted-backup coordinator did not reach the migrated checkpoint")
+                raise RuntimeError(f"Restricted-backup coordinator did not reach {boundary}")
             evidence = json.loads(checkpoint.read_text(encoding="utf-8"))
             observed = {name: identity(kind, name, token) for kind, name in resources}
             docker_network = observed[network]
-            if (not docker_network["Internal"]
-                    or set(docker_network["Containers"]) != {observed[token]["Id"], observed[pooler]["Id"]}
+            auxiliary = evidence["auxiliary"]
+            expected_auxiliary = ({token + "-attest-" + role for role in ("web", "worker", "proxy")}
+                                  if boundary == "https" else set())
+            if boundary == "restore-partial":
+                if len(auxiliary) != 1 or not all(re.fullmatch(r"j2m-restore-[0-9a-f]{12}", name) for name in auxiliary):
+                    raise RuntimeError("Unverified partial restore container")
+                expected_auxiliary = set(auxiliary)
+            if auxiliary.keys() != expected_auxiliary:
+                raise RuntimeError("Unexpected auxiliary resources")
+            for name, identifier in auxiliary.items():
+                resource = json.loads(run("docker", "inspect", name))[0]
+                expected_network = "none" if boundary == "restore-partial" else network
+                if (resource["Id"] != identifier or resource["HostConfig"]["PortBindings"]
+                        or set(resource["NetworkSettings"]["Networks"]) != {expected_network}):
+                    raise RuntimeError("Unverified auxiliary identity")
+                auxiliary_ids[name] = identifier
+            expected_network_ids = {observed[token]["Id"], observed[pooler]["Id"]}
+            if boundary == "https":
+                expected_network_ids.update(auxiliary.values())
+            if (not docker_network["Internal"] or set(docker_network["Containers"]) != expected_network_ids
                     or any(observed[name]["HostConfig"]["PortBindings"] for name in (token, pooler))
+                    or evidence["checkout"] != checkout
                     or (evidence["phase"], evidence["status"], evidence["database"],
-                        evidence["network"], evidence["image"]) != ("migrated", "pending", "full_schema", network, image)):
+                        evidence["network"], evidence["image"]) != (boundary, "pending", "full_schema", network, image)):
                 raise RuntimeError("Unverified source checkpoint identity")
             child.kill()
             child.wait(timeout=10)
             for kind, name in resources:
-                if identity(kind, name, token)["Id"] != observed[name]["Id"]:
+                current = identity(kind, name, token)
+                if (current["Id"] != observed[name]["Id"] or
+                        (kind == "container" and current["Mounts"] != observed[name]["Mounts"])):
                     raise RuntimeError("Source resource changed after coordinator death")
 
             def query(statement):
                 return run("docker", "exec", token, "psql", "-XAt", "-v", "ON_ERROR_STOP=1",
                            "-U", "postgres", "-d", "full_schema", "-c", statement)
 
-            if (query("SELECT system_identifier FROM pg_control_system()") != evidence["cluster"]
-                    or query("SELECT version_num FROM alembic_version") != FINAL_HEAD
+            if (query("SELECT system_identifier, (SELECT oid FROM pg_database "
+                      "WHERE datname=current_database()) FROM pg_control_system()")
+                    != f"{evidence['cluster']}|{evidence['database_oid']}"
+                    or query("SELECT version_num FROM alembic_version") != expected_head
                     or logical_digest(token, "full_schema", user="postgres") != evidence["digest"]):
                 raise RuntimeError("Source cluster, revision or digest changed")
             verify_transition_accounting(query)
             if json.loads(checkpoint.read_text(encoding="utf-8")) != evidence:
                 raise RuntimeError("Pending journal changed after coordinator death")
-            index = directory / "restricted-backups" / Path(evidence["index"]).name
-            with patch.dict(os.environ, {"J2M_SYNTHETIC_BACKUP_TEST": "1"}), patch(
-                "scripts.selfhost_backup.load_dpapi_key", return_value=bytes(range(32))
-            ):
-                if _hash_file(index) != evidence["index_sha256"] or not verify_integral_set(index, directory / "synthetic-key"):
-                    raise RuntimeError("Authenticated backup index changed")
+            indexes = list((directory / "restricted-backups").glob("j2m-set-*.j2mbackup"))
+            if boundary in {"fence", "restore-partial"}:
+                if evidence["index"] is not None or indexes:
+                    raise RuntimeError("A checkpoint without a completed backup exposed an index")
+                if boundary == "restore-partial":
+                    restored = next(iter(auxiliary_ids.values()))
+                    if run("docker", "exec", restored, "psql", "-XAt", "-U", "j2m_restore", "-d", "j2m_restore",
+                           "-c", "SELECT version_num FROM alembic_version") != INITIAL_HEAD:
+                        raise RuntimeError("Incomplete restore did not preserve the expected legacy revision")
+            else:
+                index = directory / "restricted-backups" / Path(evidence["index"]).name
+                with patch.dict(os.environ, {"J2M_SYNTHETIC_BACKUP_TEST": "1"}), patch(
+                    "scripts.selfhost_backup.load_dpapi_key", return_value=bytes(range(32))
+                ):
+                    if indexes != [index] or _hash_file(index) != evidence["index_sha256"] or not verify_integral_set(
+                        index, directory / "synthetic-key"
+                    ):
+                        raise RuntimeError("Authenticated backup index changed")
             for role in ("j2m_schema_web", "j2m_schema_worker"):
                 for host, port, message in (("127.0.0.1", "5432", b"permission denied for database"),
                                             (pooler, "6432", b"disabled")):
@@ -269,24 +375,34 @@ with app.app_context():
     else:
         raise AssertionError("Migration replay accepted")
 """
-            replay = subprocess.run(
-                ["docker", "run", "--rm", "--network", network, "--env-file", str(directory / "MIGRATOR.env"),
-                 "-e", "J2M_PROCESS_TYPE=migrator", "--mount",
-                 f"type=bind,src={directory / 'ca.crt'},dst=/run/j2m/supabase-ca.pem,readonly",
-                 image, "python", "-c", replay_probe], capture_output=True, timeout=45,
-            )
-            if replay.returncode or logical_digest(token, "full_schema", user="postgres") != evidence["digest"]:
-                raise RuntimeError("Migration replay was accepted or changed the source")
+            if expected_head == FINAL_HEAD:
+                replay = subprocess.run(
+                    ["docker", "run", "--rm", "--network", network, "--env-file", str(directory / "MIGRATOR.env"),
+                     "-e", "J2M_PROCESS_TYPE=migrator", "--mount",
+                     f"type=bind,src={directory / 'ca.crt'},dst=/run/j2m/supabase-ca.pem,readonly",
+                     image, "python", "-c", replay_probe], capture_output=True, timeout=45,
+                )
+                if replay.returncode or logical_digest(token, "full_schema", user="postgres") != evidence["digest"]:
+                    raise RuntimeError("Migration replay was accepted or changed the source")
+            recovery_seconds = (recover_verified_source(directory, token, network, pooler, image, checkout)
+                                if boundary == "verify" else None)
             report = {**evidence, "container": observed[token]["Id"], "pooler": observed[pooler]["Id"],
+                      "network_id": docker_network["Id"], "postgres_image": observed[token]["Image"],
+                      "pooler_image": observed[pooler]["Image"],
+                      "volumes": [mount["Name"] for mount in observed[token]["Mounts"] if mount["Type"] == "volume"],
                       "coordinator_terminated": True, "tasks_suspended": True,
-                      "actual_head": FINAL_HEAD, "writer_reconnect_denied": True,
-                      "source_accounting_verified": True, "migration_replayed": False, "reopened": False}
+                      "actual_head": expected_head, "writer_reconnect_denied": True,
+                      "source_accounting_verified": True, "migration_replayed": False,
+                      "reopened": recovery_seconds is not None, "recovery_seconds": recovery_seconds}
             (directory / "supervisor.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
-            print("Killed the restricted-backup coordinator; same migrated source, digest, writer denial and task suspension verified.")
+            print(f"Killed the restricted-backup coordinator at {boundary}; same source, digest and writer denial verified.")
         finally:
             if child.poll() is None:
                 child.kill()
                 child.wait(timeout=10)
+            for name, identifier in auxiliary_ids.items():
+                if run("docker", "inspect", "--format", "{{.Id}}", name, check=False) == identifier:
+                    run("docker", "rm", "-f", identifier)
             for kind, name in resources:
                 if run("docker", kind, "inspect", "--format", "{{.Id}}", name, check=False):
                     resource = identity(kind, name, token)
@@ -300,12 +416,14 @@ if __name__ == "__main__":
     parser.add_argument("--reconstructed-legacy", action="store_true")
     parser.add_argument("--migrated-role-source", action="store_true")
     parser.add_argument("--evidence-dir", type=Path)
-    parser.add_argument("--boundary", choices=("fence", "restore", "restore-partial", "migrate", "verify", "https"), default="migrate")
+    parser.add_argument("--boundary", choices=("fence", "restore", "restore-partial", "migrate", "verify", "https", "reopen"), default="migrate")
     options = parser.parse_args()
     if options.migrated_role_source:
         if options.evidence_dir is None:
             parser.error("--migrated-role-source requires --evidence-dir")
-        supervise_migrated_role_source(options.evidence_dir.resolve())
+        supervise_migrated_role_source(options.evidence_dir.resolve(), options.boundary)
+    elif options.boundary == "reopen":
+        parser.error("reopen requires --migrated-role-source")
     elif options.evidence_dir:
         exercise(options.evidence_dir, reconstructed=options.reconstructed_legacy, boundary=options.boundary)
     else:

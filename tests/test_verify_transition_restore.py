@@ -7,6 +7,15 @@ from scripts import verify_transition_restore as v
 
 
 class TransitionRestoreTests(unittest.TestCase):
+    def test_isolated_restore_waits_for_tcp_listener(self):
+        from subprocess import CompletedProcess
+
+        with patch.object(v.backup.subprocess, "run", return_value=CompletedProcess([], 0)) as probe:
+            v.backup._wait_postgres("synthetic-restore")
+        self.assertEqual(probe.call_args.args[0],
+                         ["docker", "exec", "synthetic-restore", "pg_isready", "-h", "127.0.0.1",
+                          "-U", "j2m_restore", "-d", "j2m_restore"])
+
     def test_authorization_required(self):
         with patch("sys.argv", ["restore", "--index", "x", "--key-file", "x",
                                "--expected-index-sha256", "x",

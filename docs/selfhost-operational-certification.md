@@ -216,10 +216,10 @@ plan y reducir concurrencia/configuración antes de habilitar identidades.
   y recuperación. Restaurar exclusivamente los accesos aprobados y
   reanudar tareas con los intervalos existentes.
 
-La duración de indisponibilidad sigue sin estimarse con evidencia hasta
-cronometrar la secuencia completa con los archivos independientes, la
-coordinación de tareas y el respaldo completo. No presentar los tiempos
-del fixture de relaciones como estimación de una ventana real.
+La ruta nominal registra tiempos de preparación, respaldo, migración,
+verificación y reapertura en recursos descartables. La duración de una
+ventana real se estima únicamente después de validar las condiciones
+operativas A/B/C con la infraestructura autorizada.
 
 ### Migrador dedicado del ensayo
 
@@ -270,9 +270,9 @@ Los runners operativos y su programación no cambian.
   las tareas con sus intervalos vigentes. Ante ambigüedad cerrar el ingreso
   y restablecer la barrera.
 
-Los tiempos de los subensayos son evidencia sintética. La ventana completa
-todavía requiere integrar la coordinación de tareas, el supervisor y la
-reapertura en una misma ejecución.
+Los reportes separan la ruta nominal de las variantes que terminan al
+coordinador. Cada variante compara la evidencia persistida con los
+recursos vivos antes de evaluar si puede reabrir.
 
 ### Respaldo previo a la migración y capacidad sintética
 
@@ -290,9 +290,9 @@ destinos operativos y no altera el valor esperado por los runners legados.
 La matriz sintética comprueba propietarios, ACL de relaciones, ausencia
 de grants de columna antes de aprovisionar, RLS, identidad y modo de
 ejecución de las rutinas y membresías en ambos heads. La pertenencia
-implícita a pg_database_owner se modela por separado. Todavía falta
-declarar por objeto el contenido esperado de columnas, defaults,
-políticas, triggers y rutinas, y reconciliar los consumidores externos.
+implícita a pg_database_owner se modela por separado. Las 493 columnas
+históricas y sus defaults se declaran por objeto junto con el delta de
+transición. La atribución de consumidores externos es una puerta operativa.
 La barrera usada sobre la base descartable no prescribe revocar
 CONNECT a PUBLIC ni a cuentas administradas en Supabase real.
 
@@ -320,8 +320,9 @@ En el clúster descartable, se retiene CONNECT para el lector y luego
 para el migrador durante el cierre de admisión. Los escritores se
 mantienen cerrados hasta que el ensayo de roles termina correctamente.
 Ante una excepción, el cierre permanece activo hasta la limpieza del
-clúster. El supervisor histórico y la atestación HTTPS siguen ejecutándose
-como ensayos separados.
+clúster. El supervisor también comprueba el origen vivo tras terminar el
+coordinador, incluida la atestación HTTPS durante la recuperación autorizada
+del ensayo.
 
 Para la aprobación A, clasificar service_role, REST, Data API y GraphQL
 según esquemas expuestos y rol efectivo. Inventariar las funciones RPC por
@@ -391,14 +392,11 @@ tareas simuladas comprueban la misma exclusión antes y después de la
 ventana. El volumen restaurado sigue disponible como destino separado
 para las negativas de contabilidad que alteran deliberadamente valores.
 
-Las pruebas de terminación del supervisor histórico tienen su propio
-ciclo de creación de recursos. Para completar la certificación todavía
-deben compartir una variante de la ventana desde el respaldo restringido,
-con las mismas identidades inmutables y el diario de ese origen. La
-declaración de columnas históricas fuera de las claves SERIAL también
-sigue pendiente. Las pruebas de Supavisor, la atribución externa y la
-validación de credenciales e imagen instaladas pertenecen a las puertas
-operativas A/B/C.
+Cada frontera del supervisor integral usa un clúster descartable propio y
+conserva el mismo origen dentro de la variante. Se verifica el OID de la
+base junto con el clúster, la red, los contenedores y sus montajes.
+Supavisor, la atribución externa y las credenciales e imagen instaladas
+siguen siendo puertas operativas A/B/C.
 
 ### Columnas históricas y suspensión persistente
 
@@ -417,12 +415,17 @@ runners simulados deben rechazar el arranque aunque esté libre el lock.
 La prueba de proceso confirma que terminar al dueño del lock libera el
 archivo de exclusión y conserva el marcador de suspensión.
 
-CI ejecuta una ruta nominal y una ruta de regresión en clústeres
-distintos. La nominal excluye las interrupciones inyectadas y el
-reemplazo deliberado del backend. Ambas reutilizan los componentes de
-respaldo, migración, atestación y reapertura. La variante integrada del supervisor termina el coordinador completo
-tras confirmar la migración y antes de atestar HTTPS. Conserva el
-origen para volver a comprobar su identidad, contabilidad, digest,
-revisión, respaldo y barreras. Mantiene cerrado el ingreso en esa
-variante porque falta la atestación. Las demás fronteras continúan
-en el ensayo histórico separado. Los runners operativos siguen intactos.
+CI mantiene las rutas nominal e histórica. La matriz del supervisor
+integral cubre barrera, restauración parcial, restauración autenticada,
+migración, verificación, HTTPS y admisión previa a la reapertura. La
+restauración parcial se interrumpe con la base aislada restaurada y antes
+de validar sus medios. Ningún índice de conjunto se puede seleccionar.
+
+La variante verify reatesta HTTPS con un lector mientras escritores y
+pool siguen cerrados. Prepara y compara los permisos declarados antes de
+reponer CONNECT. Solo entonces comprueba la reconexión autenticada,
+HTTPS del backend y el worker con sus identidades efectivas y la
+reanudación de las tres tareas. Las demás fronteras mantienen el ingreso
+cerrado. Ante un fallo de recuperación, el fixture restablece el cierre y
+conserva la suspensión. Las autorizaciones A/B/C siguen pendientes y se
+verifican por separado del criterio de merge.
