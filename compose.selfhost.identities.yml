@@ -21,6 +21,7 @@ services:
     volumes:
       - *j2m-database-ca
   migrator:
+    command: ["python", "-m", "scripts.run_certified_migration"]
     env_file: !override
       - path: ${J2M_MIGRATOR_ENV_FILE:?set the dedicated migrator environment file}
         format: raw

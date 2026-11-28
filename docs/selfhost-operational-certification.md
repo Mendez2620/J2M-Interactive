@@ -215,3 +215,13 @@ La duración de indisponibilidad sigue sin estimarse con evidencia hasta
 cronometrar la secuencia completa con los archivos independientes, la
 coordinación de tareas y el respaldo completo. No presentar los tiempos
 del fixture de relaciones como estimación de una ventana real.
+
+### Migrador dedicado del ensayo
+
+El overlay de identidades ejecuta `python -m scripts.run_certified_migration` para
+el migrador. El comando está limitado al PostgreSQL sintético `db/full_schema`
+con TLS verify-full. Comprueba el login `j2m_migrator` antes de asumir
+`j2m_owner` y conserva un bloqueo de sesión en la misma conexión durante
+Alembic. Si la revisión de origen difiere o el resultado es incierto,
+la ejecución se detiene. Inspeccionar el head efectivo antes de plantear
+otra ejecución. La ruta legada de Compose permanece intacta.

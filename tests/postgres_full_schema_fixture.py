@@ -86,7 +86,7 @@ def exercise_application_schema(network, run, sql, connection, pool_control, ca)
     }), encoding="utf-8")
     env = {
         **os.environ,
-        "J2M_IMAGE": "j2m-interactive:wallet-demo-synthetic",
+        "J2M_IMAGE": os.environ.get("J2M_ROLE_FIXTURE_IMAGE", "j2m-interactive:wallet-demo-synthetic"),
         "J2M_ENV_FILE": str(ROOT / ".env.wallet-demo.example"),
         "J2M_CLOUDFLARED_ENV_FILE": str(ROOT / ".env.cloudflared.example"),
         "J2M_DATABASE_CA_FILE": str(ca),
@@ -112,7 +112,11 @@ def exercise_application_schema(network, run, sql, connection, pool_control, ca)
                 "?sslmode=verify-full&sslrootcert=/run/j2m/supabase-ca.pem",
                 "",
             ]), encoding="utf-8")
-        options = ["-e", "PGOPTIONS=-c role=j2m_owner"] if role == "j2m_migrator" else []
+        # Bootstrap only the disposable source from an empty catalog.
+        # The transition itself uses the standalone guarded migrator.
+        dedicated = args[:3] == ("python", "-m", "scripts.run_certified_migration")
+        options = (["-e", "PGOPTIONS=-c role=j2m_owner"]
+                   if role == "j2m_migrator" and not dedicated else [])
         compose = ["docker", "compose", "-p", project, "-f", "compose.selfhost.yml",
                    "-f", "compose.selfhost.identities.yml", "-f", str(layer), "--profile", "migrate"]
         process_env = {**env, "J2M_DATABASE_CA_FILE": str(ca_override or ca)}
@@ -151,8 +155,8 @@ def exercise_application_schema(network, run, sql, connection, pool_control, ca)
         app("python", "-c", probe, role=role, database=database)
 
     for i, head in enumerate(("9d0e1f2a3b4c", "c3d4e5f6a7b8")):
-        app("flask", "--app", "run.py", "db", "upgrade", head)
         if i == 0:
+            app("flask", "--app", "run.py", "db", "upgrade", head)
             check_tls("j2m_migrator", "full_schema")
             from nginx_recovery_ci import write_certificates
 
@@ -165,6 +169,8 @@ def exercise_application_schema(network, run, sql, connection, pool_control, ca)
             if not denied.returncode or b"certificate verify failed" not in denied.stderr.lower():
                 raise RuntimeError("Connection accepted an unrelated CA or failed for the wrong reason")
             app("python", "-c", SEED)
+        else:
+            app("python", "-m", "scripts.run_certified_migration")
         sql(BACKUP_GRANTS, database="full_schema").check_returncode()
         assert sql("SELECT version_num FROM alembic_version",
                    database="full_schema").stdout.strip() == head.encode()
