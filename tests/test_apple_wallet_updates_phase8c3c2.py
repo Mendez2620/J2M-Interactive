@@ -157,6 +157,14 @@ class AppleWalletUpdatesPhase8C3C2TestCase(unittest.TestCase):
         )
         self.assertEqual(public_response.status_code, 503)
 
+    def test_disabled_balance_update_does_not_query_pass_state(self):
+        with patch.dict(self.app.config, {"APPLE_WALLET_MODE": "disabled"}), patch(
+            "app.services.apple_wallet_update_service.ApplePassCredential",
+        ) as credentials:
+            for reason in ("balance", "reward"):
+                self.assertEqual(enqueue_apple_pass_update(object(), reason=reason), 0)
+            credentials.query.filter_by.assert_not_called()
+
     def test_registration_rejects_cross_tenant_and_invalid_input(self):
         url = f"/api/apple/v1/devices/device_library_new/registrations/{self.service.pass_type_id}/{self.credential.serial_number}"
         self.assertEqual(self.client.post(url, json=[], headers=self.auth()).status_code, 400)

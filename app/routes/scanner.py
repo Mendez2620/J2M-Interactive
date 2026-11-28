@@ -273,8 +273,7 @@ def _process_for_staff(staff, data, request_id):
     if action.startswith("earn") and business.loyalty_type == "stamps" and customer.current_stamps >= business.stamps_reward_limit:
         try:
             from app.services.reward_notification_service import RewardNotificationService
-            RewardNotificationService().send_reward_ready(customer, business)
-            reward_notified = True
+            reward_notified = RewardNotificationService().send_reward_ready(customer, business)
         except Exception:
             current_app.logger.exception("Reward notification failed after transaction %s", tx.id)
     return jsonify({"status": "success", "customer": {"id": customer.id, "full_name": customer.full_name,

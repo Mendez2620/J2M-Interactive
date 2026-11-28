@@ -752,7 +752,7 @@ class SelfHostInfrastructureTestCase(unittest.TestCase):
         self.assertIn('"postgres:17-alpine"', backup_script)
         self.assertIn("/etc/ssl/certs/ca-certificates.crt", backup_script)
         self.assertIn("pg_restore --list", backup_script)
-        self.assertIn("grep -v supabase_vault", backup_script)
+        self.assertIn("EXTENSION - supabase_vault|", backup_script)
         self.assertIn('"--exclude-schema=vault"', backup_script)
         self.assertIn("backup.failed", runner)
         self.assertIn("cloud.failed", cloud)

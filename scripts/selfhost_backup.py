@@ -268,20 +268,21 @@ def exclusive_lock(path: Path) -> Iterator[None]:
     handle = path.open("a+b")
     locked = False
     try:
-        if handle.seek(0, os.SEEK_END) == 0:
-            handle.write(b"0")
-            handle.flush()
-        handle.seek(0)
-        if os.name == "nt":
-            import msvcrt
-            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        locked = True
+        try:
+            if handle.seek(0, os.SEEK_END) == 0:
+                handle.write(b"0")
+                handle.flush()
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locked = True
+        except OSError as exc:
+            raise RuntimeError("Ya existe una operación de respaldo activa.") from exc
         yield
-    except OSError as exc:
-        raise RuntimeError("Ya existe una operación de respaldo activa.") from exc
     finally:
         if locked:
             if os.name == "nt":
@@ -1198,6 +1199,12 @@ class RestoreReport:
     staff: int
     transactions: int
 
+    ledger_entries: int | None = None
+    wallet_sync_jobs: int | None = None
+    media_files_verified: int | None = None
+    ledger_customers_verified: int | None = None
+    ledger_customers_without_baseline: int | None = None
+
 
 def _psql(name: str, sql: str, timeout: int = 30) -> str:
     result = subprocess.run(["docker", "exec", name, "psql", "-U", "j2m_restore", "-d",
@@ -1217,40 +1224,106 @@ def _wait_postgres(name: str) -> None:
     raise RuntimeError("PostgreSQL aislado no quedó disponible.")
 
 
+class RestoreProcessError(RuntimeError):
+    def __init__(self, stage, category, *, exit_code=None, stream_finished=False, threads_finished=None):
+        self.stage = stage
+        self.category = category
+        self.exit_code = exit_code
+        self.stream_finished = stream_finished
+        self.threads_finished = threads_finished
+        super().__init__(f"{stage}: {category}")
+
+
+def _restore_error_categories(chunk):
+    patterns = {
+        "extension": rb"extension.{0,180}(?:not available|does not exist)|extension control file",
+        "role": rb"role.{0,180}(?:does not exist|permission denied)",
+        "rls_policy": rb"row.level security|(?:create|alter) policy",
+        "dependency": rb"(?:schema|relation|function|type).{0,180}does not exist|depend",
+        "version": rb"unsupported version|version mismatch",
+        "archive_format": rb"not a valid archive|not appear to be a valid archive|invalid archive",
+        "space": rb"no space left|disk full",
+        "memory": rb"out of memory|cannot allocate memory",
+    }
+    return {category for category, pattern in patterns.items()
+            if re.search(pattern, chunk, re.IGNORECASE)}
+
+
+def _restore_process(command, archive, key, *, stage, timeout):
+    """Feed authenticated bytes and consume diagnostics without retaining raw output."""
+    expiry = time.monotonic() + timeout
+    proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.PIPE)
+    categories = set()
+    failures = []
+    stream_finished = threading.Event()
+
+    def feed():
+        try:
+            with proc.stdin, archive.open("rb") as source:
+                decrypt_stream(source, proc.stdin, key)
+            stream_finished.set()
+        except Exception as exc:
+            failures.append("broken_pipe" if isinstance(exc, BrokenPipeError) else "stream")
+
+    def drain():
+        tail = b""
+        try:
+            with proc.stderr:
+                while chunk := proc.stderr.read1(4096):
+                    window = tail + chunk
+                    categories.update(_restore_error_categories(window))
+                    tail = window[-512:]
+        except OSError:
+            failures.append("diagnostic_stream")
+
+    threads = [threading.Thread(target=drain, daemon=True), threading.Thread(target=feed, daemon=True)]
+    try:
+        for worker in threads:
+            worker.start()
+        status = proc.wait(timeout=max(0.01, expiry - time.monotonic()))
+        for worker in threads:
+            worker.join(timeout=max(0, expiry - time.monotonic()))
+        if any(worker.is_alive() for worker in threads):
+            raise RestoreProcessError(stage, "timeout")
+        if status or failures:
+            raise RestoreProcessError(stage, ",".join(sorted(categories)) or (
+                failures[0] if failures else "unclassified"))
+    except subprocess.TimeoutExpired:
+        raise RestoreProcessError(stage, "timeout") from None
+    except RestoreProcessError:
+        raise
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+        for worker in threads:
+            if worker.ident is not None and worker.is_alive():
+                worker.join(timeout=0.2)
+        error = sys.exc_info()[1]
+        if isinstance(error, RestoreProcessError):
+            error.exit_code = proc.returncode
+            error.stream_finished = stream_finished.is_set()
+            error.threads_finished = all(not worker.is_alive() for worker in threads)
+
+
 def _restore_database_stream(backup: Path, key: bytes, name: str, timeout: int) -> None:
-    listing = subprocess.Popen(
+    _restore_process(
         ["docker", "exec", "-i", name, "sh", "-eu", "-c",
          "pg_restore --list > /tmp/all.list; "
-         "grep -v supabase_vault /tmp/all.list > /tmp/j2m-restore.list; "
+         "grep -vE '^[0-9]+; [0-9]+ [0-9]+ (EXTENSION - supabase_vault|"
+         "COMMENT - EXTENSION supabase_vault)[[:space:]]*$' /tmp/all.list > /tmp/j2m-restore.list; "
          "test -s /tmp/j2m-restore.list"],
-        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-    )
-    assert listing.stdin is not None
-    with backup.open("rb") as encrypted:
-        decrypt_stream(encrypted, listing.stdin, key)
-    listing.stdin.close()
-    if listing.wait(timeout=30) != 0:
-        raise RuntimeError("No fue posible preparar la lista de restauración aislada.")
-    restore = subprocess.Popen(["docker", "exec", "-i", name, "pg_restore",
-                                "--exit-on-error", "--no-owner", "--no-acl",
-                                "--exclude-schema=vault", "--use-list=/tmp/j2m-restore.list",
-                                "-U", "j2m_restore", "-d", "j2m_restore"],
-                               stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-                               stderr=subprocess.PIPE)
-    assert restore.stdin is not None
-    timer = threading.Timer(timeout, restore.kill)
-    timer.start()
-    try:
-        with backup.open("rb") as encrypted:
-            decrypt_stream(encrypted, restore.stdin, key)
-        restore.stdin.close()
-        if restore.wait(timeout=10) != 0:
-            raise RuntimeError("pg_restore falló en la base aislada.")
-    finally:
-        timer.cancel()
-        if restore.poll() is None:
-            restore.kill()
-            restore.wait()
+        backup, key, stage="archive_list", timeout=min(30, timeout))
+    _restore_process(
+        ["docker", "exec", "-i", name, "pg_restore",
+         "--exit-on-error", "--no-owner", "--no-acl",
+         "--exclude-schema=vault", "--use-list=/tmp/j2m-restore.list",
+         "-U", "j2m_restore", "-d", "j2m_restore"],
+        backup, key, stage="pg_restore", timeout=timeout)
 
 
 def _restored_media_references(name: str, archived: set[str]) -> set[str]:
@@ -1346,13 +1419,99 @@ def _integral_components(index: Path, key_file: Path) -> tuple[str, Path, Path]:
     return backup_id, components["postgresql"], components["media"]
 
 
+def verify_transition_accounting(query):
+    """Strict checks for the exact transition restore. No identifiers or values leave the DB."""
+    inconsistent = query("""
+        WITH ordered AS (
+            SELECT l.*, lag(points_after) OVER chain AS previous_points,
+                   lag(stamps_after) OVER chain AS previous_stamps,
+                   row_number() OVER chain AS step,
+                   row_number() OVER (PARTITION BY business_id, customer_id ORDER BY id DESC) AS reverse_step
+              FROM loyalty_ledger_entries l
+              WINDOW chain AS (PARTITION BY business_id, customer_id ORDER BY id)
+        ), broken AS (
+            SELECT 1 FROM transactions t
+            LEFT JOIN loyalty_ledger_entries l ON l.transaction_id=t.id
+            GROUP BY t.id
+            HAVING count(l.id) <> 1
+            UNION ALL
+            -- A new customer can legitimately have no ledger until its first
+            -- operation. A nonzero balance without any chain is not verified.
+            SELECT 1 FROM customers c
+            WHERE (c.current_points IS DISTINCT FROM 0 OR c.current_stamps IS DISTINCT FROM 0)
+              AND NOT EXISTS (SELECT 1 FROM loyalty_ledger_entries l
+                              WHERE (l.business_id,l.customer_id)=(c.business_id,c.id))
+            UNION ALL
+            SELECT 1 FROM ordered l
+            LEFT JOIN customers c ON (c.business_id,c.id)=(l.business_id,l.customer_id)
+            LEFT JOIN transactions t ON t.id=l.transaction_id
+            WHERE c.id IS NULL
+               OR (l.step=1 AND (l.operation_type IS DISTINCT FROM 'baseline'
+                    OR l.baseline_customer_id IS DISTINCT FROM l.customer_id
+                    OR l.transaction_id IS NOT NULL OR l.points_delta IS DISTINCT FROM 0
+                    OR l.stamps_delta IS DISTINCT FROM 0))
+               OR (l.step>1 AND (l.baseline_customer_id IS NOT NULL
+                    OR t.id IS NULL OR t.type NOT IN ('earn','redeem')
+                    OR l.operation_type IS DISTINCT FROM t.type
+                    OR (l.business_id,l.customer_id) IS DISTINCT FROM (t.business_id,t.customer_id)
+                    OR l.stamps_delta IS DISTINCT FROM CASE WHEN t.type='earn' THEN t.stamps_amount ELSE -t.stamps_amount END
+                    OR round(l.points_delta::numeric,6) IS DISTINCT FROM
+                       round((CASE WHEN t.type='earn' THEN t.points_amount ELSE -t.points_amount END)::numeric,6)
+                    OR round(l.points_before::numeric,6) IS DISTINCT FROM round(l.previous_points::numeric,6)
+                    OR l.stamps_before IS DISTINCT FROM l.previous_stamps))
+               OR round(l.points_after::numeric,6) IS DISTINCT FROM
+                  round((l.points_before::numeric+l.points_delta::numeric),6)
+               OR l.stamps_after IS DISTINCT FROM l.stamps_before+l.stamps_delta
+               OR (l.reverse_step=1 AND (
+                   round(l.points_after::numeric,6) IS DISTINCT FROM round(c.current_points::numeric,6)
+                   OR l.stamps_after IS DISTINCT FROM c.current_stamps))
+        )
+        SELECT count(*) FROM broken
+    """)
+    if inconsistent != "0":
+        raise RuntimeError("Movimiento restaurado sin cadena contable verificable.")
+    for table in ("businesses", "customers", "staff", "transactions", "loyalty_ledger_entries",
+                  "google_wallet_sync_jobs"):
+        sequence = query(f"SELECT pg_get_serial_sequence('public.{table}', 'id')")
+        if not re.fullmatch(r"public\.[a-z0-9_]+", sequence):
+            raise RuntimeError("Falta una secuencia esperada del respaldo.")
+        if query(f"SELECT (last_value >= COALESCE((SELECT max(id) FROM public.{table}), 0) "
+                 f"AND (is_called OR last_value > COALESCE((SELECT max(id) FROM public.{table}), 0))) "
+                 f"FROM {sequence}") != "t":
+            raise RuntimeError("Secuencia restaurada no supera los identificadores existentes.")
+
+
 def restore_integral_isolated(index: Path, key_file: Path, image: str,
                               lock_file: Path | None = None,
-                              timeout: int = 900) -> RestoreReport:
-    """Restore one authenticated DB/media set and probe its public media in isolation."""
+                              timeout: int = 900, *,
+                              expected_image_id: str | None = None,
+                              expected_index_sha256: str | None = None,
+                              postgres_image: str = "postgres:17-alpine") -> RestoreReport:
+    """Restore one authenticated DB/media set and probe its public media in isolation.
+
+    Optional identity constraints bind the transition rehearsal to one exact
+    index and immutable Docker image without altering scheduled restore callers.
+    """
     if not re.fullmatch(r"j2m-interactive:[0-9a-f]{40}", image):
         raise ValueError("La imagen debe estar fijada a un SHA aprobado exacto.")
+    if expected_image_id is not None:
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", expected_image_id):
+            raise ValueError("Identidad de imagen inválida.")
+        observed = subprocess.run(
+            ["docker", "image", "inspect", "--format", "{{.Id}}", image],
+            check=True, capture_output=True, text=True, timeout=15
+        ).stdout.strip()
+        if observed != expected_image_id:
+            raise RuntimeError("La imagen no coincide con la identidad aprobada.")
+        # Every subsequent Docker run uses the immutable ID, not the tag.
+        image = expected_image_id
+    if postgres_image != "postgres:17-alpine" and not re.fullmatch(r"sha256:[0-9a-f]{64}", postgres_image):
+        raise ValueError("Identidad PostgreSQL inválida.")
     with exclusive_lock(lock_file or index.parent / ".operations.lock"):
+        if expected_index_sha256 is not None and (
+                not re.fullmatch(r"[0-9a-f]{64}", expected_index_sha256)
+                or not secrets.compare_digest(_hash_file(index), expected_index_sha256)):
+            raise RuntimeError("El índice no coincide con el conjunto aprobado.")
         backup_id, database, media = _integral_components(index, key_file)
         key = load_dpapi_key(key_file)
         suffix = secrets.token_hex(6)
@@ -1370,9 +1529,16 @@ def restore_integral_isolated(index: Path, key_file: Path, image: str,
                             "--network-alias", "postgres", "--tmpfs",
                             "/var/lib/postgresql/data:rw,noexec,nosuid,size=2g",
                             "-e", "POSTGRES_DB=j2m_restore", "-e", "POSTGRES_USER=j2m_restore",
-                            "-e", f"POSTGRES_PASSWORD={password}", "postgres:17-alpine"],
+                            "-e", f"POSTGRES_PASSWORD={password}", postgres_image],
                            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                            timeout=60)
+            if postgres_image != "postgres:17-alpine":
+                observed = subprocess.run(["docker", "inspect", "--format", "{{.Image}}", pg_name],
+                                          check=True, capture_output=True, text=True, timeout=15).stdout.strip()
+                version = subprocess.run(["docker", "exec", pg_name, "postgres", "--version"],
+                                         check=True, capture_output=True, text=True, timeout=15).stdout.strip()
+                if observed != postgres_image or not re.fullmatch(r"postgres \(PostgreSQL\) 17\.[0-9]+(?: .*)?", version):
+                    raise RuntimeError("Identidad o versión PostgreSQL inesperada.")
             _wait_postgres(pg_name)
             _restore_database_stream(database, key, pg_name, timeout)
             archived = set(inspect_media_backup(media, key_file, backup_id))
@@ -1384,19 +1550,18 @@ def restore_integral_isolated(index: Path, key_file: Path, image: str,
                  "no-new-privileges:true", "--mount", f"type=volume,src={volume},dst=/restore",
                  image, "chown", "j2m:j2m", "/restore"], check=True,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
-            importer = subprocess.Popen(
-                ["docker", "run", "--rm", "-i", "--network", "none", "--read-only",
-                 "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
-                 "--mount", f"type=volume,src={volume},dst=/restore", image, "python", "-m",
-                 "scripts.selfhost_backup", "import-media", "--destination", "/restore",
-                 "--backup-id", backup_id], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE)
-            assert importer.stdin is not None
-            with media.open("rb") as source:
-                decrypt_stream(source, importer.stdin, key)
-            importer.stdin.close()
-            if importer.wait(timeout=timeout) != 0:
-                raise RuntimeError("La restauración aislada de medios falló.")
+            import_name = "j2m-restore-import-" + suffix
+            try:
+                _restore_process(
+                    ["docker", "run", "--rm", "--name", import_name, "-i", "--network", "none",
+                     "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
+                     "--mount", f"type=volume,src={volume},dst=/restore", image, "python", "-m",
+                     "scripts.selfhost_backup", "import-media", "--destination", "/restore",
+                     "--backup-id", backup_id],
+                    media, key, stage="media_import", timeout=timeout)
+            finally:
+                subprocess.run(["docker", "rm", "-f", import_name], stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=30)
 
             env = ["-e", "FLASK_ENV=development", "-e",
                    f"DATABASE_URL=postgresql://j2m_restore:{password}@postgres/j2m_restore",
@@ -1438,7 +1603,47 @@ def restore_integral_isolated(index: Path, key_file: Path, image: str,
             counts = [int(v) for v in _psql(pg_name,
                 "SELECT (SELECT count(*) FROM businesses)||','||(SELECT count(*) FROM customers)||','||"
                 "(SELECT count(*) FROM staff)||','||(SELECT count(*) FROM transactions)").split(",")]
-            return RestoreReport(revision, *counts)
+            if expected_index_sha256 is not None and (
+                    not secrets.compare_digest(_hash_file(index), expected_index_sha256)
+                    or not verify_integral_set(index, key_file)):
+                raise RuntimeError("El conjunto cambió durante la restauración.")
+            integrity = [int(value) for value in _psql(pg_name, """
+                SELECT (SELECT count(*) FROM loyalty_ledger_entries)||','||
+                       (SELECT count(*) FROM google_wallet_sync_jobs)||','||
+                       (SELECT count(*) FROM google_wallet_sync_jobs j
+                        LEFT JOIN customers c ON (j.customer_id,j.business_id)=(c.id,c.business_id)
+                        LEFT JOIN transactions t ON (j.transaction_id,j.customer_id,j.business_id)
+                                                   =(t.id,t.customer_id,t.business_id)
+                        WHERE c.id IS NULL OR t.id IS NULL)
+            """).split(",")]
+            if integrity[2]:
+                raise RuntimeError("El respaldo contiene trabajos Wallet con referencias inconsistentes.")
+            verify_ledger = """
+from run import app
+from app.models import Customer
+from app.services.loyalty_transaction_service import reconcile_customer_balance
+with app.app_context():
+    seen = unverified = 0
+    for customer in Customer.query.order_by(Customer.id).yield_per(100):
+        outcome = reconcile_customer_balance(customer)
+        if not outcome["verifiable"]:
+            unverified += 1
+        elif not outcome["consistent"]:
+            raise SystemExit(1)
+        else:
+            seen += 1
+    print(f"{seen},{unverified}")
+"""
+            verdict = subprocess.run(["docker", "exec", app_name, "python", "-c", verify_ledger],
+                                     capture_output=True, text=True, timeout=min(timeout, 180))
+            if verdict.returncode or not re.fullmatch(r"[0-9]+,[0-9]+", verdict.stdout.strip()):
+                raise RuntimeError("La cadena del ledger restaurado no pudo verificarse.")
+            verified, no_baseline = map(int, verdict.stdout.strip().split(","))
+            if verified + no_baseline != counts[1]:
+                raise RuntimeError("El ledger no cubrió el inventario de clientes restaurados.")
+            if expected_index_sha256 is not None:
+                verify_transition_accounting(lambda sql: _psql(pg_name, sql))
+            return RestoreReport(revision, *counts, *integrity[:2], len(authorized), verified, no_baseline)
         finally:
             for container in (app_name, pg_name):
                 subprocess.run(["docker", "rm", "-f", container], stdout=subprocess.DEVNULL,
